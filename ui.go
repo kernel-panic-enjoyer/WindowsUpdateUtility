@@ -22,7 +22,7 @@ var pageTemplate = template.Must(template.New("page").Parse(`<!doctype html>
   <header class="app-header">
     <div>
       <h1>Windows Updater WebUI</h1>
-      <p>{{if .Admin}}Running elevated{{else}}Not elevated{{end}} · State: {{.StateDir}}</p>
+      <p>{{if .Admin}}Running elevated{{else}}Not elevated{{end}} - State: {{.StateDir}}</p>
     </div>
     <div class="header-actions">
       <button id="theme-toggle" type="button">Theme</button>
@@ -265,7 +265,7 @@ const pageJS = `
     }
     var status = $("automation-status");
     if(status){
-      status.textContent = "Startup task: " + (!!data.startup_enabled) + " · Auto task: " + (!!data.auto_task_enabled);
+      status.textContent = "Startup task: " + (!!data.startup_enabled) + " - Auto task: " + (!!data.auto_task_enabled);
     }
   }
   function packageNameCell(pkg){
@@ -361,7 +361,10 @@ const pageJS = `
     if(!panel){ return; }
     panel.classList.remove("hidden");
     var counts = scan.source_counts || {};
-    $("scan-summary").textContent = "Tracked " + (scan.tracked_count || 0) + " apps · Registry " + (counts.registry || 0) + " · Winget " + (counts.winget || 0) + " · Store " + (counts.store || 0);
+    var registryCount = counts.registry || scan.registry_count || 0;
+    var wingetCount = counts.winget || scan.winget_count || 0;
+    var storeCount = counts.store || scan.store_count || 0;
+    $("scan-summary").textContent = "Tracked " + (scan.tracked_count || 0) + " apps - Registry " + registryCount + " - Winget " + wingetCount + " - Store " + storeCount;
     var errors = $("scan-errors");
     var errorText = (scan.errors || []).map(function(item){ return (item.source || "source") + ": " + (item.error || ""); }).join("\n");
     errors.textContent = errorText;

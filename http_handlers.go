@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -75,12 +74,6 @@ type logsAPIResponse struct {
 	LatestID int64      `json:"latest_id"`
 }
 
-type searchAPIResponse struct {
-	Packages       []Package                `json:"packages"`
-	Managers       map[string]ManagerStatus `json:"managers"`
-	CommandResults map[string]CommandResult `json:"command_results"`
-}
-
 type commandAPIResponse struct {
 	Result         *CommandResult `json:"result,omitempty"`
 	RefreshStarted bool           `json:"refresh_started,omitempty"`
@@ -90,10 +83,6 @@ type commandAPIResponse struct {
 type updateAllAPIResponse struct {
 	Results        []UpdateResult `json:"results"`
 	RefreshStarted bool           `json:"refresh_started"`
-}
-
-func validationResult(command string, err error) CommandResult {
-	return CommandResult{Code: 2, Stderr: err.Error(), Command: command}
 }
 
 func commandResponse(result CommandResult) commandAPIResponse {
@@ -117,7 +106,7 @@ func parsePackageAction(r *http.Request, command string) (string, string, *Comma
 	manager := r.Form.Get("manager")
 	id := r.Form.Get("package_id")
 	if err := validateManagerAndID(manager, id); err != nil {
-		result := validationResult(command, err)
+		result := validationCommandResult(command, err)
 		return "", "", &result
 	}
 	return manager, id, nil
@@ -155,12 +144,12 @@ func (app *App) serveAPI(w http.ResponseWriter, r *http.Request) {
 		if !requireMethod(w, r, http.MethodGet) {
 			return
 		}
-		results, managers, commandResults, err := searchPackages(r.URL.Query().Get("q"))
+		lookup, err := searchPackages(r.URL.Query().Get("q"))
 		if err != nil {
 			writeAPIError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, searchAPIResponse{Packages: results, Managers: managers, CommandResults: commandResults})
+		writeJSON(w, http.StatusOK, lookup)
 	case "/api/install":
 		if !requireMethod(w, r, http.MethodPost) {
 			return
@@ -180,7 +169,7 @@ func (app *App) serveAPI(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		manager := r.Form.Get("manager")
 		if !isManagedPackageManager(manager) {
-			result := validationResult("manager install", errors.New("manager must be winget, store, or choco"))
+			result := validationCommandResult("manager install", managerValidationError())
 			writeJSON(w, http.StatusBadRequest, commandResponse(result))
 			return
 		}
@@ -213,7 +202,7 @@ func (app *App) serveAPI(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		for _, key := range r.Form["package_key"] {
 			if err := validatePackageKey(key); err != nil {
-				result := UpdateResult{Key: key, Result: validationResult("update-all", err)}
+				result := UpdateResult{Key: key, Result: validationCommandResult("update-all", err)}
 				writeJSON(w, http.StatusBadRequest, updateAllAPIResponse{Results: []UpdateResult{result}, RefreshStarted: false})
 				return
 			}

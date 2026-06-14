@@ -7,14 +7,15 @@ import (
 	"time"
 )
 
+const (
+	gracefulShutdownTimeout = 5 * time.Second
+	inventoryCacheTTL       = 90 * time.Second
+	statusCacheTTL          = 30 * time.Second
+)
+
 type InventoryResponse struct {
-	Packages       []Package                `json:"packages"`
-	Managers       map[string]ManagerStatus `json:"managers"`
-	CommandResults map[string]CommandResult `json:"command_results"`
-	Scan           map[string]any           `json:"scan"`
-	Loading        bool                     `json:"loading"`
-	UpdatedAt      string                   `json:"updated_at,omitempty"`
-	Error          string                   `json:"error,omitempty"`
+	Inventory
+	AsyncSnapshot
 }
 
 type StatusResponse struct {
@@ -24,9 +25,21 @@ type StatusResponse struct {
 	StartupEnabled  bool                     `json:"startup_enabled"`
 	AutoTaskEnabled bool                     `json:"auto_task_enabled"`
 	Settings        State                    `json:"settings"`
-	Loading         bool                     `json:"loading"`
-	UpdatedAt       string                   `json:"updated_at,omitempty"`
-	Error           string                   `json:"error,omitempty"`
+	AsyncSnapshot
+}
+
+type AsyncSnapshot struct {
+	Loading   bool   `json:"loading"`
+	UpdatedAt string `json:"updated_at,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+func asyncSnapshot(loading bool, fetchedAt time.Time, errText string) AsyncSnapshot {
+	snapshot := AsyncSnapshot{Loading: loading, Error: errText}
+	if !fetchedAt.IsZero() {
+		snapshot.UpdatedAt = fetchedAt.UTC().Truncate(time.Second).Format(time.RFC3339)
+	}
+	return snapshot
 }
 
 type App struct {
@@ -51,7 +64,7 @@ func (app *App) requestShutdown(source string) {
 		if app.server == nil {
 			return
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
 		defer cancel()
 		if err := app.server.Shutdown(ctx); err != nil {
 			appLog("Graceful shutdown failed: %s; forcing server close.", err)
@@ -62,7 +75,7 @@ func (app *App) requestShutdown(source string) {
 
 func (app *App) refreshInventory(force bool) {
 	app.mu.Lock()
-	stale := app.inventoryFetchedAt.IsZero() || time.Since(app.inventoryFetchedAt) > 90*time.Second
+	stale := app.inventoryFetchedAt.IsZero() || time.Since(app.inventoryFetchedAt) > inventoryCacheTTL
 	if app.inventoryLoading {
 		if force {
 			app.inventoryQueued = true
@@ -111,12 +124,8 @@ func (app *App) inventorySnapshot() InventoryResponse {
 	app.mu.RUnlock()
 
 	response := InventoryResponse{
-		Packages:       inventory.Packages,
-		Managers:       inventory.Managers,
-		CommandResults: inventory.CommandResults,
-		Scan:           inventory.Scan,
-		Loading:        loading,
-		Error:          errText,
+		Inventory:     inventory,
+		AsyncSnapshot: asyncSnapshot(loading, fetchedAt, errText),
 	}
 	if response.Managers == nil {
 		response.Managers = map[string]ManagerStatus{}
@@ -124,26 +133,16 @@ func (app *App) inventorySnapshot() InventoryResponse {
 	if response.CommandResults == nil {
 		response.CommandResults = map[string]CommandResult{}
 	}
-	if response.Scan == nil {
+	if fetchedAt.IsZero() {
 		state := loadState()
-		sourceCounts := scanSourceCounts(state.WingetApps)
-		response.Scan = map[string]any{
-			"last_scan_at":   state.LastScanAt,
-			"tracked_count":  len(state.RegistryApps) + len(state.WingetApps),
-			"registry_count": len(state.RegistryApps),
-			"winget_count":   sourceCounts["winget"],
-			"store_count":    sourceCounts["store"],
-		}
-	}
-	if !fetchedAt.IsZero() {
-		response.UpdatedAt = fetchedAt.UTC().Truncate(time.Second).Format(time.RFC3339)
+		response.Scan = inventoryScanSummary(state, scanSourceCounts(state.WingetApps))
 	}
 	return response
 }
 
 func (app *App) refreshStatus(force bool) {
 	app.mu.Lock()
-	stale := app.statusFetchedAt.IsZero() || time.Since(app.statusFetchedAt) > 30*time.Second
+	stale := app.statusFetchedAt.IsZero() || time.Since(app.statusFetchedAt) > statusCacheTTL
 	if app.statusLoading || (!force && !stale) {
 		app.mu.Unlock()
 		return
@@ -204,10 +203,6 @@ func (app *App) statusSnapshot() StatusResponse {
 	if status.Managers == nil {
 		status.Managers = map[string]ManagerStatus{}
 	}
-	status.Loading = loading
-	status.Error = errText
-	if !fetchedAt.IsZero() {
-		status.UpdatedAt = fetchedAt.UTC().Truncate(time.Second).Format(time.RFC3339)
-	}
+	status.AsyncSnapshot = asyncSnapshot(loading, fetchedAt, errText)
 	return status
 }

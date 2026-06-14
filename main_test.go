@@ -37,7 +37,7 @@ func TestParseChocoOutdated(t *testing.T) {
 
 func TestParseLocalizedWingetTable(t *testing.T) {
 	output := `
-Name      ID              Version  Verfügbar Quelle
+Name      ID              Version  Verfuegbar Quelle
 ---------------------------------------------------
 Git       Git.Git         2.53.0   2.54.0    winget
 Zed       Zed.Zed         0.233.10           winget
@@ -56,9 +56,9 @@ Zed       Zed.Zed         0.233.10           winget
 
 func TestParseWingetSearchTableWithMatchColumn(t *testing.T) {
 	output := `
-Name                         ID                                 Version   Übereinstimmung Quelle
+Name                         ID                                 Version   Uebereinstimmung Quelle
 -----------------------------------------------------------------------------------------------
-DragonframeLicenseManager    DZEDSystems.DragonframeLicenseMa… 3.0.3                    winget
+DragonframeLicenseManager    DZEDSystems.DragonframeLicenseMa... 3.0.3                    winget
 Zed                          ZedIndustries.Zed                  1.6.3     Tag: zed       winget
 `
 	got := parseWingetTable(output)
@@ -124,7 +124,7 @@ func TestMergeWingetExportWithTruncatedTableIDs(t *testing.T) {
 		{ID: "ZedIndustries.Zed", Name: "ZedIndustries.Zed", Version: "1.5.4", Manager: "winget", Source: "winget"},
 	}
 	table := []Package{
-		{ID: "Microsoft.VCRedist.2015+.x…", Name: "Microsoft Visual C++ 2015-2026 Redistributable", Version: "14.51.36231.0", AvailableVersion: "14.51.36247.0", Manager: "winget", Source: "winget"},
+		{ID: "Microsoft.VCRedist.2015+.x...", Name: "Microsoft Visual C++ 2015-2026 Redistributable", Version: "14.51.36231.0", AvailableVersion: "14.51.36247.0", Manager: "winget", Source: "winget"},
 		{ID: "ZedIndustries.Zed", Name: "Zed", Version: "1.5.4", AvailableVersion: "1.6.3", Manager: "winget", Source: "winget"},
 	}
 	got := mergeWingetExportWithTable(exported, table)
@@ -270,6 +270,21 @@ func TestIsStoreCommand(t *testing.T) {
 }
 
 func TestStorePackageKeysAreValid(t *testing.T) {
+	for rank, manager := range managedPackageManagers {
+		if !isManagedPackageManager(manager) {
+			t.Fatalf("%q should be accepted by manager validation", manager)
+		}
+		if managerSortRank(manager) != rank {
+			t.Fatalf("%q sort rank should be %d, got %d", manager, rank, managerSortRank(manager))
+		}
+	}
+	if isManagedPackageManager("npm") {
+		t.Fatal("unexpected manager accepted")
+	}
+	if managerValidationError().Error() != managerValidationMessage {
+		t.Fatalf("unexpected manager validation message: %q", managerValidationError().Error())
+	}
+
 	manager, id, err := splitPackageKey("store:9NBLGGH5R558")
 	if err != nil {
 		t.Fatal(err)
@@ -346,9 +361,9 @@ Codex  OpenAI.Codex  1.0.0    1.1.0
 func TestParseStoreSearchSkipsBannerLines(t *testing.T) {
 	output := `
 Application Compatibility Enhancements
-— Search Results for
+-- Search Results for
 "Application Compatibility Enhancements"
-──────────────────────────────────────
+--------------------------------------
 Name                                    ID                                     Version
 ------------------------------------------------------------------------------------
 Application Compatibility Enhancements  Microsoft.ApplicationCompatibility     1.2511.9.0
@@ -533,7 +548,7 @@ func TestResolveStoreAppxPackagesInvalidatesBadSearchBannerCache(t *testing.T) {
 	cacheKey := strings.ToLower(appxID)
 	state.StoreResolveCache[cacheKey] = StoreResolveCacheEntry{
 		AppXVersion: "1.2511.9.0",
-		StoreID:     "— Search Results for \"Application Compatibility Enhancements\"",
+		StoreID:     "Search Results for \"Application Compatibility Enhancements\"",
 		StoreName:   "Application Compatibility Enhancements",
 		Resolved:    true,
 		ResolvedAt:  utcNow(),
@@ -557,19 +572,72 @@ func TestResolveStoreAppxPackagesInvalidatesBadSearchBannerCache(t *testing.T) {
 	if calls != 1 || !changed {
 		t.Fatalf("expected stale cache to be invalidated and searched, calls=%d changed=%t", calls, changed)
 	}
-	if got[0].ID != "Microsoft.ApplicationCompatibility" || got[0].ID == "— Search Results for \"Application Compatibility Enhancements\"" {
+	if got[0].ID != "Microsoft.ApplicationCompatibility" || got[0].ID == "Search Results for \"Application Compatibility Enhancements\"" {
 		t.Fatalf("bad cached banner target was not replaced: %#v", got[0])
 	}
 }
 
 func TestScanSourceCountsSeparatesStoreApps(t *testing.T) {
-	counts := scanSourceCounts(map[string]ScannedApp{
-		"winget:git.git":     {Source: "winget"},
-		"store:9nblggh5r558": {Source: "store"},
-		"store:legacy":       {Source: "msstore"},
-	})
+	state := State{
+		LastScanAt: "2026-06-14T12:00:00Z",
+		RegistryApps: map[string]ScannedApp{
+			"registry:app": {Source: "registry"},
+		},
+		WingetApps: map[string]ScannedApp{
+			"winget:git.git":     {Source: "winget"},
+			"store:9nblggh5r558": {Source: "store"},
+			"store:legacy":       {Source: "msstore"},
+		},
+	}
+	counts := scanSourceCounts(state.WingetApps)
 	if counts["winget"] != 1 || counts["store"] != 2 {
 		t.Fatalf("unexpected scan source counts: %#v", counts)
+	}
+
+	summary := inventoryScanSummary(state, counts)
+	if summary.LastScanAt != state.LastScanAt || summary.TrackedCount != 4 || summary.RegistryCount != 1 || summary.WingetCount != 1 || summary.StoreCount != 2 {
+		t.Fatalf("unexpected inventory scan summary: %#v", summary)
+	}
+}
+
+func TestInventoryResponseFlattensInventoryJSON(t *testing.T) {
+	response := InventoryResponse{
+		Inventory: Inventory{
+			PackageLookup: PackageLookup{
+				Packages: []Package{{Name: "Git", ID: "Git.Git", Manager: managerWinget}},
+				Managers: map[string]ManagerStatus{
+					managerWinget: {Available: true},
+				},
+				CommandResults: map[string]CommandResult{
+					"winget_list": {OK: true},
+				},
+			},
+			Scan: InventoryScanSummary{TrackedCount: 1},
+		},
+		AsyncSnapshot: AsyncSnapshot{Loading: true},
+	}
+
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"packages", "managers", "command_results", "scan", "loading"} {
+		if _, ok := payload[key]; !ok {
+			t.Fatalf("missing flattened inventory response key %q in %s", key, encoded)
+		}
+	}
+	if _, ok := payload["Inventory"]; ok {
+		t.Fatalf("embedded Inventory should not be encoded as a nested field: %s", encoded)
+	}
+	if _, ok := payload["PackageLookup"]; ok {
+		t.Fatalf("embedded PackageLookup should not be encoded as a nested field: %s", encoded)
+	}
+	if _, ok := payload["AsyncSnapshot"]; ok {
+		t.Fatalf("embedded AsyncSnapshot should not be encoded as a nested field: %s", encoded)
 	}
 }
 
@@ -696,103 +764,53 @@ func TestMergeCommandResultsKeepsPrimaryFailureContext(t *testing.T) {
 	}
 }
 
-func TestAPIUpdateRejectsInvalidInput(t *testing.T) {
-	app := &App{token: "test-token"}
-	request := httptest.NewRequest(http.MethodPost, "/api/update?token=test-token", strings.NewReader("manager=invalid&package_id=Git.Git"))
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	response := httptest.NewRecorder()
+func TestAPIRejectsInvalidRequests(t *testing.T) {
+	cases := []struct {
+		name       string
+		path       string
+		body       string
+		wantResult bool
+		wantText   string
+	}{
+		{"update", "/api/update?token=test-token", "manager=invalid&package_id=Git.Git", true, managerValidationMessage},
+		{"install", "/api/install?token=test-token", "manager=invalid&package_id=Git.Git", true, managerValidationMessage},
+		{"manager install", "/api/managers/install?token=test-token", "manager=invalid", true, managerValidationMessage},
+		{"update all", "/api/update-all?token=test-token", "package_key=not-a-valid-key", false, "package key must be manager:id"},
+	}
 
-	app.serveHTTP(response, request)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			app := &App{token: "test-token"}
+			request := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			response := httptest.NewRecorder()
 
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("expected bad request, got %d: %s", response.Code, response.Body.String())
-	}
-	var decoded struct {
-		Result         CommandResult `json:"result"`
-		RefreshStarted bool          `json:"refresh_started"`
-	}
-	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
-		t.Fatal(err)
-	}
-	if decoded.RefreshStarted {
-		t.Fatal("invalid update should not start an inventory refresh")
-	}
-	if decoded.Result.Code != 2 || !strings.Contains(decoded.Result.Stderr, "manager must be winget, store, or choco") {
-		t.Fatalf("unexpected validation result: %#v", decoded.Result)
-	}
-}
+			app.serveHTTP(response, request)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("expected bad request, got %d: %s", response.Code, response.Body.String())
+			}
 
-func TestAPIInstallRejectsInvalidInput(t *testing.T) {
-	app := &App{token: "test-token"}
-	request := httptest.NewRequest(http.MethodPost, "/api/install?token=test-token", strings.NewReader("manager=invalid&package_id=Git.Git"))
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	response := httptest.NewRecorder()
-
-	app.serveHTTP(response, request)
-
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("expected bad request, got %d: %s", response.Code, response.Body.String())
-	}
-	var decoded struct {
-		Result         CommandResult `json:"result"`
-		RefreshStarted bool          `json:"refresh_started"`
-	}
-	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
-		t.Fatal(err)
-	}
-	if decoded.RefreshStarted {
-		t.Fatal("invalid install should not start an inventory refresh")
-	}
-	if decoded.Result.Code != 2 || !strings.Contains(decoded.Result.Stderr, "manager must be winget, store, or choco") {
-		t.Fatalf("unexpected validation result: %#v", decoded.Result)
-	}
-}
-
-func TestAPIManagerInstallRejectsInvalidManager(t *testing.T) {
-	app := &App{token: "test-token"}
-	request := httptest.NewRequest(http.MethodPost, "/api/managers/install?token=test-token", strings.NewReader("manager=invalid"))
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	response := httptest.NewRecorder()
-
-	app.serveHTTP(response, request)
-
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("expected bad request, got %d: %s", response.Code, response.Body.String())
-	}
-	var decoded struct {
-		Result CommandResult `json:"result"`
-	}
-	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
-		t.Fatal(err)
-	}
-	if decoded.Result.Code != 2 || !strings.Contains(decoded.Result.Stderr, "manager must be winget, store, or choco") {
-		t.Fatalf("unexpected validation result: %#v", decoded.Result)
-	}
-}
-
-func TestAPIUpdateAllRejectsBadPackageKey(t *testing.T) {
-	app := &App{token: "test-token"}
-	request := httptest.NewRequest(http.MethodPost, "/api/update-all?token=test-token", strings.NewReader("package_key=not-a-valid-key"))
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	response := httptest.NewRecorder()
-
-	app.serveHTTP(response, request)
-
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("expected bad request, got %d: %s", response.Code, response.Body.String())
-	}
-	var decoded struct {
-		Results        []UpdateResult `json:"results"`
-		RefreshStarted bool           `json:"refresh_started"`
-	}
-	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
-		t.Fatal(err)
-	}
-	if decoded.RefreshStarted {
-		t.Fatal("invalid update-all request should not start an inventory refresh")
-	}
-	if len(decoded.Results) != 1 || decoded.Results[0].Result.Code != 2 {
-		t.Fatalf("unexpected update-all validation result: %#v", decoded.Results)
+			var decoded struct {
+				Result         *CommandResult `json:"result"`
+				Results        []UpdateResult `json:"results"`
+				RefreshStarted bool           `json:"refresh_started"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if decoded.RefreshStarted {
+				t.Fatal("invalid request should not start an inventory refresh")
+			}
+			if tc.wantResult {
+				if decoded.Result == nil || decoded.Result.Code != 2 || !strings.Contains(decoded.Result.Stderr, tc.wantText) {
+					t.Fatalf("unexpected validation result: %#v", decoded.Result)
+				}
+				return
+			}
+			if len(decoded.Results) != 1 || decoded.Results[0].Result.Code != 2 || !strings.Contains(decoded.Results[0].Result.Stderr, tc.wantText) {
+				t.Fatalf("unexpected update-all validation result: %#v", decoded.Results)
+			}
+		})
 	}
 }
 

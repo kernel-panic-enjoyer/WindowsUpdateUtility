@@ -27,6 +27,10 @@ type CommandResult struct {
 	Command string `json:"command"`
 }
 
+func validationCommandResult(command string, err error) CommandResult {
+	return CommandResult{Code: 2, Stderr: err.Error(), Command: command}
+}
+
 type LogEntry struct {
 	ID        int64  `json:"id"`
 	Timestamp string `json:"timestamp"`
