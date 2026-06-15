@@ -138,7 +138,7 @@ func setAutoUpdate(global *bool, packageKeys []string, packageEnabled *bool) (St
 	if packageEnabled != nil {
 		for _, key := range packageKeys {
 			if _, _, err := splitPackageKey(key); err == nil {
-				state.AutoUpdatePackages[key] = *packageEnabled
+				state.AutoUpdatePackages[normalizeAutoUpdatePackageKey(key)] = *packageEnabled
 			}
 		}
 	}
@@ -165,6 +165,13 @@ func runAutoUpdate() []UpdateResult {
 		if enabled {
 			selected = append(selected, key)
 		}
+	}
+	if len(selected) == 0 {
+		appLog("Scheduled auto-update skipped because no packages are opted in.")
+		state.LastAutoUpdateAt = utcNow()
+		state.LastAutoUpdateResults = nil
+		_ = saveState(state)
+		return nil
 	}
 	results := updateAll(selected)
 	state.LastAutoUpdateAt = utcNow()

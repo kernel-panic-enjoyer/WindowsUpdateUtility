@@ -92,6 +92,25 @@ PowerToys         Microsoft.PowerToys      0.95.0             winget
 	}
 }
 
+func TestSearchQueryVariantsNormalizePunctuation(t *testing.T) {
+	cases := map[string][]string{
+		"github-cli": {"github-cli", "github cli"},
+		"GitHub.cli": {"GitHub.cli", "GitHub cli"},
+		"gh":         {"gh"},
+	}
+	for query, want := range cases {
+		got := searchQueryVariants(query)
+		if len(got) != len(want) {
+			t.Fatalf("searchQueryVariants(%q) = %#v, want %#v", query, got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("searchQueryVariants(%q) = %#v, want %#v", query, got, want)
+			}
+		}
+	}
+}
+
 func TestParseWingetExport(t *testing.T) {
 	output := `{
   "Sources": [{
@@ -137,6 +156,25 @@ func TestMergeWingetExportWithTruncatedTableIDs(t *testing.T) {
 	}
 	if byID["ZedIndustries.Zed"].Name != "Zed" {
 		t.Fatalf("display name did not merge: %#v", byID["ZedIndustries.Zed"])
+	}
+}
+
+func TestWingetTruncatedIDRecognizesUnicodeEllipsis(t *testing.T) {
+	cases := []struct {
+		name      string
+		truncated string
+	}{
+		{"unicode", "DragonframeLicenseMa\u2026"},
+		{"mojibake", "DragonframeLicenseMa\u00e2\u20ac\u00a6"},
+		{"ascii", "DragonframeLicenseMa..."},
+	}
+	for _, tc := range cases {
+		if !isTruncatedID(tc.truncated) {
+			t.Fatalf("expected %s ellipsis ID to be treated as truncated", tc.name)
+		}
+		if !wingetIDMatches("DragonframeLicenseManager.Full.ID", tc.truncated) {
+			t.Fatalf("expected %s ellipsis ID to match full exported ID", tc.name)
+		}
 	}
 }
 
@@ -189,6 +227,119 @@ func TestStateDirOverride(t *testing.T) {
 	}
 	if got != dir {
 		t.Fatalf("expected override %s, got %s", dir, got)
+	}
+}
+
+func TestLoadStateMigratesStoreAppsOutOfWingetBucket(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("UPDATER_STATE_DIR", dir)
+	raw := `{
+  "created_at": "2026-06-14T12:00:00Z",
+  "updated_at": "2026-06-14T12:00:00Z",
+  "auto_update_packages": {},
+  "registry_apps": {},
+  "winget_apps": {
+    "winget:git.git": {"key":"winget:git.git","name":"Git","source":"winget","manager":"winget"},
+    "store:openai.codex": {"key":"store:openai.codex","name":"Codex","source":"store","manager":"store"}
+  },
+  "store_resolve_cache": {},
+  "theme": "dark"
+}`
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	state := loadState()
+	if _, ok := state.WingetApps["store:openai.codex"]; ok {
+		t.Fatalf("store app was not migrated out of winget bucket: %#v", state.WingetApps)
+	}
+	if state.StoreApps["store:openai.codex"].Name != "Codex" {
+		t.Fatalf("store app missing after migration: %#v", state.StoreApps)
+	}
+}
+
+func TestLoadStateNormalizesVersionedStoreAppKeys(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("UPDATER_STATE_DIR", dir)
+	raw := `{
+  "created_at": "2026-06-14T12:00:00Z",
+  "updated_at": "2026-06-14T12:00:00Z",
+  "auto_update_packages": {},
+  "registry_apps": {},
+  "winget_apps": {},
+  "store_apps": {
+    "store:openai.codex_1.0.0.0_x64__abc123": {
+      "key": "store:openai.codex_1.0.0.0_x64__abc123",
+      "name": "Codex",
+      "source": "store",
+      "manager": "store",
+      "package_id": "OpenAI.Codex_1.0.0.0_x64__abc123",
+      "first_seen": "2026-06-14T12:00:00Z"
+    }
+  },
+  "store_resolve_cache": {},
+  "theme": "dark"
+}`
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	state := loadState()
+	if _, ok := state.StoreApps["store:openai.codex_1.0.0.0_x64__abc123"]; ok {
+		t.Fatalf("versioned store key was not normalized: %#v", state.StoreApps)
+	}
+	app := state.StoreApps["store:openai.codex"]
+	if app.PackageID != "OpenAI.Codex" || app.FirstSeen != "2026-06-14T12:00:00Z" {
+		t.Fatalf("unexpected normalized store app: %#v", app)
+	}
+}
+
+func TestLoadStateNormalizesStoreAutoUpdateKeys(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("UPDATER_STATE_DIR", dir)
+	raw := `{
+  "created_at": "2026-06-14T12:00:00Z",
+  "updated_at": "2026-06-14T12:00:00Z",
+  "auto_update_packages": {
+    "store:OpenAI.Codex_1.0.0.0_x64__abc123": true,
+    "winget:Git.Git": true
+  },
+  "registry_apps": {},
+  "winget_apps": {},
+  "store_apps": {},
+  "store_resolve_cache": {},
+  "theme": "dark"
+}`
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	state := loadState()
+	if !state.AutoUpdatePackages["store:OpenAI.Codex"] || !state.AutoUpdatePackages["winget:Git.Git"] {
+		t.Fatalf("auto-update keys were not normalized correctly: %#v", state.AutoUpdatePackages)
+	}
+	if state.AutoUpdatePackages["store:OpenAI.Codex_1.0.0.0_x64__abc123"] {
+		t.Fatalf("versioned Store auto-update key should not remain: %#v", state.AutoUpdatePackages)
+	}
+}
+
+func TestRunAutoUpdateSkipsWhenNoPackagesOptedIn(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("UPDATER_STATE_DIR", dir)
+	state := defaultState()
+	state.AutoUpdateGlobal = true
+	if err := saveState(state); err != nil {
+		t.Fatal(err)
+	}
+
+	results := runAutoUpdate()
+	if len(results) != 0 {
+		t.Fatalf("expected no auto-update results without opted-in packages, got %#v", results)
+	}
+
+	updated := loadState()
+	if updated.LastAutoUpdateAt == "" {
+		t.Fatal("expected skipped auto-update to record a run timestamp")
 	}
 }
 
@@ -251,6 +402,40 @@ func TestWingetTransientFailureDetection(t *testing.T) {
 	}
 }
 
+func TestDetectManagersReturnsCachedCopy(t *testing.T) {
+	invalidateManagerDetectionCache()
+	t.Cleanup(invalidateManagerDetectionCache)
+	managerDetectionCache.mu.Lock()
+	managerDetectionCache.cached = map[string]ManagerStatus{
+		managerStore: {Available: true, Version: "cached"},
+	}
+	managerDetectionCache.fetchedAt = time.Now()
+	managerDetectionCache.inFlight = nil
+	managerDetectionCache.mu.Unlock()
+
+	got := detectManagers()
+	got[managerStore] = ManagerStatus{Available: false}
+	again := detectManagers()
+	if !again[managerStore].Available || again[managerStore].Version != "cached" {
+		t.Fatalf("cached manager status should be copied defensively, got %#v", again)
+	}
+}
+
+func TestInvalidateManagerDetectionCache(t *testing.T) {
+	managerDetectionCache.mu.Lock()
+	managerDetectionCache.cached = map[string]ManagerStatus{managerStore: {Available: true}}
+	managerDetectionCache.fetchedAt = time.Now()
+	managerDetectionCache.mu.Unlock()
+
+	invalidateManagerDetectionCache()
+
+	managerDetectionCache.mu.Lock()
+	defer managerDetectionCache.mu.Unlock()
+	if managerDetectionCache.cached != nil || !managerDetectionCache.fetchedAt.IsZero() {
+		t.Fatalf("manager detection cache was not cleared: %#v at %s", managerDetectionCache.cached, managerDetectionCache.fetchedAt)
+	}
+}
+
 func TestIsStoreCommand(t *testing.T) {
 	cases := []struct {
 		args []string
@@ -265,6 +450,27 @@ func TestIsStoreCommand(t *testing.T) {
 	for _, tc := range cases {
 		if got := isStoreCommand(tc.args); got != tc.want {
 			t.Fatalf("isStoreCommand(%#v) = %t, want %t", tc.args, got, tc.want)
+		}
+	}
+}
+
+func TestPackageManagerMutationCommandDetection(t *testing.T) {
+	cases := []struct {
+		args []string
+		want bool
+	}{
+		{[]string{"store", "search", "Codex"}, false},
+		{[]string{"store", "install", "OpenAI.Codex"}, true},
+		{[]string{"cmd.exe", "/d", "/c", "store", "updates"}, true},
+		{[]string{"winget", "list"}, false},
+		{[]string{"winget", "upgrade", "--all"}, true},
+		{[]string{"cmd.exe", "/d", "/c", "winget", "search", "git"}, false},
+		{[]string{"choco", "outdated"}, false},
+		{[]string{"choco", "upgrade", "all"}, true},
+	}
+	for _, tc := range cases {
+		if got := isPackageManagerMutationCommand(tc.args); got != tc.want {
+			t.Fatalf("isPackageManagerMutationCommand(%#v) = %t, want %t", tc.args, got, tc.want)
 		}
 	}
 }
@@ -303,6 +509,25 @@ func TestStorePackageKeysAreValid(t *testing.T) {
 	}
 	if err := validateManagerAndID("store", "bad&query"); err == nil {
 		t.Fatal("store queries with shell metacharacters should be rejected")
+	}
+	if err := validateManagerAndID("store", "bad%query"); err == nil {
+		t.Fatal("store queries with cmd expansion characters should be rejected")
+	}
+}
+
+func TestPackageAutoUpdateEnabledUsesEquivalentStoreKey(t *testing.T) {
+	state := State{
+		AutoUpdatePackages: map[string]bool{
+			"store:OpenAI.Codex_1.0.0.0_x64__abc123": true,
+		},
+	}
+	pkg := Package{
+		Key:     "store:OpenAI.Codex",
+		Manager: "store",
+		ID:      "OpenAI.Codex",
+	}
+	if !packageAutoUpdateEnabled(state, pkg) {
+		t.Fatalf("expected equivalent Store auto-update key to be honored")
 	}
 }
 
@@ -395,13 +620,13 @@ Commands:
 func TestParseAppxPackageJSON(t *testing.T) {
 	output := `[
 {"Name":"OpenAI.Codex","DisplayName":"Codex","PackageFullName":"OpenAI.Codex_1.0.0.0_x64__abc123","PackageFamilyName":"OpenAI.Codex_abc123","Version":"1.0.0.0","Publisher":"CN=OpenAI","InstallLocation":"C:\\Program Files\\WindowsApps\\OpenAI.Codex"},
-{"Name":"Microsoft.Todos","DisplayName":"ms-resource:AppName","PackageFullName":"Microsoft.Todos_2.130.0.0_x64__8wekyb3d8bbwe","PackageFamilyName":"Microsoft.Todos_8wekyb3d8bbwe","Version":"2.130.0.0","Publisher":"CN=Microsoft","InstallLocation":"C:\\Program Files\\WindowsApps\\Microsoft.Todos"}
+{"Name":"Microsoft.Todos","StartName":"Microsoft To Do","DisplayName":"ms-resource:AppName","PackageFullName":"Microsoft.Todos_2.130.0.0_x64__8wekyb3d8bbwe","PackageFamilyName":"Microsoft.Todos_8wekyb3d8bbwe","Version":"2.130.0.0","Publisher":"CN=Microsoft","InstallLocation":"C:\\Program Files\\WindowsApps\\Microsoft.Todos"}
 ]`
 	got := parseAppxPackageJSON(output)
 	if len(got) != 2 {
 		t.Fatalf("expected two AppX packages, got %#v", got)
 	}
-	if got[0].Name != "Codex" || got[1].Name != "Todos" {
+	if got[0].Name != "Codex" || got[1].Name != "Microsoft To Do" {
 		t.Fatalf("expected friendly AppX display names, got %#v", got)
 	}
 	if got[0].Manager != "store" || got[0].Source != "appx" || got[0].UpdateSupported {
@@ -428,6 +653,9 @@ func TestFriendlyAppxNameCleansPackageIdentity(t *testing.T) {
 	if got := friendlyAppxName("19568ShareX.ShareX", "ms-resource:AppName"); got != "ShareX" {
 		t.Fatalf("resource display name should fall back to package cleanup, got %q", got)
 	}
+	if got := friendlyAppxName("Microsoft.Todos", "ms-resource:AppName", "Microsoft To Do"); got != "Microsoft To Do" {
+		t.Fatalf("start menu display name should win over resource fallback, got %q", got)
+	}
 }
 
 func TestMergeStoreAppxPackagesAddsInventoryOnlyRows(t *testing.T) {
@@ -444,6 +672,45 @@ func TestMergeStoreAppxPackagesAddsInventoryOnlyRows(t *testing.T) {
 	}
 	if got[1].Name != "OpenAI.Codex" || got[1].Source != "appx" {
 		t.Fatalf("unexpected merged AppX row: %#v", got[1])
+	}
+}
+
+func TestMergeStoreAppxPackagesPrefersResolvedStoreRow(t *testing.T) {
+	managed := []Package{
+		{
+			Key:             "store:openai.codex",
+			ID:              "OpenAI.Codex",
+			Name:            "OpenAI Codex",
+			Version:         "1.0.0.0",
+			Manager:         "store",
+			Source:          "msstore",
+			ActionBackend:   "winget-msstore-fallback",
+			UpdateSupported: true,
+		},
+	}
+	appx := []Package{
+		{
+			Key:              "store:OpenAI.Codex",
+			ID:               "OpenAI.Codex",
+			Name:             "Codex",
+			Version:          "1.0.0.0",
+			AvailableVersion: "1.1.0",
+			Manager:          "store",
+			Source:           "appx",
+			Match:            "Codex",
+			ActionBackend:    "store-cli-resolved",
+			UpdateAvailable:  true,
+			UpdateSupported:  true,
+			Installed:        true,
+		},
+	}
+
+	got := mergeStoreAppxPackages(managed, appx)
+	if len(got) != 1 {
+		t.Fatalf("expected duplicate store rows to merge, got %#v", got)
+	}
+	if got[0].Name != "Codex" || got[0].ActionBackend != "store-cli-resolved" || got[0].AvailableVersion != "1.1.0" || !got[0].UpdateAvailable {
+		t.Fatalf("resolved AppX row details were not preserved: %#v", got[0])
 	}
 }
 
@@ -477,6 +744,55 @@ func TestResolveStoreAppxPackagesMapsCodex(t *testing.T) {
 	entry := state.StoreResolveCache[strings.ToLower("OpenAI.Codex_1.0.0.0_x64__abc123")]
 	if !entry.Resolved || entry.StoreID != "OpenAI.Codex" || entry.AppXVersion != "1.0.0.0" {
 		t.Fatalf("unexpected resolver cache entry: %#v", entry)
+	}
+}
+
+func TestResolveStoreAppxPackagesMarksUpdateFromStoreVersion(t *testing.T) {
+	state := defaultState()
+	appx := []Package{{
+		ID:              "OpenAI.Codex_1.0.0.0_x64__abc123",
+		Name:            "Codex",
+		Version:         "1.0.0.0",
+		Manager:         "store",
+		Source:          "appx",
+		UpdateSupported: false,
+		ActionBackend:   "appx-inventory",
+	}}
+
+	got, _, changed := resolveStoreAppxPackages(&state, appx, true, func(query string) ([]Package, CommandResult) {
+		return []Package{{Name: "Codex", ID: "OpenAI.Codex", Version: "1.1.0", Manager: "store"}}, CommandResult{OK: true}
+	})
+
+	if !changed {
+		t.Fatal("expected resolver cache change")
+	}
+	if !got[0].UpdateAvailable || got[0].AvailableVersion != "1.1.0" {
+		t.Fatalf("expected Store search version to mark update available, got %#v", got[0])
+	}
+	entry := state.StoreResolveCache[strings.ToLower("OpenAI.Codex_1.0.0.0_x64__abc123")]
+	if entry.StoreVersion != "1.1.0" {
+		t.Fatalf("expected Store version in cache, got %#v", entry)
+	}
+}
+
+func TestResolveStoreAppxPackagesKeepsCurrentWhenStoreVersionMatches(t *testing.T) {
+	state := defaultState()
+	appx := []Package{{
+		ID:              "OpenAI.Codex_1.0.0.0_x64__abc123",
+		Name:            "Codex",
+		Version:         "1.0.0.0",
+		Manager:         "store",
+		Source:          "appx",
+		UpdateSupported: false,
+		ActionBackend:   "appx-inventory",
+	}}
+
+	got, _, _ := resolveStoreAppxPackages(&state, appx, true, func(query string) ([]Package, CommandResult) {
+		return []Package{{Name: "Codex", ID: "OpenAI.Codex", Version: "1.0.0.0", Manager: "store"}}, CommandResult{OK: true}
+	})
+
+	if got[0].UpdateAvailable || got[0].AvailableVersion != "" {
+		t.Fatalf("matching Store version should stay current, got %#v", got[0])
 	}
 }
 
@@ -542,6 +858,40 @@ func TestResolveStoreAppxPackagesUsesCacheWithoutSearch(t *testing.T) {
 	}
 }
 
+func TestResolveStoreAppxPackagesRefreshesStaleCacheWithoutDroppingMapping(t *testing.T) {
+	state := defaultState()
+	appxID := "OpenAI.Codex_1.0.0.0_x64__abc123"
+	state.StoreResolveCache[strings.ToLower(appxID)] = StoreResolveCacheEntry{
+		AppXVersion: "1.0.0.0",
+		StoreID:     "OpenAI.Codex",
+		StoreName:   "Codex",
+		Resolved:    true,
+		ResolvedAt:  time.Now().UTC().Add(-storeResolveCacheTTL * 2).Format(time.RFC3339),
+	}
+	appx := []Package{{
+		ID:              appxID,
+		Name:            "Codex",
+		Version:         "1.0.0.0",
+		Manager:         "store",
+		Source:          "appx",
+		UpdateSupported: false,
+		ActionBackend:   "appx-inventory",
+	}}
+
+	calls := 0
+	got, _, changed := resolveStoreAppxPackages(&state, appx, true, func(query string) ([]Package, CommandResult) {
+		calls++
+		return nil, CommandResult{Code: 1}
+	})
+
+	if calls != 1 || changed {
+		t.Fatalf("expected stale cache refresh attempt without cache mutation, calls=%d changed=%t", calls, changed)
+	}
+	if got[0].ID != "OpenAI.Codex" || got[0].ActionBackend != "store-cli-resolved" || !got[0].UpdateSupported {
+		t.Fatalf("stale cache refresh failure should keep safe mapping, got %#v", got[0])
+	}
+}
+
 func TestResolveStoreAppxPackagesInvalidatesBadSearchBannerCache(t *testing.T) {
 	state := defaultState()
 	appxID := "Microsoft.ApplicationCompatibility_1.2511.9.0_x64__abc123"
@@ -577,6 +927,60 @@ func TestResolveStoreAppxPackagesInvalidatesBadSearchBannerCache(t *testing.T) {
 	}
 }
 
+func TestResolveStoreAppxPackagesRejectsUnsafeCachedTarget(t *testing.T) {
+	state := defaultState()
+	appxID := "OpenAI.Codex_1.0.0.0_x64__abc123"
+	cacheKey := strings.ToLower(appxID)
+	state.StoreResolveCache[cacheKey] = StoreResolveCacheEntry{
+		AppXVersion: "1.0.0.0",
+		StoreID:     "OpenAI.%USERNAME%.Codex",
+		StoreName:   "Codex",
+		Resolved:    true,
+		ResolvedAt:  utcNow(),
+	}
+	appx := []Package{{
+		ID:              appxID,
+		Name:            "Codex",
+		Version:         "1.0.0.0",
+		Manager:         "store",
+		Source:          "appx",
+		UpdateSupported: false,
+		ActionBackend:   "appx-inventory",
+	}}
+
+	calls := 0
+	got, _, changed := resolveStoreAppxPackages(&state, appx, true, func(query string) ([]Package, CommandResult) {
+		calls++
+		return []Package{{Name: "Codex", ID: "OpenAI.Codex", Manager: "store"}}, CommandResult{OK: true}
+	})
+
+	if calls != 1 || !changed {
+		t.Fatalf("expected unsafe cache target to be invalidated and searched, calls=%d changed=%t", calls, changed)
+	}
+	if got[0].ID != "OpenAI.Codex" || !got[0].UpdateSupported {
+		t.Fatalf("expected safe target replacement, got %#v", got[0])
+	}
+}
+
+func TestVersionGreater(t *testing.T) {
+	cases := []struct {
+		candidate string
+		current   string
+		want      bool
+	}{
+		{"1.1.0", "1.0.9", true},
+		{"2026.11050.1001.0", "2026.11050.1001.0", false},
+		{"1.0", "1.0.1", false},
+		{"v2.0.0", "1.9.9", true},
+		{"latest", "1.0.0", false},
+	}
+	for _, tc := range cases {
+		if got := versionGreater(tc.candidate, tc.current); got != tc.want {
+			t.Fatalf("versionGreater(%q, %q) = %t, want %t", tc.candidate, tc.current, got, tc.want)
+		}
+	}
+}
+
 func TestScanSourceCountsSeparatesStoreApps(t *testing.T) {
 	state := State{
 		LastScanAt: "2026-06-14T12:00:00Z",
@@ -584,12 +988,14 @@ func TestScanSourceCountsSeparatesStoreApps(t *testing.T) {
 			"registry:app": {Source: "registry"},
 		},
 		WingetApps: map[string]ScannedApp{
-			"winget:git.git":     {Source: "winget"},
+			"winget:git.git": {Source: "winget"},
+		},
+		StoreApps: map[string]ScannedApp{
 			"store:9nblggh5r558": {Source: "store"},
 			"store:legacy":       {Source: "msstore"},
 		},
 	}
-	counts := scanSourceCounts(state.WingetApps)
+	counts := managedScanSourceCounts(state)
 	if counts["winget"] != 1 || counts["store"] != 2 {
 		t.Fatalf("unexpected scan source counts: %#v", counts)
 	}
@@ -597,6 +1003,57 @@ func TestScanSourceCountsSeparatesStoreApps(t *testing.T) {
 	summary := inventoryScanSummary(state, counts)
 	if summary.LastScanAt != state.LastScanAt || summary.TrackedCount != 4 || summary.RegistryCount != 1 || summary.WingetCount != 1 || summary.StoreCount != 2 {
 		t.Fatalf("unexpected inventory scan summary: %#v", summary)
+	}
+}
+
+func TestSplitScannedManagedAppsSeparatesStoreRows(t *testing.T) {
+	winget, store := splitScannedManagedApps([]ScannedApp{
+		{Key: "winget:git.git", Name: "Git", Source: "winget", Manager: "winget"},
+		{Key: "store:codex", Name: "Codex", Source: "msstore", Manager: "store"},
+		{Key: "store:paint", Name: "Paint", Source: "appx"},
+	})
+	if len(winget) != 1 || winget[0].Name != "Git" {
+		t.Fatalf("unexpected winget split: %#v", winget)
+	}
+	if len(store) != 2 || store[0].Source != "store" || store[1].Manager != "store" {
+		t.Fatalf("unexpected store split: %#v", store)
+	}
+}
+
+func TestMergeScannedManagedAppsDedupesStoreAppxAgainstWingetStoreID(t *testing.T) {
+	wingetStoreApps := []ScannedApp{
+		{Key: "store:openai.codex", Name: "OpenAI Codex", Source: "store", Manager: "store", PackageID: "OpenAI.Codex"},
+	}
+	appxApps := []ScannedApp{
+		{Key: "store:openai.codex", Name: "Codex", Source: "store", Manager: "store", PackageID: "OpenAI.Codex"},
+	}
+
+	got := mergeScannedManagedApps(wingetStoreApps, appxApps)
+	if len(got) != 1 {
+		t.Fatalf("expected Store AppX and winget Store scan rows to dedupe, got %#v", got)
+	}
+}
+
+func TestStableAppxScanIDIgnoresPackageVersion(t *testing.T) {
+	first := Package{
+		ID:    "OpenAI.Codex_1.0.0.0_x64__abc123",
+		Match: "OpenAI.Codex_abc123",
+	}
+	updated := Package{
+		ID:    "OpenAI.Codex_1.1.0.0_x64__abc123",
+		Match: "OpenAI.Codex_abc123",
+	}
+	if stableAppxScanID(first) != stableAppxScanID(updated) {
+		t.Fatalf("AppX scan ID should be version-stable, got %q and %q", stableAppxScanID(first), stableAppxScanID(updated))
+	}
+	if got := stableAppxScanID(Package{ID: "OpenAI.Codex_1.1.0.0_x64__abc123"}); got != "OpenAI.Codex" {
+		t.Fatalf("expected package-name fallback without version, got %q", got)
+	}
+	if got := stableAppxScanID(Package{ID: "Microsoft.Example_2.0.0.0_neutral_~_8wekyb3d8bbwe"}); got != "Microsoft.Example" {
+		t.Fatalf("expected neutral AppX full name to normalize to package family, got %q", got)
+	}
+	if got := stableAppxScanID(Package{ID: "OpenAI.Codex_abc123"}); got != "OpenAI.Codex" {
+		t.Fatalf("package family name should remain stable, got %q", got)
 	}
 }
 
@@ -638,6 +1095,57 @@ func TestInventoryResponseFlattensInventoryJSON(t *testing.T) {
 	}
 	if _, ok := payload["AsyncSnapshot"]; ok {
 		t.Fatalf("embedded AsyncSnapshot should not be encoded as a nested field: %s", encoded)
+	}
+}
+
+func TestStatusSnapshotPreservesStoreInventoryManagerDetails(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("UPDATER_STATE_DIR", dir)
+	app := &App{
+		status: StatusResponse{
+			Managers: map[string]ManagerStatus{
+				managerStore: {Available: true, ActionBackend: backendStoreCLI},
+			},
+		},
+		statusFetchedAt: time.Now(),
+		inventory: Inventory{
+			PackageLookup: PackageLookup{
+				Managers: map[string]ManagerStatus{
+					managerStore: {
+						Available:          true,
+						ActionBackend:      backendStoreCLI,
+						InventoryAvailable: true,
+						InventoryBackend:   inventoryBackendAppX,
+					},
+				},
+			},
+		},
+	}
+
+	snapshot := app.statusSnapshot()
+	store := snapshot.Managers[managerStore]
+	if !store.InventoryAvailable || store.InventoryBackend != inventoryBackendAppX {
+		t.Fatalf("expected status snapshot to keep Store inventory details, got %#v", store)
+	}
+	if app.status.Managers[managerStore].InventoryAvailable {
+		t.Fatal("status snapshot should not mutate cached status managers in place")
+	}
+}
+
+func TestRefreshStatusQueuesForcedRefreshWhileLoading(t *testing.T) {
+	app := &App{statusLoading: true}
+
+	app.refreshStatus(false)
+	if app.statusQueued {
+		t.Fatal("non-forced status refresh should not queue while loading")
+	}
+
+	app.refreshStatus(true)
+	if !app.statusQueued {
+		t.Fatal("forced status refresh should queue while loading")
+	}
+	if !app.statusLoading {
+		t.Fatal("status should remain loading after queueing forced refresh")
 	}
 }
 
@@ -769,20 +1277,25 @@ func TestAPIRejectsInvalidRequests(t *testing.T) {
 		name       string
 		path       string
 		body       string
+		content    string
 		wantResult bool
 		wantText   string
 	}{
-		{"update", "/api/update?token=test-token", "manager=invalid&package_id=Git.Git", true, managerValidationMessage},
-		{"install", "/api/install?token=test-token", "manager=invalid&package_id=Git.Git", true, managerValidationMessage},
-		{"manager install", "/api/managers/install?token=test-token", "manager=invalid", true, managerValidationMessage},
-		{"update all", "/api/update-all?token=test-token", "package_key=not-a-valid-key", false, "package key must be manager:id"},
+		{"update form", "/api/update?token=test-token", "manager=invalid&package_id=Git.Git", "application/x-www-form-urlencoded", true, managerValidationMessage},
+		{"install form", "/api/install?token=test-token", "manager=invalid&package_id=Git.Git", "application/x-www-form-urlencoded", true, managerValidationMessage},
+		{"manager install form", "/api/managers/install?token=test-token", "manager=invalid", "application/x-www-form-urlencoded", true, managerValidationMessage},
+		{"update all form", "/api/update-all?token=test-token", "package_key=not-a-valid-key", "application/x-www-form-urlencoded", false, "package key must be manager:id"},
+		{"update json", "/api/update?token=test-token", `{"manager":"invalid","package_id":"Git.Git"}`, "application/json", true, managerValidationMessage},
+		{"install json", "/api/install?token=test-token", `{"manager":"winget","package_id":"bad id"}`, "application/json", true, "package id contains unsupported characters"},
+		{"manager install json", "/api/managers/install?token=test-token", `{"manager":"invalid"}`, "application/json", true, managerValidationMessage},
+		{"update all json", "/api/update-all?token=test-token", `{"package_keys":["not-a-valid-key"]}`, "application/json", false, "package key must be manager:id"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			app := &App{token: "test-token"}
 			request := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
-			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			request.Header.Set("Content-Type", tc.content)
 			response := httptest.NewRecorder()
 
 			app.serveHTTP(response, request)
@@ -809,6 +1322,73 @@ func TestAPIRejectsInvalidRequests(t *testing.T) {
 			}
 			if len(decoded.Results) != 1 || decoded.Results[0].Result.Code != 2 || !strings.Contains(decoded.Results[0].Result.Stderr, tc.wantText) {
 				t.Fatalf("unexpected update-all validation result: %#v", decoded.Results)
+			}
+		})
+	}
+}
+
+func TestSettingsJSONRequestParsers(t *testing.T) {
+	startupRequest := httptest.NewRequest(http.MethodPost, "/api/settings/startup", strings.NewReader(`{"enabled":true}`))
+	startupRequest.Header.Set("Content-Type", "application/json")
+	enabled, invalidStartup := parseStartupRequest(startupRequest)
+	if invalidStartup != nil || !enabled {
+		t.Fatalf("expected enabled startup JSON parse, enabled=%t invalid=%#v", enabled, invalidStartup)
+	}
+
+	autoRequest := httptest.NewRequest(http.MethodPost, "/api/settings/auto-update", strings.NewReader(`{"global":true,"package_keys":["winget:Git.Git"],"package_enabled":false}`))
+	autoRequest.Header.Set("Content-Type", "application/json")
+	global, keys, packageEnabled, invalidAuto := parseAutoUpdateRequest(autoRequest)
+	if invalidAuto != nil || global == nil || !*global || packageEnabled == nil || *packageEnabled || len(keys) != 1 || keys[0] != "winget:Git.Git" {
+		t.Fatalf("unexpected auto-update JSON parse: global=%v keys=%#v packageEnabled=%v invalid=%#v", global, keys, packageEnabled, invalidAuto)
+	}
+
+	themeRequest := httptest.NewRequest(http.MethodPost, "/api/settings/theme", strings.NewReader(`{"theme":"light"}`))
+	themeRequest.Header.Set("Content-Type", "application/json")
+	theme, err := parseThemeRequest(themeRequest)
+	if err != nil || theme != "light" {
+		t.Fatalf("unexpected theme JSON parse: theme=%q err=%v", theme, err)
+	}
+}
+
+func TestSettingsAPIsRejectMalformedJSONBeforeSideEffects(t *testing.T) {
+	cases := []struct {
+		name       string
+		path       string
+		body       string
+		wantResult bool
+	}{
+		{"startup", "/api/settings/startup?token=test-token", `{"enabled":`, true},
+		{"auto update", "/api/settings/auto-update?token=test-token", `{"package_keys":{}}`, true},
+		{"theme", "/api/settings/theme?token=test-token", `{"theme":`, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			app := &App{token: "test-token"}
+			request := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+
+			app.serveHTTP(response, request)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("expected bad request, got %d: %s", response.Code, response.Body.String())
+			}
+			if tc.wantResult {
+				var decoded commandAPIResponse
+				if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+					t.Fatal(err)
+				}
+				if decoded.Result == nil || decoded.Result.Code != 2 || !strings.Contains(decoded.Result.Stderr, "invalid JSON body") {
+					t.Fatalf("expected validation command result, got %#v", decoded.Result)
+				}
+				return
+			}
+			var decoded apiErrorResponse
+			if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(decoded.Error, "invalid JSON body") {
+				t.Fatalf("expected invalid JSON error, got %#v", decoded)
 			}
 		})
 	}

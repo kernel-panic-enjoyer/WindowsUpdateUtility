@@ -31,6 +31,7 @@ type ScanResult struct {
 	TrackedCount    int                 `json:"tracked_count"`
 	SourceCounts    map[string]int      `json:"source_counts"`
 	WingetAvailable bool                `json:"winget_available"`
+	StoreAvailable  bool                `json:"store_available"`
 	WingetResult    *CommandResult      `json:"winget_result,omitempty"`
 	Errors          []map[string]string `json:"errors"`
 }
@@ -178,18 +179,56 @@ func readAppxApps() ([]ScannedApp, *CommandResult, error) {
 	}
 	apps := []ScannedApp{}
 	for _, pkg := range packages {
+		stableID := stableAppxScanID(pkg)
 		apps = append(apps, ScannedApp{
-			Key:             "store:" + strings.ToLower(pkg.ID),
+			Key:             "store:" + strings.ToLower(stableID),
 			Name:            pkg.Name,
 			Version:         pkg.Version,
 			Publisher:       "",
 			InstallLocation: pkg.ID,
 			Source:          "store",
 			Manager:         "store",
-			PackageID:       pkg.ID,
+			PackageID:       stableID,
 		})
 	}
 	return apps, &result, nil
+}
+
+func stableAppxScanID(pkg Package) string {
+	if stableID := stableStoreScanIdentity(pkg.Match); stableID != "" {
+		return stableID
+	}
+	if stableID := stableStoreScanIdentity(pkg.ID); stableID != "" {
+		return stableID
+	}
+	return ""
+}
+
+func isStoreScannedApp(app ScannedApp) bool {
+	source := strings.ToLower(strings.TrimSpace(app.Source))
+	manager := strings.ToLower(strings.TrimSpace(app.Manager))
+	return source == "store" || source == "msstore" || source == "appx" || manager == "store"
+}
+
+func splitScannedManagedApps(apps []ScannedApp) ([]ScannedApp, []ScannedApp) {
+	var wingetApps []ScannedApp
+	var storeApps []ScannedApp
+	for _, app := range apps {
+		if isStoreScannedApp(app) {
+			app.Source = "store"
+			app.Manager = "store"
+			storeApps = append(storeApps, app)
+			continue
+		}
+		if app.Source == "" {
+			app.Source = "winget"
+		}
+		if app.Manager == "" {
+			app.Manager = "winget"
+		}
+		wingetApps = append(wingetApps, app)
+	}
+	return wingetApps, storeApps
 }
 
 func mergeScannedManagedApps(wingetApps, appxApps []ScannedApp) []ScannedApp {
@@ -229,6 +268,18 @@ func scanSourceCounts(apps map[string]ScannedApp) map[string]int {
 		counts[source]++
 	}
 	return counts
+}
+
+func managedScanSourceCounts(state State) map[string]int {
+	counts := scanSourceCounts(state.WingetApps)
+	for source, count := range scanSourceCounts(state.StoreApps) {
+		counts[source] += count
+	}
+	return counts
+}
+
+func managedScanTrackedCount(state State) int {
+	return len(state.WingetApps) + len(state.StoreApps)
 }
 
 func diffSnapshot(current []ScannedApp, previous map[string]ScannedApp) (map[string]ScannedApp, []ScannedApp, []ScannedApp, bool) {
@@ -296,30 +347,36 @@ func scanInstalledApplications() ScanResult {
 	}
 
 	registryMap, registryNew, registryRemoved, registryBaseline := diffSnapshot(registryApps, state.RegistryApps)
-	managedApps := mergeScannedManagedApps(wingetApps, appxApps)
-	wingetMap, wingetNew, wingetRemoved, wingetBaseline := diffSnapshot(managedApps, state.WingetApps)
-	sourceCounts := scanSourceCounts(wingetMap)
+	wingetOnlyApps, wingetStoreApps := splitScannedManagedApps(wingetApps)
+	storeApps := mergeScannedManagedApps(wingetStoreApps, appxApps)
+	wingetMap, wingetNew, wingetRemoved, wingetBaseline := diffSnapshot(wingetOnlyApps, state.WingetApps)
+	storeMap, storeNew, storeRemoved, storeBaseline := diffSnapshot(storeApps, state.StoreApps)
 	state.RegistryApps = registryMap
 	state.WingetApps = wingetMap
+	state.StoreApps = storeMap
 	state.LastScanAt = utcNow()
 	_ = saveState(state)
 
 	newApps := append(registryNew, wingetNew...)
+	newApps = append(newApps, storeNew...)
 	removedApps := append(registryRemoved, wingetRemoved...)
+	removedApps = append(removedApps, storeRemoved...)
 	sort.Slice(newApps, func(i, j int) bool {
 		return strings.ToLower(newApps[i].Source+newApps[i].Name) < strings.ToLower(newApps[j].Source+newApps[j].Name)
 	})
 
-	appLog("Application scan completed with %d tracked app(s) and %d new app(s).", len(registryMap)+len(wingetMap), len(newApps))
+	trackedCount := len(registryMap) + len(wingetMap) + len(storeMap)
+	appLog("Application scan completed with %d tracked app(s) and %d new app(s).", trackedCount, len(newApps))
 	return ScanResult{
 		LastScanAt:      state.LastScanAt,
-		Baseline:        registryBaseline && wingetBaseline,
-		Baselines:       map[string]bool{"registry": registryBaseline, "winget": wingetBaseline, "store": wingetBaseline},
+		Baseline:        registryBaseline && wingetBaseline && storeBaseline,
+		Baselines:       map[string]bool{"registry": registryBaseline, "winget": wingetBaseline, "store": storeBaseline},
 		NewApps:         newApps,
 		RemovedApps:     removedApps,
-		TrackedCount:    len(registryMap) + len(wingetMap),
-		SourceCounts:    map[string]int{"registry": len(registryMap), "winget": sourceCounts["winget"], "store": sourceCounts["store"]},
-		WingetAvailable: wingetResult != nil || appxResult != nil,
+		TrackedCount:    trackedCount,
+		SourceCounts:    map[string]int{"registry": len(registryMap), "winget": len(wingetMap), "store": len(storeMap)},
+		WingetAvailable: wingetResult != nil,
+		StoreAvailable:  appxResult != nil,
 		WingetResult:    wingetResult,
 		Errors:          errorsOut,
 	}

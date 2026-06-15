@@ -6,15 +6,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
 type StoreResolveCacheEntry struct {
-	AppXVersion string `json:"appx_version"`
-	StoreID     string `json:"store_id,omitempty"`
-	StoreName   string `json:"store_name,omitempty"`
-	Resolved    bool   `json:"resolved"`
-	ResolvedAt  string `json:"resolved_at"`
+	AppXVersion  string `json:"appx_version"`
+	StoreID      string `json:"store_id,omitempty"`
+	StoreName    string `json:"store_name,omitempty"`
+	StoreVersion string `json:"store_version,omitempty"`
+	Resolved     bool   `json:"resolved"`
+	ResolvedAt   string `json:"resolved_at"`
 }
 
 type State struct {
@@ -24,6 +26,7 @@ type State struct {
 	AutoUpdatePackages    map[string]bool                   `json:"auto_update_packages"`
 	RegistryApps          map[string]ScannedApp             `json:"registry_apps"`
 	WingetApps            map[string]ScannedApp             `json:"winget_apps"`
+	StoreApps             map[string]ScannedApp             `json:"store_apps"`
 	StoreResolveCache     map[string]StoreResolveCacheEntry `json:"store_resolve_cache"`
 	LastScanAt            string                            `json:"last_scan_at"`
 	LastAutoUpdateAt      string                            `json:"last_auto_update_at"`
@@ -88,6 +91,7 @@ func defaultState() State {
 		AutoUpdatePackages: map[string]bool{},
 		RegistryApps:       map[string]ScannedApp{},
 		WingetApps:         map[string]ScannedApp{},
+		StoreApps:          map[string]ScannedApp{},
 		StoreResolveCache:  map[string]StoreResolveCacheEntry{},
 		Theme:              "dark",
 	}
@@ -109,12 +113,17 @@ func loadState() State {
 	if state.AutoUpdatePackages == nil {
 		state.AutoUpdatePackages = map[string]bool{}
 	}
+	normalizeAutoUpdatePackageKeys(&state)
 	if state.RegistryApps == nil {
 		state.RegistryApps = map[string]ScannedApp{}
 	}
 	if state.WingetApps == nil {
 		state.WingetApps = map[string]ScannedApp{}
 	}
+	if state.StoreApps == nil {
+		state.StoreApps = map[string]ScannedApp{}
+	}
+	migrateStoreScanApps(&state)
 	if state.StoreResolveCache == nil {
 		state.StoreResolveCache = map[string]StoreResolveCacheEntry{}
 	}
@@ -122,6 +131,111 @@ func loadState() State {
 		state.Theme = "dark"
 	}
 	return state
+}
+
+func migrateStoreScanApps(state *State) {
+	for key, app := range state.WingetApps {
+		if !isStoreScannedApp(app) {
+			continue
+		}
+		if app.Source == "" || app.Source == "msstore" || app.Source == "appx" {
+			app.Source = "store"
+		}
+		if app.Manager == "" {
+			app.Manager = "store"
+		}
+		state.StoreApps[key] = app
+		delete(state.WingetApps, key)
+	}
+	normalizeStoreScanAppKeys(state)
+}
+
+func normalizeStoreScanAppKeys(state *State) {
+	normalized := map[string]ScannedApp{}
+	for key, app := range state.StoreApps {
+		app.Source = "store"
+		if app.Manager == "" {
+			app.Manager = "store"
+		}
+		stableID := stableScannedStoreAppID(key, app)
+		if stableID != "" {
+			app.Key = "store:" + strings.ToLower(stableID)
+			app.PackageID = stableID
+		} else if app.Key == "" {
+			app.Key = key
+		}
+		if existing, ok := normalized[app.Key]; ok && existing.FirstSeen != "" && (app.FirstSeen == "" || existing.FirstSeen < app.FirstSeen) {
+			app.FirstSeen = existing.FirstSeen
+		}
+		normalized[app.Key] = app
+	}
+	state.StoreApps = normalized
+}
+
+func normalizeAutoUpdatePackageKeys(state *State) {
+	normalized := map[string]bool{}
+	for key, enabled := range state.AutoUpdatePackages {
+		normalizedKey := normalizeAutoUpdatePackageKey(key)
+		if normalizedKey == "" {
+			normalizedKey = key
+		}
+		normalized[normalizedKey] = normalized[normalizedKey] || enabled
+	}
+	state.AutoUpdatePackages = normalized
+}
+
+func normalizeAutoUpdatePackageKey(key string) string {
+	manager, id, err := splitPackageKey(key)
+	if err != nil {
+		return key
+	}
+	if manager == managerStore {
+		id = stableStoreActionID(id)
+	}
+	return packageKey(manager, id)
+}
+
+func stableStoreActionID(id string) string {
+	id = strings.TrimSpace(id)
+	if before, _, ok := strings.Cut(id, "_"); ok && strings.Contains(before, ".") {
+		return before
+	}
+	return id
+}
+
+func stableScannedStoreAppID(key string, app ScannedApp) string {
+	for _, value := range []string{app.PackageID, strings.TrimPrefix(key, "store:"), app.InstallLocation} {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		return stableStoreScanIdentity(value)
+	}
+	return ""
+}
+
+func stableStoreScanIdentity(value string) string {
+	stableID := stableAppxIdentity(value)
+	if stableID == "" {
+		return ""
+	}
+	return stableStoreActionID(stableID)
+}
+
+func stableAppxIdentity(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	parts := strings.Split(value, "_")
+	if len(parts) >= 3 && looksLikeVersion(parts[1]) {
+		name := strings.TrimSpace(parts[0])
+		publisherID := strings.TrimSpace(parts[len(parts)-1])
+		if name != "" && publisherID != "" {
+			return name + "_" + publisherID
+		}
+	}
+	return value
 }
 
 func saveState(state State) error {

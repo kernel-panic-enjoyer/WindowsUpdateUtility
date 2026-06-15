@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -85,6 +86,26 @@ type updateAllAPIResponse struct {
 	RefreshStarted bool           `json:"refresh_started"`
 }
 
+type stringList []string
+
+func (list *stringList) UnmarshalJSON(data []byte) error {
+	var many []string
+	if err := json.Unmarshal(data, &many); err == nil {
+		*list = many
+		return nil
+	}
+	var one string
+	if err := json.Unmarshal(data, &one); err == nil {
+		*list = []string{one}
+		return nil
+	}
+	if strings.TrimSpace(string(data)) == "null" {
+		*list = nil
+		return nil
+	}
+	return fmt.Errorf("expected string or string array")
+}
+
 func commandResponse(result CommandResult) commandAPIResponse {
 	return commandAPIResponse{Result: &result}
 }
@@ -101,15 +122,135 @@ func settingsCommandResponse(state State, result CommandResult) commandAPIRespon
 	return commandAPIResponse{Result: &result, Settings: &state}
 }
 
+func requestIsJSON(r *http.Request) bool {
+	return strings.Contains(strings.ToLower(r.Header.Get("Content-Type")), "application/json")
+}
+
+func decodeJSONRequest(r *http.Request, target any) error {
+	if err := json.NewDecoder(r.Body).Decode(target); err != nil {
+		return fmt.Errorf("invalid JSON body: %w", err)
+	}
+	return nil
+}
+
 func parsePackageAction(r *http.Request, command string) (string, string, *CommandResult) {
-	_ = r.ParseForm()
-	manager := r.Form.Get("manager")
-	id := r.Form.Get("package_id")
+	var manager string
+	var id string
+	if requestIsJSON(r) {
+		var payload struct {
+			Manager   string `json:"manager"`
+			PackageID string `json:"package_id"`
+		}
+		if err := decodeJSONRequest(r, &payload); err != nil {
+			result := validationCommandResult(command, err)
+			return "", "", &result
+		}
+		manager = payload.Manager
+		id = payload.PackageID
+	} else {
+		_ = r.ParseForm()
+		manager = r.Form.Get("manager")
+		id = r.Form.Get("package_id")
+	}
 	if err := validateManagerAndID(manager, id); err != nil {
 		result := validationCommandResult(command, err)
 		return "", "", &result
 	}
 	return manager, id, nil
+}
+
+func parseManagerRequest(r *http.Request) (string, *CommandResult) {
+	if requestIsJSON(r) {
+		var payload struct {
+			Manager string `json:"manager"`
+		}
+		if err := decodeJSONRequest(r, &payload); err != nil {
+			result := validationCommandResult("manager install", err)
+			return "", &result
+		}
+		return payload.Manager, nil
+	}
+	_ = r.ParseForm()
+	return r.Form.Get("manager"), nil
+}
+
+func parseUpdateAllPackageKeys(r *http.Request) ([]string, *UpdateResult) {
+	if requestIsJSON(r) {
+		var payload struct {
+			PackageKey  stringList `json:"package_key"`
+			PackageKeys stringList `json:"package_keys"`
+		}
+		if err := decodeJSONRequest(r, &payload); err != nil {
+			result := UpdateResult{Result: validationCommandResult("update-all", err)}
+			return nil, &result
+		}
+		keys := append([]string{}, payload.PackageKey...)
+		keys = append(keys, payload.PackageKeys...)
+		return keys, nil
+	}
+	_ = r.ParseForm()
+	return r.Form["package_key"], nil
+}
+
+func parseStartupRequest(r *http.Request) (bool, *CommandResult) {
+	if requestIsJSON(r) {
+		var payload struct {
+			Enabled *bool `json:"enabled"`
+		}
+		if err := decodeJSONRequest(r, &payload); err != nil {
+			result := validationCommandResult("startup settings", err)
+			return false, &result
+		}
+		if payload.Enabled == nil {
+			return false, nil
+		}
+		return *payload.Enabled, nil
+	}
+	_ = r.ParseForm()
+	enabled, _ := formBool(r, "enabled")
+	return enabled, nil
+}
+
+func parseAutoUpdateRequest(r *http.Request) (*bool, []string, *bool, *CommandResult) {
+	if requestIsJSON(r) {
+		var payload struct {
+			Global         *bool      `json:"global"`
+			PackageKey     stringList `json:"package_key"`
+			PackageKeys    stringList `json:"package_keys"`
+			PackageEnabled *bool      `json:"package_enabled"`
+		}
+		if err := decodeJSONRequest(r, &payload); err != nil {
+			result := validationCommandResult("auto-update settings", err)
+			return nil, nil, nil, &result
+		}
+		keys := append([]string{}, payload.PackageKey...)
+		keys = append(keys, payload.PackageKeys...)
+		return payload.Global, keys, payload.PackageEnabled, nil
+	}
+	_ = r.ParseForm()
+	var global *bool
+	if value, ok := formBool(r, "global"); ok {
+		global = &value
+	}
+	var packageEnabled *bool
+	if value, ok := formBool(r, "package_enabled"); ok {
+		packageEnabled = &value
+	}
+	return global, r.Form["package_key"], packageEnabled, nil
+}
+
+func parseThemeRequest(r *http.Request) (string, error) {
+	if requestIsJSON(r) {
+		var payload struct {
+			Theme string `json:"theme"`
+		}
+		if err := decodeJSONRequest(r, &payload); err != nil {
+			return "", err
+		}
+		return payload.Theme, nil
+	}
+	_ = r.ParseForm()
+	return r.Form.Get("theme"), nil
 }
 
 func (app *App) serveAPI(w http.ResponseWriter, r *http.Request) {
@@ -166,8 +307,11 @@ func (app *App) serveAPI(w http.ResponseWriter, r *http.Request) {
 		if !requireMethod(w, r, http.MethodPost) {
 			return
 		}
-		_ = r.ParseForm()
-		manager := r.Form.Get("manager")
+		manager, invalid := parseManagerRequest(r)
+		if invalid != nil {
+			writeJSON(w, http.StatusBadRequest, commandResponse(*invalid))
+			return
+		}
 		if !isManagedPackageManager(manager) {
 			result := validationCommandResult("manager install", managerValidationError())
 			writeJSON(w, http.StatusBadRequest, commandResponse(result))
@@ -199,23 +343,30 @@ func (app *App) serveAPI(w http.ResponseWriter, r *http.Request) {
 		if !requireMethod(w, r, http.MethodPost) {
 			return
 		}
-		_ = r.ParseForm()
-		for _, key := range r.Form["package_key"] {
+		packageKeys, invalid := parseUpdateAllPackageKeys(r)
+		if invalid != nil {
+			writeJSON(w, http.StatusBadRequest, updateAllAPIResponse{Results: []UpdateResult{*invalid}, RefreshStarted: false})
+			return
+		}
+		for _, key := range packageKeys {
 			if err := validatePackageKey(key); err != nil {
 				result := UpdateResult{Key: key, Result: validationCommandResult("update-all", err)}
 				writeJSON(w, http.StatusBadRequest, updateAllAPIResponse{Results: []UpdateResult{result}, RefreshStarted: false})
 				return
 			}
 		}
-		results := updateAll(r.Form["package_key"])
+		results := updateAll(packageKeys)
 		app.refreshInventory(true)
 		writeJSON(w, http.StatusOK, updateAllAPIResponse{Results: results, RefreshStarted: true})
 	case "/api/settings/startup":
 		if !requireMethod(w, r, http.MethodPost) {
 			return
 		}
-		_ = r.ParseForm()
-		enabled, _ := formBool(r, "enabled")
+		enabled, invalid := parseStartupRequest(r)
+		if invalid != nil {
+			writeJSON(w, http.StatusBadRequest, commandResponse(*invalid))
+			return
+		}
 		result := setStartup(enabled)
 		app.refreshStatus(true)
 		writeJSON(w, http.StatusOK, commandResponse(result))
@@ -223,16 +374,12 @@ func (app *App) serveAPI(w http.ResponseWriter, r *http.Request) {
 		if !requireMethod(w, r, http.MethodPost) {
 			return
 		}
-		_ = r.ParseForm()
-		var global *bool
-		if value, ok := formBool(r, "global"); ok {
-			global = &value
+		global, packageKeys, packageEnabled, invalid := parseAutoUpdateRequest(r)
+		if invalid != nil {
+			writeJSON(w, http.StatusBadRequest, commandResponse(*invalid))
+			return
 		}
-		var packageEnabled *bool
-		if value, ok := formBool(r, "package_enabled"); ok {
-			packageEnabled = &value
-		}
-		state, result := setAutoUpdate(global, r.Form["package_key"], packageEnabled)
+		state, result := setAutoUpdate(global, packageKeys, packageEnabled)
 		app.refreshStatus(true)
 		app.refreshInventory(true)
 		writeJSON(w, http.StatusOK, settingsCommandResponse(state, result))
@@ -240,8 +387,12 @@ func (app *App) serveAPI(w http.ResponseWriter, r *http.Request) {
 		if !requireMethod(w, r, http.MethodPost) {
 			return
 		}
-		_ = r.ParseForm()
-		state, err := setThemePreference(r.Form.Get("theme"))
+		theme, err := parseThemeRequest(r)
+		if err != nil {
+			writeAPIError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		state, err := setThemePreference(theme)
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, err.Error())
 			return

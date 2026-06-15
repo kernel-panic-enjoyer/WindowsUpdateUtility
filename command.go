@@ -47,6 +47,7 @@ type LogBuffer struct {
 
 var sessionLogs = newLogBuffer(logEntryLimit)
 var wingetCommandMu sync.Mutex
+var packageManagerMutationMu sync.Mutex
 
 func newLogBuffer(max int) *LogBuffer {
 	if max <= 0 {
@@ -162,6 +163,34 @@ func isStoreCommand(args []string) bool {
 	return name == "cmd.exe" && len(args) >= 4 && strings.EqualFold(args[1], "/d") && strings.EqualFold(args[2], "/c") && strings.EqualFold(args[3], "store")
 }
 
+func packageManagerCommandVerb(args []string) (string, string) {
+	if len(args) == 0 {
+		return "", ""
+	}
+	name := strings.ToLower(filepath.Base(args[0]))
+	if name == "cmd.exe" && len(args) >= 5 && strings.EqualFold(args[1], "/d") && strings.EqualFold(args[2], "/c") {
+		return strings.ToLower(args[3]), strings.ToLower(args[4])
+	}
+	if len(args) < 2 {
+		return strings.TrimSuffix(name, ".exe"), ""
+	}
+	return strings.TrimSuffix(name, ".exe"), strings.ToLower(args[1])
+}
+
+func isPackageManagerMutationCommand(args []string) bool {
+	manager, verb := packageManagerCommandVerb(args)
+	switch manager {
+	case "winget":
+		return verb == "install" || verb == "upgrade" || verb == "uninstall" || verb == "import" || verb == "configure"
+	case "store":
+		return verb == "install" || verb == "update" || verb == "updates" || verb == "uninstall"
+	case "choco":
+		return verb == "install" || verb == "upgrade" || verb == "uninstall" || verb == "pin"
+	default:
+		return false
+	}
+}
+
 func runCommand(timeout time.Duration, args ...string) CommandResult {
 	result := CommandResult{Command: strings.Join(args, " ")}
 	if len(args) == 0 {
@@ -171,6 +200,10 @@ func runCommand(timeout time.Duration, args ...string) CommandResult {
 		sessionLogs.Append("stderr", result.Stderr)
 		sessionLogs.Append("exit", "empty command exited with code 127")
 		return result
+	}
+	if isPackageManagerMutationCommand(args) {
+		packageManagerMutationMu.Lock()
+		defer packageManagerMutationMu.Unlock()
 	}
 	if isWingetCommand(args) {
 		wingetCommandMu.Lock()
