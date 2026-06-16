@@ -41,12 +41,19 @@ func freePort(start int) int {
 }
 
 func runServer(noBrowser bool) error {
-	token := os.Getenv("UPDATER_TOKEN")
+	token, _ := argValue("--token")
+	if token == "" {
+		token = os.Getenv("UPDATER_TOKEN")
+	}
 	if token == "" {
 		token = randomToken()
 	}
 	port := freePort(defaultPort)
-	if override := os.Getenv("UPDATER_PORT"); override != "" {
+	if override, ok := argValue("--port"); ok {
+		if parsed, err := strconv.Atoi(override); err == nil && parsed > 0 && parsed < 65536 {
+			port = parsed
+		}
+	} else if override := os.Getenv("UPDATER_PORT"); override != "" {
 		if parsed, err := strconv.Atoi(override); err == nil && parsed > 0 && parsed < 65536 {
 			port = parsed
 		}
@@ -82,6 +89,19 @@ func hasArg(name string) bool {
 		}
 	}
 	return false
+}
+
+func argValue(name string) (string, bool) {
+	prefix := name + "="
+	for i, arg := range os.Args[1:] {
+		if strings.HasPrefix(arg, prefix) {
+			return strings.TrimPrefix(arg, prefix), true
+		}
+		if arg == name && i+2 < len(os.Args) {
+			return os.Args[i+2], true
+		}
+	}
+	return "", false
 }
 
 func main() {

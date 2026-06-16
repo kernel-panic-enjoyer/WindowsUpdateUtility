@@ -56,6 +56,9 @@ type App struct {
 	statusQueued       bool
 	statusFetchedAt    time.Time
 	statusErr          string
+	updateJobMu        sync.Mutex
+	updateJob          *UpdateJob
+	updateJobSeq       int64
 	shutdownOnce       sync.Once
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -79,12 +80,10 @@ type commandAPIResponse struct {
 	Result         *CommandResult `json:"result,omitempty"`
 	RefreshStarted bool           `json:"refresh_started,omitempty"`
 	Settings       *State         `json:"settings,omitempty"`
+	Notice         string         `json:"notice,omitempty"`
 }
 
-type updateAllAPIResponse struct {
-	Results        []UpdateResult `json:"results"`
-	RefreshStarted bool           `json:"refresh_started"`
-}
+type updateAllAPIResponse = UpdateJobStatus
 
 type stringList []string
 
@@ -338,26 +337,48 @@ func (app *App) serveAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		result := updatePackage(manager, id)
 		app.refreshInventory(true)
-		writeJSON(w, http.StatusOK, refreshedCommandResponse(result))
+		response := refreshedCommandResponse(result)
+		response.Notice = updateFailureNotice(result)
+		writeJSON(w, http.StatusOK, response)
+	case "/api/update-all/status":
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
+		writeJSON(w, http.StatusOK, app.updateJobStatus())
+	case "/api/update-all/cancel":
+		if !requireMethod(w, r, http.MethodPost) {
+			return
+		}
+		writeJSON(w, http.StatusOK, app.cancelUpdateJob())
 	case "/api/update-all":
 		if !requireMethod(w, r, http.MethodPost) {
 			return
 		}
 		packageKeys, invalid := parseUpdateAllPackageKeys(r)
 		if invalid != nil {
-			writeJSON(w, http.StatusBadRequest, updateAllAPIResponse{Results: []UpdateResult{*invalid}, RefreshStarted: false})
+			results := []UpdateResult{*invalid}
+			writeJSON(w, http.StatusBadRequest, updateAllAPIResponse{Results: results, RefreshStarted: false, Notice: updateAllFailureNotice(results)})
 			return
 		}
 		for _, key := range packageKeys {
 			if err := validatePackageKey(key); err != nil {
 				result := UpdateResult{Key: key, Result: validationCommandResult("update-all", err)}
-				writeJSON(w, http.StatusBadRequest, updateAllAPIResponse{Results: []UpdateResult{result}, RefreshStarted: false})
+				results := []UpdateResult{result}
+				writeJSON(w, http.StatusBadRequest, updateAllAPIResponse{Results: results, RefreshStarted: false, Notice: updateAllFailureNotice(results)})
 				return
 			}
 		}
-		results := updateAll(packageKeys)
-		app.refreshInventory(true)
-		writeJSON(w, http.StatusOK, updateAllAPIResponse{Results: results, RefreshStarted: true})
+		status, err := app.startUpdateJob(packageKeys)
+		if err != nil {
+			code := http.StatusBadRequest
+			if errors.Is(err, errUpdateJobRunning) {
+				code = http.StatusConflict
+			}
+			status.Error = err.Error()
+			writeJSON(w, code, status)
+			return
+		}
+		writeJSON(w, http.StatusOK, status)
 	case "/api/settings/startup":
 		if !requireMethod(w, r, http.MethodPost) {
 			return

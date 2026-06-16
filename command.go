@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	createNoWindow = 0x08000000
-	logEntryLimit  = 2000
+	createNoWindow       = 0x08000000
+	logEntryLimit        = 2000
+	commandCancelledCode = 130
 )
 
 type CommandResult struct {
@@ -105,13 +106,47 @@ func hiddenSysProcAttr() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
 }
 
-func appendLogChunk(stream, pending, chunk string) string {
-	normalized := strings.ReplaceAll(chunk, "\r", "\n")
-	parts := strings.Split(pending+normalized, "\n")
-	for _, line := range parts[:len(parts)-1] {
-		sessionLogs.Append(stream, line)
+func appendLogLine(stream, line string) {
+	line = strings.TrimRight(line, "\r\n")
+	if isTransientLogFrame(line) {
+		return
 	}
-	return parts[len(parts)-1]
+	sessionLogs.Append(stream, line)
+}
+
+func isTransientLogFrame(line string) bool {
+	switch strings.TrimSpace(line) {
+	case "|", "/", `\`, "-":
+		return true
+	default:
+		return false
+	}
+}
+
+func appendLogChunk(stream, pending, chunk string) string {
+	text := pending + chunk
+	holdCR := strings.HasSuffix(text, "\r")
+	if holdCR {
+		text = strings.TrimSuffix(text, "\r")
+	}
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+
+	var line strings.Builder
+	for _, char := range text {
+		switch char {
+		case '\n':
+			appendLogLine(stream, line.String())
+			line.Reset()
+		case '\r':
+			line.Reset()
+		default:
+			line.WriteRune(char)
+		}
+	}
+	if holdCR {
+		return line.String() + "\r"
+	}
+	return line.String()
 }
 
 func streamCommandOutput(reader io.Reader, stream string, output *bytes.Buffer, wg *sync.WaitGroup) {
@@ -134,7 +169,7 @@ func streamCommandOutput(reader io.Reader, stream string, output *bytes.Buffer, 
 		}
 	}
 	if pending != "" {
-		sessionLogs.Append(stream, pending)
+		appendLogLine(stream, strings.TrimSuffix(pending, "\r"))
 	}
 }
 
@@ -192,6 +227,51 @@ func isPackageManagerMutationCommand(args []string) bool {
 }
 
 func runCommand(timeout time.Duration, args ...string) CommandResult {
+	return runCommandContext(context.Background(), timeout, args...)
+}
+
+func lockMutexContext(ctx context.Context, mu *sync.Mutex) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	default:
+	}
+	if mu.TryLock() {
+		return true
+	}
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
+			if mu.TryLock() {
+				return true
+			}
+		}
+	}
+}
+
+func commandContextDoneResult(ctx context.Context, command, action string) CommandResult {
+	result := CommandResult{Command: command}
+	verb := "cancelled"
+	switch ctx.Err() {
+	case context.DeadlineExceeded:
+		result.Code = 124
+		result.Stderr = "Timed out."
+		verb = "timed out"
+	default:
+		result.Code = commandCancelledCode
+		result.Stderr = "Cancelled."
+	}
+	sessionLogs.Append("command", command)
+	sessionLogs.Append("stderr", result.Stderr)
+	sessionLogs.Append("exit", fmt.Sprintf("%s %s %s", command, verb, action))
+	return result
+}
+
+func runCommandContext(parent context.Context, timeout time.Duration, args ...string) CommandResult {
 	result := CommandResult{Command: strings.Join(args, " ")}
 	if len(args) == 0 {
 		result.Stderr = "empty command"
@@ -201,17 +281,21 @@ func runCommand(timeout time.Duration, args ...string) CommandResult {
 		sessionLogs.Append("exit", "empty command exited with code 127")
 		return result
 	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+
 	if isPackageManagerMutationCommand(args) {
-		packageManagerMutationMu.Lock()
+		if !lockMutexContext(ctx, &packageManagerMutationMu) {
+			return commandContextDoneResult(ctx, result.Command, "while waiting for package manager lock")
+		}
 		defer packageManagerMutationMu.Unlock()
 	}
 	if isWingetCommand(args) {
-		wingetCommandMu.Lock()
+		if !lockMutexContext(ctx, &wingetCommandMu) {
+			return commandContextDoneResult(ctx, result.Command, "while waiting for winget lock")
+		}
 		defer wingetCommandMu.Unlock()
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
 
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Env = launchEnv()
@@ -238,6 +322,20 @@ func runCommand(timeout time.Duration, args ...string) CommandResult {
 
 	sessionLogs.Append("command", result.Command)
 	if err := cmd.Start(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			result.Code = 124
+			result.Stderr = "Timed out."
+			sessionLogs.Append("stderr", result.Stderr)
+			sessionLogs.Append("exit", fmt.Sprintf("%s timed out before start", result.Command))
+			return result
+		}
+		if ctx.Err() == context.Canceled {
+			result.Code = commandCancelledCode
+			result.Stderr = "Cancelled."
+			sessionLogs.Append("stderr", result.Stderr)
+			sessionLogs.Append("exit", fmt.Sprintf("%s cancelled before start", result.Command))
+			return result
+		}
 		result.Code = 127
 		result.Stderr = err.Error()
 		sessionLogs.Append("stderr", result.Stderr)
@@ -259,6 +357,13 @@ func runCommand(timeout time.Duration, args ...string) CommandResult {
 		result.Stderr += "\nTimed out."
 		sessionLogs.Append("stderr", "Timed out.")
 		sessionLogs.Append("exit", fmt.Sprintf("%s exited with code 124", result.Command))
+		return result
+	}
+	if ctx.Err() == context.Canceled {
+		result.Code = commandCancelledCode
+		result.Stderr += "\nCancelled."
+		sessionLogs.Append("stderr", "Cancelled.")
+		sessionLogs.Append("exit", fmt.Sprintf("%s cancelled with code %d", result.Command, result.Code))
 		return result
 	}
 	if err != nil {

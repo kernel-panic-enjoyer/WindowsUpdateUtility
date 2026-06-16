@@ -32,7 +32,6 @@ var pageTemplate = template.Must(template.New("page").Parse(`<!doctype html>
   </header>
   <main>
     <section id="notice" class="notice hidden"></section>
-    <section id="update-progress" class="progress-panel hidden"><div class="progress-title">Updating packages...</div><div class="progress-bar"><span></span></div></section>
 
     <section class="status-grid">
       <div class="panel"><h2>Package Managers</h2><div id="manager-list"><p class="muted">Checking package managers...</p></div></div>
@@ -57,6 +56,8 @@ var pageTemplate = template.Must(template.New("page").Parse(`<!doctype html>
       <table><thead><tr><th>Name</th><th>Manager</th><th>ID</th><th>Version</th><th>Action</th></tr></thead><tbody id="search-results-body"></tbody></table>
     </section>
 
+    <section id="update-progress" class="progress-panel hidden"><div class="progress-header"><div class="progress-title">Updating packages...</div><button id="cancel-updates-button" class="secondary hidden" type="button">Cancel Updates</button></div><div class="progress-bar"><span></span></div></section>
+
 	<section class="panel">
 	  <div class="section-heading"><h2>Updates Available</h2><div class="button-row"><button id="refresh-packages" type="button">Refresh</button><form class="update-all-form" method="post" action="/api/update-all"><input type="hidden" name="token" value="{{.Token}}"><button id="update-all-button" type="submit">Update All</button></form></div></div>
 	  <form id="update-selected-form" method="post" action="/api/update-all"><input type="hidden" name="token" value="{{.Token}}"></form>
@@ -70,7 +71,7 @@ var pageTemplate = template.Must(template.New("page").Parse(`<!doctype html>
 	</section>
 
     <section id="session-log-panel" class="panel log-panel">
-      <div class="section-heading"><h2>Session Log</h2><div class="button-row"><label class="check-control"><input id="log-autoscroll" type="checkbox" checked> Auto Scroll</label><button id="clear-log-view" type="button">Clear View</button></div></div>
+      <div class="section-heading"><h2>Session Log</h2><div class="button-row"><label class="check-control"><input id="log-autoscroll" type="checkbox" checked> Auto Scroll</label><button id="copy-log-view" type="button">Copy Log</button><button id="clear-log-view" type="button">Clear View</button></div></div>
       <pre id="session-log" class="session-log"></pre>
     </section>
   </main>
@@ -90,6 +91,9 @@ const pageJS = `
   var logLines = [];
   var maxLogLines = 2000;
   var managersRendered = false;
+  var updateJobPollTimer = null;
+  var activeUpdateKeys = [];
+  var activeUpdateJobID = "";
   function $(id){ return document.getElementById(id); }
   function api(path, params){
     var url = new URL(path, window.location.origin);
@@ -147,14 +151,41 @@ const pageJS = `
       }
     }catch(e){}
   }
-  function setGlobalProgress(show, message){
+  async function copyLogView(){
+    var target = $("session-log");
+    var text = target ? target.textContent || "" : "";
+    try{
+      if(navigator.clipboard && navigator.clipboard.writeText){
+        await navigator.clipboard.writeText(text);
+      }else{
+        var textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.setAttribute("readonly", "");
+        textarea.style.position = "fixed";
+        textarea.style.left = "-9999px";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+      }
+      showNotice("Session log copied.");
+    }catch(e){
+      showNotice("Could not copy session log: " + e.message);
+    }
+  }
+  function setGlobalProgress(show, message, cancelVisible){
     var panel = $("update-progress");
     if(!panel){ return; }
     var title = panel.querySelector(".progress-title");
     if(title){ title.textContent = message || "Updating packages..."; }
+    var cancel = $("cancel-updates-button");
+    if(cancel){
+      cancel.classList.toggle("hidden", !cancelVisible);
+      cancel.disabled = !cancelVisible;
+    }
     panel.classList.toggle("hidden", !show);
   }
-  function setUpdateBusy(busy, keys){
+  function setUpdateBusy(busy, keys, currentKey){
     updateBusy = busy;
     var keySet = {};
     (keys || []).forEach(function(key){ keySet[key] = true; });
@@ -171,17 +202,55 @@ const pageJS = `
       var progress = form.querySelector(".row-progress");
       if(progress){ progress.classList.toggle("hidden", !active); }
     });
+    document.querySelectorAll("tr[data-key]").forEach(function(row){
+      row.classList.toggle("updating-current", !!currentKey && row.dataset.key === currentKey);
+    });
+  }
+  function compactNoticeText(value){
+    return String(value || "").replace(/\s+/g, " ").trim();
+  }
+  function truncateNoticeText(value, maxLength){
+    value = compactNoticeText(value);
+    if(value.length <= maxLength){ return value; }
+    return value.slice(0, Math.max(0, maxLength - 3)).trimEnd() + "...";
+  }
+  function firstMeaningfulOutputLine(value){
+    var lines = String(value || "").split(/\r?\n/);
+    for(var i = 0; i < lines.length; i++){
+      var line = compactNoticeText(lines[i]);
+      if(!line || /^[\\|\/-]+$/.test(line)){ continue; }
+      if(/^progress:/i.test(line)){ continue; }
+      return line;
+    }
+    return "";
+  }
+  function commandLabel(result){
+    if(!result || !result.command){ return "command"; }
+    var line = compactNoticeText(String(result.command).split(/\r?\n/)[0]);
+    if(!line){ return "command"; }
+    var parts = line.split(/\s+/);
+    var exe = (parts.shift() || "command").split(/[\\\/]/).pop().replace(/\.exe$/i, "");
+    var detail = [];
+    for(var i = 0; i < parts.length && detail.length < 2; i++){
+      if(parts[i].charAt(0) === "-" || parts[i].charAt(0) === "/"){ continue; }
+      detail.push(parts[i]);
+    }
+    return compactNoticeText([exe].concat(detail).join(" "));
   }
   function commandText(result){
-    if(!result){ return ""; }
-    var output = (result.stderr || result.stdout || "").trim();
-    if(output.length > 700){ output = output.slice(0, 700) + "..."; }
-    return "Code " + (result.code || 0) + (output ? ": " + output : "");
+    if(!result){ return "Code 0. See Session Log for full output."; }
+    var reason = firstMeaningfulOutputLine(result.stderr) || firstMeaningfulOutputLine(result.stdout);
+    var text = commandLabel(result) + " failed with code " + (result.code || 0);
+    if(reason){ text += ": " + truncateNoticeText(reason, 140); }
+    return truncateNoticeText(text, 210) + ". See Session Log for full output.";
   }
   function resultNotice(successMessage, failurePrefix, result){
     return result && result.ok ? successMessage : failurePrefix + ". " + commandText(result);
   }
   function summarizeUpdatePayload(payload){
+    if(payload.notice){
+      return payload.notice;
+    }
     if(payload.result){
       return payload.result.ok ? "Update completed. Refreshing package status..." : "Update finished with errors. " + commandText(payload.result);
     }
@@ -429,6 +498,144 @@ const pageJS = `
       setGlobalProgress(false);
     }
   }
+  function updateJobMessage(status){
+    status = status || {};
+    var mode = status.mode === "selected" ? "selected" : "all";
+    if(status.cancel_requested && status.running){
+      return "Cancelling after current command stops...";
+    }
+    if(status.running){
+      var name = status.current_package || "package";
+      var counter = status.total ? " (" + (status.current_index || 0) + "/" + status.total + ")" : "";
+      return (mode === "selected" ? "Updating selected packages: " : "Updating all packages: ") + name + counter;
+    }
+    if(status.cancel_requested){
+      return status.notice || "Update cancelled. Refreshing package status...";
+    }
+    return status.notice || "Update completed. Refreshing package status...";
+  }
+  function updateableUpdateKeys(){
+    return packages.filter(function(pkg){
+      return !!pkg.update_available && pkg.update_supported !== false;
+    }).map(function(pkg){ return pkg.key; });
+  }
+  function updateJobPackageKeys(status){
+    return status && Array.isArray(status.package_keys) ? status.package_keys : [];
+  }
+  function applyUpdateJobPackageKeys(status){
+    var keys = updateJobPackageKeys(status);
+    if(keys.length > 0){
+      activeUpdateKeys = keys;
+    }
+  }
+  function clearUpdateJobPoll(){
+    if(updateJobPollTimer){
+      clearTimeout(updateJobPollTimer);
+      updateJobPollTimer = null;
+    }
+  }
+  function renderUpdateJobStatus(status){
+    applyUpdateJobPackageKeys(status);
+    var message = updateJobMessage(status);
+    var active = !!(status && status.running);
+    setUpdateBusy(active || !!(status && status.refresh_started), activeUpdateKeys, status ? status.current_key : "");
+    setGlobalProgress(active || !!(status && status.refresh_started), message, active && !status.cancel_requested);
+    showNotice(message);
+  }
+  async function finishUpdateJob(status){
+    clearUpdateJobPoll();
+    renderUpdateJobStatus(status);
+    try{
+      if(status && status.refresh_started){
+        setGlobalProgress(true, updateJobMessage(status), false);
+        await refreshPackagesAfterUpdate(true);
+      }
+    }finally{
+      activeUpdateKeys = [];
+      activeUpdateJobID = "";
+      setUpdateBusy(false, [], "");
+      setGlobalProgress(false, "", false);
+    }
+  }
+  async function pollUpdateJobStatus(){
+    try{
+      var response = await fetch(api("/api/update-all/status"));
+      var status = await response.json();
+      if(!response.ok){ throw new Error(status.error || "Could not load update status"); }
+      if(activeUpdateJobID && status.job_id && status.job_id !== activeUpdateJobID){ return; }
+      renderUpdateJobStatus(status);
+      if(status.running){
+        updateJobPollTimer = setTimeout(pollUpdateJobStatus, 800);
+        return;
+      }
+      await finishUpdateJob(status);
+    }catch(e){
+      showNotice("Could not load update status: " + e.message);
+      updateJobPollTimer = setTimeout(pollUpdateJobStatus, 1200);
+    }
+  }
+  async function startUpdateJob(params, keys, message){
+    clearUpdateJobPoll();
+    activeUpdateKeys = keys || [];
+    activeUpdateJobID = "";
+    setUpdateBusy(true, activeUpdateKeys);
+    setGlobalProgress(true, message || "Starting updates...", true);
+    showNotice(message || "Starting updates...");
+    try{
+      var response = await postForm("/api/update-all", params);
+      var status = await response.json();
+      if(!response.ok){
+        if(response.status === 409 && status.running){
+          activeUpdateJobID = status.job_id || "";
+          renderUpdateJobStatus(status);
+          updateJobPollTimer = setTimeout(pollUpdateJobStatus, 800);
+          return;
+        }
+        throw new Error(status.error || status.notice || "Could not start update job");
+      }
+      activeUpdateJobID = status.job_id || "";
+      renderUpdateJobStatus(status);
+      if(status.running){
+        updateJobPollTimer = setTimeout(pollUpdateJobStatus, 800);
+        return;
+      }
+      await finishUpdateJob(status);
+    }catch(e){
+      activeUpdateKeys = [];
+      activeUpdateJobID = "";
+      setUpdateBusy(false, [], "");
+      setGlobalProgress(false, "", false);
+      showNotice("Update failed: " + e.message);
+    }
+  }
+  async function checkActiveUpdateJob(){
+    try{
+      var response = await fetch(api("/api/update-all/status"));
+      var status = await response.json();
+      if(!response.ok || !status.running){ return; }
+      activeUpdateJobID = status.job_id || "";
+      renderUpdateJobStatus(status);
+      clearUpdateJobPoll();
+      updateJobPollTimer = setTimeout(pollUpdateJobStatus, 800);
+    }catch(e){}
+  }
+  async function cancelUpdateJob(){
+    var button = $("cancel-updates-button");
+    if(button){ button.disabled = true; }
+    showNotice("Cancelling after current command stops...");
+    setGlobalProgress(true, "Cancelling after current command stops...", false);
+    try{
+      var response = await postForm("/api/update-all/cancel", {});
+      var status = await response.json();
+      if(!response.ok){ throw new Error(status.error || "Could not cancel update job"); }
+      renderUpdateJobStatus(status);
+      clearUpdateJobPoll();
+      updateJobPollTimer = setTimeout(pollUpdateJobStatus, 500);
+    }catch(e){
+      showNotice("Could not cancel updates: " + e.message);
+      if(button){ button.disabled = false; }
+    }
+  }
   async function loadSearch(query){
     var body = $("search-results-body");
     $("search-results-panel").classList.remove("hidden");
@@ -542,12 +749,13 @@ const pageJS = `
         showNotice("Select at least one package to update.");
         return;
       }
-      runUpdateRequest("/api/update-all", params, keys, "Updating selected packages...");
+      startUpdateJob(params, keys, "Updating selected packages...");
       return;
     }
     if(form.matches(".update-all-form")){
       event.preventDefault();
-      runUpdateRequest("/api/update-all", new URLSearchParams(new FormData(form)), [], "Updating all packages...");
+      var allKeys = updateableUpdateKeys();
+      startUpdateJob(new URLSearchParams(new FormData(form)), allKeys, "Updating all packages...");
     }
   });
   $("theme-toggle").addEventListener("click", function(){
@@ -598,9 +806,11 @@ const pageJS = `
     logLines = [];
     renderLogLines(false);
   });
+  $("copy-log-view").addEventListener("click", function(){ copyLogView(); });
+  $("cancel-updates-button").addEventListener("click", function(){ cancelUpdateJob(); });
   setTheme(currentTheme());
   loadStatus(false);
-  loadPackages(false);
+  loadPackages(false).then(function(){ checkActiveUpdateJob(); });
   loadLogs();
   setInterval(loadLogs, 750);
   var query = new URLSearchParams(window.location.search).get("q");
@@ -614,4 +824,4 @@ const pageJS = `
 const pageCSS = `
 :root{color-scheme:light dark;--bg:#f6f7f9;--surface:#fff;--line:#d8dee8;--text:#18202b;--muted:#5d6979;--header:#172033;--header-text:#fff;--blue:#1d5fd1;--green:#18784f;--amber:#946200;--red:#b42318;--input:#fff;--input-text:#18202b;--log-bg:#111827;--log-text:#e5e7eb;--log-border:#243244}
 [data-theme=dark]{--bg:#101419;--surface:#171d24;--line:#2c3542;--text:#ecf1f7;--muted:#a8b3c2;--header:#0c1117;--header-text:#f5f8fb;--blue:#5d9bff;--green:#71d29d;--amber:#f1c65b;--red:#ff8b7f;--input:#111820;--input-text:#ecf1f7;--log-bg:#05080d;--log-text:#d7f7df;--log-border:#1c2735}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 "Segoe UI",system-ui,sans-serif}.app-header{display:flex;justify-content:space-between;gap:16px;align-items:center;background:var(--header);color:var(--header-text);padding:18px 24px;border-bottom:4px solid #2c9a78}.app-header h1{margin:0;font-size:24px}.app-header p{margin:4px 0 0;color:#dce6f4}.header-actions,.section-heading,.search,.button-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}main{width:min(1480px,100%);margin:auto;padding:20px 24px}.status-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.panel,.notice,.log,.progress-panel{background:var(--surface);border:1px solid var(--line);margin-bottom:16px;padding:14px;box-shadow:0 8px 24px rgba(18,32,51,.08)}.hidden{display:none!important}.notice{border-left:4px solid var(--blue)}.progress-panel{border-left:4px solid var(--amber)}.progress-title{font-weight:700;margin-bottom:8px}.progress-bar{position:relative;height:6px;overflow:hidden;background:rgba(127,127,127,.18);border-radius:999px}.progress-bar span{position:absolute;inset:0 auto 0 0;width:38%;background:var(--blue);border-radius:999px;animation:progress-slide 1s linear infinite}.row-progress{margin-top:8px;min-width:90px}.row-progress .progress-bar{height:4px}@keyframes progress-slide{0%{transform:translateX(-110%)}100%{transform:translateX(270%)}}.manager{display:grid;gap:6px;margin-top:10px}.stack{display:grid;gap:10px}.muted{color:var(--muted)}.check-control{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-weight:650}button{min-height:34px;border:1px solid var(--blue);background:var(--blue);color:#fff;padding:6px 10px;font:inherit;font-weight:600;cursor:pointer}button:disabled{cursor:wait;opacity:.6}button.secondary{background:transparent;border-color:rgba(255,255,255,.35)}input{min-height:34px;border:1px solid var(--line);background:var(--input);color:var(--input-text);padding:6px 9px;font:inherit}input[type=checkbox]{min-height:auto;padding:0}table{width:100%;border-collapse:collapse;table-layout:fixed}th,td{border-bottom:1px solid var(--line);padding:9px 10px;text-align:left;vertical-align:middle;overflow-wrap:anywhere}th{color:var(--muted);text-transform:uppercase;font-size:12px}.badge{display:inline-flex;min-height:22px;align-items:center;border:1px solid var(--line);padding:1px 7px;background:rgba(127,127,127,.1);font-size:12px;font-weight:650}.badge.ok{color:var(--green)}.badge.warn{color:var(--amber)}.badge.error{color:var(--red)}pre{white-space:pre-wrap;overflow:auto;background:var(--log-bg);color:var(--log-text);padding:10px}.session-log{height:280px;margin:0;border:1px solid var(--log-border);font:12px/1.45 Consolas,"Cascadia Mono","Courier New",monospace}.log-panel .section-heading{justify-content:space-between;margin-bottom:10px}@media(max-width:900px){.app-header,.status-grid{display:block}.header-actions{margin-top:12px}main{padding:12px}table{min-width:900px}.panel{overflow-x:auto}.session-log{min-width:640px}}`
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 "Segoe UI",system-ui,sans-serif}.app-header{display:flex;justify-content:space-between;gap:16px;align-items:center;background:var(--header);color:var(--header-text);padding:18px 24px;border-bottom:4px solid #2c9a78}.app-header h1{margin:0;font-size:24px}.app-header p{margin:4px 0 0;color:#dce6f4}.header-actions,.section-heading,.search,.button-row,.progress-header{display:flex;gap:10px;align-items:center;flex-wrap:wrap}main{width:min(1480px,100%);margin:auto;padding:20px 24px}.status-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.panel,.notice,.log,.progress-panel{background:var(--surface);border:1px solid var(--line);margin-bottom:16px;padding:14px;box-shadow:0 8px 24px rgba(18,32,51,.08)}.hidden{display:none!important}.notice{border-left:4px solid var(--blue);max-height:96px;overflow:auto;overflow-wrap:anywhere;white-space:normal}.progress-panel{border-left:4px solid var(--amber)}.progress-header{justify-content:space-between;margin-bottom:8px}.progress-title{font-weight:700}.progress-bar{position:relative;height:6px;overflow:hidden;background:rgba(127,127,127,.18);border-radius:999px}.progress-bar span{position:absolute;inset:0 auto 0 0;width:38%;background:var(--blue);border-radius:999px;animation:progress-slide 1s linear infinite}.row-progress{margin-top:8px;min-width:90px}.row-progress .progress-bar{height:4px}@keyframes progress-slide{0%{transform:translateX(-110%)}100%{transform:translateX(270%)}}.manager{display:grid;gap:6px;margin-top:10px}.stack{display:grid;gap:10px}.muted{color:var(--muted)}.check-control{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-weight:650}button{min-height:34px;border:1px solid var(--blue);background:var(--blue);color:#fff;padding:6px 10px;font:inherit;font-weight:600;cursor:pointer}button:disabled{cursor:wait;opacity:.6}button.secondary{background:transparent;border-color:rgba(255,255,255,.35)}input{min-height:34px;border:1px solid var(--line);background:var(--input);color:var(--input-text);padding:6px 9px;font:inherit}input[type=checkbox]{min-height:auto;padding:0}table{width:100%;border-collapse:collapse;table-layout:fixed}tr.updating-current{background:rgba(93,155,255,.12)}th,td{border-bottom:1px solid var(--line);padding:9px 10px;text-align:left;vertical-align:middle;overflow-wrap:anywhere}th{color:var(--muted);text-transform:uppercase;font-size:12px}.badge{display:inline-flex;min-height:22px;align-items:center;border:1px solid var(--line);padding:1px 7px;background:rgba(127,127,127,.1);font-size:12px;font-weight:650}.badge.ok{color:var(--green)}.badge.warn{color:var(--amber)}.badge.error{color:var(--red)}pre{white-space:pre-wrap;overflow:auto;background:var(--log-bg);color:var(--log-text);padding:10px}.session-log{height:280px;margin:0;border:1px solid var(--log-border);font:12px/1.45 Consolas,"Cascadia Mono","Courier New",monospace}.log-panel .section-heading{justify-content:space-between;margin-bottom:10px}@media(max-width:900px){.app-header,.status-grid{display:block}.header-actions{margin-top:12px}main{padding:12px}table{min-width:900px}.panel{overflow-x:auto}.session-log{min-width:640px}}`

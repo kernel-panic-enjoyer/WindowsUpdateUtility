@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -91,6 +92,7 @@ const (
 	packageActionTimeout    = time.Hour
 	updateAllCommandTimeout = 2 * time.Hour
 	storeResolveCacheTTL    = 6 * time.Hour
+	storeUnresolvedCacheTTL = 0
 )
 
 type managerDetectionState struct {
@@ -342,6 +344,27 @@ func isSourceToken(value string) bool {
 	return value == sourceWinget || value == sourceMSStore
 }
 
+func isWingetMatchColumn(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return false
+	}
+	for _, prefix := range []string{"tag:", "moniker:", "command:", "packagefamilyname:", "productcode:"} {
+		if strings.HasPrefix(value, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func wingetMatchValue(value string) string {
+	value = strings.TrimSpace(value)
+	if before, after, ok := strings.Cut(value, ":"); ok && before != "" {
+		return strings.TrimSpace(after)
+	}
+	return value
+}
+
 func parseWingetTable(output string) []Package {
 	lines := strings.Split(output, "\n")
 	headerSeen := false
@@ -375,10 +398,10 @@ func parseWingetTable(output string) []Package {
 			}
 		}
 		if len(rest) > 0 {
-			pkg.AvailableVersion = rest[0]
-			if strings.HasPrefix(strings.ToLower(rest[0]), "tag:") {
-				pkg.AvailableVersion = ""
+			if isWingetMatchColumn(rest[0]) {
 				pkg.Match = rest[0]
+			} else {
+				pkg.AvailableVersion = rest[0]
 			}
 		}
 		if len(rest) > 1 {
@@ -542,14 +565,53 @@ func wingetInstalled() ([]Package, CommandResult) {
 }
 
 func wingetUpdates() (map[string]string, CommandResult) {
-	result := runCommand(120*time.Second, managerCommand(managerWinget, "upgrade", "--accept-source-agreements", "--disable-interactivity")...)
 	updates := map[string]string{}
-	for _, pkg := range parseWingetTable(result.Stdout + "\n" + result.Stderr) {
-		if pkg.AvailableVersion != "" && !isTruncatedID(pkg.ID) {
-			updates[packageKey(pkg.Manager, strings.ToLower(pkg.ID))] = pkg.AvailableVersion
+	result := runCommand(120*time.Second, managerCommand(managerWinget, "upgrade", "--accept-source-agreements", "--disable-interactivity")...)
+	mergeWingetUpdateOutput(updates, result.Stdout+"\n"+result.Stderr, "")
+	storeResult := runCommand(120*time.Second, managerCommand(managerWinget, "upgrade", "--source", sourceMSStore, "--accept-source-agreements", "--disable-interactivity")...)
+	mergeWingetUpdateOutput(updates, storeResult.Stdout+"\n"+storeResult.Stderr, managerStore)
+	return updates, mergeReadOnlyCommandResults(result, storeResult, "winget msstore update check")
+}
+
+func mergeWingetUpdateOutput(updates map[string]string, output, forceManager string) {
+	for _, pkg := range parseWingetTable(output) {
+		if pkg.AvailableVersion == "" || isTruncatedID(pkg.ID) {
+			continue
 		}
+		manager := pkg.Manager
+		if forceManager != "" {
+			manager = forceManager
+		}
+		updates[packageKey(manager, strings.ToLower(pkg.ID))] = pkg.AvailableVersion
 	}
-	return updates, result
+}
+
+func mergeReadOnlyCommandResults(primary, secondary CommandResult, label string) CommandResult {
+	merged := primary
+	if merged.Command != "" && secondary.Command != "" {
+		merged.Command += "\n" + label + ": " + secondary.Command
+	} else if secondary.Command != "" {
+		merged.Command = secondary.Command
+	}
+	merged.Stdout = strings.TrimRight(primary.Stdout, "\r\n")
+	if merged.Stdout != "" && secondary.Stdout != "" {
+		merged.Stdout += "\n"
+	}
+	merged.Stdout += secondary.Stdout
+	merged.Stderr = strings.TrimRight(primary.Stderr, "\r\n")
+	if merged.Stderr != "" && secondary.Stderr != "" {
+		merged.Stderr += "\n"
+	}
+	merged.Stderr += secondary.Stderr
+	if primary.OK || secondary.OK {
+		merged.OK = true
+		merged.Code = 0
+		return merged
+	}
+	if secondary.Code != 0 {
+		merged.Code = secondary.Code
+	}
+	return merged
 }
 
 func parseStoreSearch(output string) []Package {
@@ -591,7 +653,7 @@ func parseStorePackageTable(output string) []Package {
 		if isStoreDividerLine(line) {
 			continue
 		}
-		cols := splitColumns(line)
+		cols := splitStoreColumns(line)
 		if len(cols) < 2 {
 			continue
 		}
@@ -631,7 +693,7 @@ func parseStorePackageTable(output string) []Package {
 }
 
 func isStoreTableHeader(line string) bool {
-	cols := splitColumns(line)
+	cols := splitStoreColumns(line)
 	if len(cols) < 2 {
 		return false
 	}
@@ -642,11 +704,45 @@ func isStoreTableHeader(line string) bool {
 		switch normalized {
 		case "name", "app", "application":
 			hasName = true
-		case "id", "publisher", "version", "current", "available", "status", "price":
+		case "id", "product id", "package id", "publisher", "version", "current", "available", "status", "price":
 			hasKnownColumn = true
 		}
 	}
 	return hasName && hasKnownColumn
+}
+
+func splitStoreColumns(line string) []string {
+	line = normalizeStoreTableDelimiters(line)
+	if strings.ContainsAny(line, "│┃|") {
+		parts := strings.FieldsFunc(line, func(r rune) bool {
+			return r == '│' || r == '┃' || r == '|'
+		})
+		cols := make([]string, 0, len(parts))
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				cols = append(cols, part)
+			}
+		}
+		return cols
+	}
+	return splitColumns(line)
+}
+
+func normalizeStoreTableDelimiters(line string) string {
+	return strings.NewReplacer(
+		"â”‚", "|",
+		"â”ƒ", "|",
+		"â”Œ", "─",
+		"â”", "─",
+		"â””", "─",
+		"â”˜", "─",
+		"â”œ", "─",
+		"â”¤", "─",
+		"â”¬", "─",
+		"â”´", "─",
+		"â”¼", "─",
+	).Replace(line)
 }
 
 func isStoreSearchNoiseLine(line string) bool {
@@ -708,6 +804,11 @@ func storeSearch(query string) ([]Package, CommandResult) {
 	return parseStoreSearch(result.Stdout + "\n" + result.Stderr), result
 }
 
+func storeUpdates() (map[string]string, CommandResult) {
+	result := runCommand(120*time.Second, managerCommand(managerStore, "updates")...)
+	return parseStoreUpdates(result.Stdout + "\n" + result.Stderr), result
+}
+
 func appxInstalled() ([]Package, CommandResult) {
 	script := `$ErrorActionPreference='Stop'
 $startNames=@{}
@@ -719,7 +820,13 @@ try {
     }
   }
 } catch {}
-Get-AppxPackage | Where-Object { -not $_.IsFramework -and -not $_.NonRemovable } | ForEach-Object {
+$packages=$null
+try {
+  $packages=Get-AppxPackage -AllUsers -PackageTypeFilter Main,Framework,Bundle,Optional
+} catch {
+  $packages=Get-AppxPackage -PackageTypeFilter Main,Framework,Bundle,Optional
+}
+$packages | ForEach-Object {
   $displayName=''
   $publisherDisplayName=''
   $startName=''
@@ -811,8 +918,7 @@ func friendlyAppxName(name, displayName string, preferred ...string) string {
 		return candidate
 	}
 	if strings.Contains(candidate, ".") {
-		parts := strings.Split(candidate, ".")
-		candidate = parts[len(parts)-1]
+		candidate = friendlyDottedPackageIdentity(candidate)
 	}
 	candidate = regexp.MustCompile(`^\d+`).ReplaceAllString(candidate, "")
 	candidate = strings.Trim(candidate, " ._-")
@@ -821,6 +927,30 @@ func friendlyAppxName(name, displayName string, preferred ...string) string {
 		return strings.TrimSpace(name)
 	}
 	return candidate
+}
+
+func friendlyDottedPackageIdentity(name string) string {
+	parts := strings.Split(strings.Trim(name, " ._"), ".")
+	if len(parts) > 1 {
+		parts = parts[1:]
+	}
+	if len(parts) >= 2 && numericString(parts[len(parts)-1]) && numericString(parts[len(parts)-2]) {
+		version := parts[len(parts)-2] + "." + parts[len(parts)-1]
+		parts = append(parts[:len(parts)-2], version)
+	}
+	return strings.Join(strings.Fields(strings.Join(parts, " ")), " ")
+}
+
+func numericString(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func cleanManifestDisplayName(displayName string) string {
@@ -832,7 +962,15 @@ func cleanManifestDisplayName(displayName string) string {
 	if strings.HasPrefix(lower, "ms-resource:") || strings.HasPrefix(lower, "@{") || strings.Contains(displayName, "\\") {
 		return ""
 	}
+	if looksLikeManifestPackageIdentity(displayName) {
+		return ""
+	}
 	return displayName
+}
+
+func looksLikeManifestPackageIdentity(displayName string) bool {
+	displayName = strings.TrimSpace(displayName)
+	return strings.Contains(displayName, ".") && !strings.Contains(displayName, " ")
 }
 
 func splitJoinedWords(value string) string {
@@ -947,6 +1085,54 @@ func mergeStoreDuplicatePackage(existing, appx Package) Package {
 	return existing
 }
 
+func storeUpdateVersionForPackage(pkg Package, updates map[string]string) string {
+	available, _ := storeUpdateForPackage(pkg, updates)
+	return available
+}
+
+func storeUpdateForPackage(pkg Package, updates map[string]string) (string, string) {
+	if pkg.Manager != managerStore || len(updates) == 0 {
+		return "", ""
+	}
+	candidates := []string{pkg.Name, pkg.ID, stableStoreActionID(pkg.ID), pkg.Match, stableStoreActionID(pkg.Match)}
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if available := updates[packageKey(managerStore, strings.ToLower(candidate))]; available != "" {
+			return available, candidate
+		}
+	}
+	return "", ""
+}
+
+func applyStoreUpdateVersion(pkg Package, updates map[string]string, storeAvailable bool) Package {
+	available, target := storeUpdateForPackage(pkg, updates)
+	if available == "" {
+		return pkg
+	}
+	target = strings.TrimSpace(target)
+	if target == "" {
+		target = stableStoreActionID(pkg.ID)
+	}
+	if target != "" && target != pkg.ID {
+		pkg.ID = target
+		pkg.Key = packageKey(managerStore, target)
+	}
+	pkg.AvailableVersion = available
+	pkg.UpdateAvailable = true
+	pkg.UpdateSupported = true
+	if pkg.ActionBackend == "" || pkg.ActionBackend == backendAppXInventory {
+		if storeAvailable {
+			pkg.ActionBackend = backendStoreCLIResolved
+		} else {
+			pkg.ActionBackend = backendWingetMSStoreFallback
+		}
+	}
+	return pkg
+}
+
 type storeSearchFunc func(query string) ([]Package, CommandResult)
 
 func resolveStoreAppxPackages(state *State, packages []Package, storeAvailable bool, search storeSearchFunc) ([]Package, map[string]CommandResult, bool) {
@@ -959,9 +1145,11 @@ func resolveStoreAppxPackages(state *State, packages []Package, storeAvailable b
 	}
 
 	type job struct {
-		index int
-		pkg   Package
-		key   string
+		index     int
+		pkg       Package
+		key       string
+		cached    StoreResolveCacheEntry
+		hasCached bool
 	}
 	var jobs []job
 	cacheChanged := false
@@ -971,26 +1159,23 @@ func resolveStoreAppxPackages(state *State, packages []Package, storeAvailable b
 		}
 		cacheKey := strings.ToLower(packages[i].ID)
 		if entry, ok := state.StoreResolveCache[cacheKey]; ok && entry.AppXVersion == packages[i].Version {
-			if entry.Resolved && validStoreResolvedTarget(entry) {
+			if entry.Resolved && validStoreResolvedTargetForPackage(packages[i], entry) {
 				packages[i] = applyStoreResolution(packages[i], entry)
-				if storeResolveCacheFresh(entry) {
-					continue
-				}
-				jobs = append(jobs, job{index: i, pkg: packages[i], key: cacheKey})
+				jobs = append(jobs, job{index: i, pkg: packages[i], key: cacheKey, cached: entry, hasCached: true})
 				continue
 			}
 			if entry.Resolved {
 				delete(state.StoreResolveCache, cacheKey)
 				cacheChanged = true
 				appLog("Store resolver discarded stale invalid mapping for %q.", packages[i].Name)
-			} else if storeResolveCacheFresh(entry) {
+			} else if storeResolveUnresolvedCacheFresh(entry) {
 				continue
 			}
 		}
 		jobs = append(jobs, job{index: i, pkg: packages[i], key: cacheKey})
 	}
 	if len(jobs) == 0 {
-		return packages, commandResults, false
+		return packages, commandResults, cacheChanged
 	}
 
 	appLog("Store resolver started for %d inventory-only app(s).", len(jobs))
@@ -1022,6 +1207,10 @@ func resolveStoreAppxPackages(state *State, packages []Package, storeAvailable b
 					entry.StoreID = strings.TrimSpace(match.ID)
 					entry.StoreName = strings.TrimSpace(match.Name)
 					entry.StoreVersion = latestPackageVersion(match)
+				} else if item.hasCached && item.cached.Resolved && validStoreResolvedTargetForPackage(item.pkg, item.cached) {
+					entry = item.cached
+					entry.AppXVersion = item.pkg.Version
+					entry.ResolvedAt = utcNow()
 				}
 				state.StoreResolveCache[item.key] = entry
 				changed = true
@@ -1074,6 +1263,17 @@ func storeResolveCacheFresh(entry StoreResolveCacheEntry) bool {
 	return time.Since(resolvedAt) < storeResolveCacheTTL
 }
 
+func storeResolveUnresolvedCacheFresh(entry StoreResolveCacheEntry) bool {
+	if entry.ResolvedAt == "" {
+		return false
+	}
+	resolvedAt, err := time.Parse(time.RFC3339, entry.ResolvedAt)
+	if err != nil {
+		return false
+	}
+	return time.Since(resolvedAt) < storeUnresolvedCacheTTL
+}
+
 func resolvedStoreTarget(entry StoreResolveCacheEntry) string {
 	if strings.TrimSpace(entry.StoreID) != "" {
 		return strings.TrimSpace(entry.StoreID)
@@ -1090,6 +1290,18 @@ func validStoreResolvedTarget(entry StoreResolveCacheEntry) bool {
 		return false
 	}
 	return true
+}
+
+func validStoreResolvedTargetForPackage(pkg Package, entry StoreResolveCacheEntry) bool {
+	if !validStoreResolvedTarget(entry) {
+		return false
+	}
+	score := storeResolutionScore(storeResolutionCandidates(pkg), Package{
+		Name:    entry.StoreName,
+		ID:      entry.StoreID,
+		Manager: managerStore,
+	}, 0)
+	return score >= 70
 }
 
 func latestPackageVersion(pkg Package) string {
@@ -1159,7 +1371,10 @@ func storeResolutionScore(candidates []string, result Package, rank int) int {
 			if value == candidate {
 				return 100
 			}
-			if len(candidate) >= 5 && rank == 0 && (strings.Contains(value, candidate) || strings.Contains(candidate, value)) {
+			if len(candidate) >= 5 && rank == 0 && strings.Contains(value, candidate) {
+				return 70
+			}
+			if len(candidate) >= 5 && rank == 0 && strings.Contains(candidate, value) && len(value)*100/len(candidate) >= 80 {
 				return 70
 			}
 		}
@@ -1309,16 +1524,27 @@ func getInventory() Inventory {
 	managers := detectManagers()
 	commandResults := map[string]CommandResult{}
 	var packages []Package
+	storeUpdateVersions := map[string]string{}
 
 	inventoryCh := make(chan managerInventory, 2)
 	var wg sync.WaitGroup
 	var appxPackages []Package
 	var appxResult CommandResult
+	var nativeStoreUpdates map[string]string
+	var nativeStoreUpdatesResult CommandResult
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		appxPackages, appxResult = appxInstalled()
 	}()
+
+	if managers[managerStore].Available {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			nativeStoreUpdates, nativeStoreUpdatesResult = storeUpdates()
+		}()
+	}
 
 	if managers[managerWinget].Available {
 		wg.Add(1)
@@ -1338,10 +1564,24 @@ func getInventory() Inventory {
 	wg.Wait()
 	close(inventoryCh)
 	commandResults["appx_inventory"] = appxResult
+	if nativeStoreUpdatesResult.Command != "" {
+		commandResults["store_updates"] = nativeStoreUpdatesResult
+		for key, available := range nativeStoreUpdates {
+			storeUpdateVersions[key] = available
+		}
+	}
 
 	for inventory := range inventoryCh {
 		commandResults[inventory.listKey] = inventory.listResult
 		commandResults[inventory.updateKey] = inventory.updateResult
+		if inventory.manager == managerWinget {
+			for key, available := range inventory.updates {
+				manager, _, err := splitPackageKey(key)
+				if err == nil && manager == managerStore {
+					storeUpdateVersions[key] = available
+				}
+			}
+		}
 		for _, pkg := range inventory.installed {
 			displayManager := inventory.manager
 			if inventory.manager == managerWinget {
@@ -1391,6 +1631,7 @@ func getInventory() Inventory {
 			}
 		}
 		for i := range appxPackages {
+			appxPackages[i] = applyStoreUpdateVersion(appxPackages[i], storeUpdateVersions, managers[managerStore].Available)
 			appxPackages[i].Key = packageKey(managerStore, appxPackages[i].ID)
 			appxPackages[i].Installed = true
 			if appxPackages[i].UpdateSupported {
@@ -1497,14 +1738,105 @@ func searchPackages(query string) (PackageLookup, error) {
 		seen[key] = true
 		packages = append(packages, pkg)
 	}
-	sort.Slice(packages, func(i, j int) bool {
-		if packages[i].Manager == packages[j].Manager {
-			return strings.ToLower(packages[i].Name) < strings.ToLower(packages[j].Name)
-		}
-		return managerSortRank(packages[i].Manager) < managerSortRank(packages[j].Manager)
-	})
+	sortSearchPackages(query, packages)
 	appLog("Package search completed for %q with %d result(s).", query, len(packages))
 	return PackageLookup{Packages: packages, Managers: managers, CommandResults: commandResults}, nil
+}
+
+func sortSearchPackages(query string, packages []Package) {
+	sort.SliceStable(packages, func(i, j int) bool {
+		leftScore := packageSearchScore(query, packages[i])
+		rightScore := packageSearchScore(query, packages[j])
+		if leftScore != rightScore {
+			return leftScore > rightScore
+		}
+		if packages[i].Manager != packages[j].Manager {
+			return managerSortRank(packages[i].Manager) < managerSortRank(packages[j].Manager)
+		}
+		if len(packages[i].Name) != len(packages[j].Name) {
+			return len(packages[i].Name) < len(packages[j].Name)
+		}
+		return strings.ToLower(packages[i].Name) < strings.ToLower(packages[j].Name)
+	})
+}
+
+func packageSearchScore(query string, pkg Package) int {
+	query = strings.ToLower(strings.TrimSpace(query))
+	if query == "" {
+		return 0
+	}
+	queryNorm := normalizePackageIdentity(query)
+	primaryValues := []string{pkg.Name, pkg.ID}
+	matchValues := []string{pkg.Match, wingetMatchValue(pkg.Match)}
+	if valuesContainExact(primaryValues, query) {
+		return 1200
+	}
+	if valuesContainExact(matchValues, query) {
+		return 1100
+	}
+	if normalizedValuesContainExact(primaryValues, queryNorm) {
+		return 1000
+	}
+	if normalizedValuesContainExact(matchValues, queryNorm) {
+		return 950
+	}
+	if normalizedValuesHavePrefix(primaryValues, queryNorm) {
+		return 700
+	}
+	if normalizedValuesHavePrefix(matchValues, queryNorm) {
+		return 650
+	}
+	if normalizedValuesContain(primaryValues, queryNorm) {
+		return 500
+	}
+	if normalizedValuesContain(matchValues, queryNorm) {
+		return 450
+	}
+	return 0
+}
+
+func valuesContainExact(values []string, query string) bool {
+	for _, value := range values {
+		if strings.ToLower(strings.TrimSpace(value)) == query {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizedValuesContainExact(values []string, query string) bool {
+	for _, value := range values {
+		if normalizePackageIdentity(value) == query {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizedValuesHavePrefix(values []string, query string) bool {
+	if query == "" {
+		return false
+	}
+	for _, value := range values {
+		normalized := normalizePackageIdentity(value)
+		if normalized != "" && strings.HasPrefix(normalized, query) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizedValuesContain(values []string, query string) bool {
+	if query == "" {
+		return false
+	}
+	for _, value := range values {
+		normalized := normalizePackageIdentity(value)
+		if normalized != "" && strings.Contains(normalized, query) {
+			return true
+		}
+	}
+	return false
 }
 
 func wingetSearch(query string) ([]Package, CommandResult) {
@@ -1647,17 +1979,24 @@ func runStoreInstallWithFallback(id string) CommandResult {
 }
 
 func runStoreUpdateWithFallback(id string) CommandResult {
+	return runStoreUpdateWithFallbackContext(context.Background(), id)
+}
+
+func runStoreUpdateWithFallbackContext(ctx context.Context, id string) CommandResult {
 	if storeCLIAvailable() {
-		result := runCommand(packageActionTimeout, managerCommand(managerStore, "update", id)...)
+		result := runCommandContext(ctx, packageActionTimeout, managerCommand(managerStore, "update", id, "--apply", "true")...)
 		if result.OK || !detectManager(managerWinget).Available {
 			return result
 		}
+		if ctx.Err() != nil {
+			return result
+		}
 		appLog("Store update for %q failed; trying winget msstore fallback.", id)
-		fallback := runWingetUpgradeWithInstallFallback(managerStore, id)
+		fallback := runWingetUpgradeWithInstallFallbackContext(ctx, managerStore, id)
 		return mergeCommandResults(result, fallback, "winget msstore fallback")
 	}
 	if detectManager(managerWinget).Available {
-		return runWingetUpgradeWithInstallFallback(managerStore, id)
+		return runWingetUpgradeWithInstallFallbackContext(ctx, managerStore, id)
 	}
 	return storeActionUnavailableResult("update")
 }
@@ -1682,6 +2021,10 @@ func installPackage(manager, id string) CommandResult {
 }
 
 func updatePackage(manager, id string) CommandResult {
+	return updatePackageContext(context.Background(), manager, id)
+}
+
+func updatePackageContext(ctx context.Context, manager, id string) CommandResult {
 	if err := validateManagerAndID(manager, id); err != nil {
 		return validationCommandResult("update", err)
 	}
@@ -1690,21 +2033,28 @@ func updatePackage(manager, id string) CommandResult {
 	var result CommandResult
 	switch manager {
 	case managerStore:
-		result = runStoreUpdateWithFallback(id)
+		result = runStoreUpdateWithFallbackContext(ctx, id)
 	case managerWinget:
-		result = runWingetUpgradeWithInstallFallback(manager, id)
+		result = runWingetUpgradeWithInstallFallbackContext(ctx, manager, id)
 	case managerChoco:
-		result = runCommand(packageActionTimeout, chocoPackageCommand("upgrade", id)...)
+		result = runCommandContext(ctx, packageActionTimeout, chocoPackageCommand("upgrade", id)...)
 	}
 	appLog("Update finished for %s:%s with code %d.", manager, id, result.Code)
 	return result
 }
 
 func runWingetUpgradeWithInstallFallback(manager, id string) CommandResult {
-	result := runCommand(packageActionTimeout, wingetUpgradeCommand(manager, id)...)
+	return runWingetUpgradeWithInstallFallbackContext(context.Background(), manager, id)
+}
+
+func runWingetUpgradeWithInstallFallbackContext(ctx context.Context, manager, id string) CommandResult {
+	result := runCommandContext(ctx, packageActionTimeout, wingetUpgradeCommand(manager, id)...)
 	if shouldForceInstallAfterWingetUpgrade(result) {
+		if ctx.Err() != nil {
+			return result
+		}
 		appLog("Winget upgrade for %s:%s reported no applicable upgrade; trying forced install fallback.", manager, id)
-		fallback := runCommand(packageActionTimeout, wingetInstallCommand(manager, id, true)...)
+		fallback := runCommandContext(ctx, packageActionTimeout, wingetInstallCommand(manager, id, true)...)
 		return mergeCommandResults(result, fallback, "winget forced install fallback")
 	}
 	return result

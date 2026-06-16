@@ -2,15 +2,35 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+func TestArgValueParsesEqualsAndSeparatedForms(t *testing.T) {
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+
+	os.Args = []string{"updater", "--token=abc", "--port", "4299"}
+	if got, ok := argValue("--token"); !ok || got != "abc" {
+		t.Fatalf("unexpected token arg: %q %t", got, ok)
+	}
+	if got, ok := argValue("--port"); !ok || got != "4299" {
+		t.Fatalf("unexpected port arg: %q %t", got, ok)
+	}
+	if got, ok := argValue("--missing"); ok || got != "" {
+		t.Fatalf("unexpected missing arg: %q %t", got, ok)
+	}
+}
 
 func TestParseChocoListIgnoresWarnings(t *testing.T) {
 	output := `
@@ -60,16 +80,20 @@ Name                         ID                                 Version   Uebere
 -----------------------------------------------------------------------------------------------
 DragonframeLicenseManager    DZEDSystems.DragonframeLicenseMa... 3.0.3                    winget
 Zed                          ZedIndustries.Zed                  1.6.3     Tag: zed       winget
+GitHub CLI                   GitHub.cli                         2.74.0    Moniker: gh    winget
 `
 	got := parseWingetTable(output)
-	if len(got) != 2 {
-		t.Fatalf("expected 2 packages, got %d: %#v", len(got), got)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 packages, got %d: %#v", len(got), got)
 	}
 	if !isTruncatedID(got[0].ID) {
 		t.Fatalf("expected truncated id: %#v", got[0])
 	}
-	if got[1].Source != "winget" {
+	if got[1].Source != "winget" || got[1].Match != "Tag: zed" || got[1].AvailableVersion != "" {
 		t.Fatalf("expected resilient source parsing, got %#v", got[1])
+	}
+	if got[2].Match != "Moniker: gh" || got[2].AvailableVersion != "" {
+		t.Fatalf("expected winget moniker to be parsed as match, got %#v", got[2])
 	}
 }
 
@@ -108,6 +132,28 @@ func TestSearchQueryVariantsNormalizePunctuation(t *testing.T) {
 				t.Fatalf("searchQueryVariants(%q) = %#v, want %#v", query, got, want)
 			}
 		}
+	}
+}
+
+func TestSortSearchPackagesPrioritizesExactIdentityBeforePrefixAndMoniker(t *testing.T) {
+	packages := []Package{
+		{Name: "Ghidra", ID: "NationalSecurityAgency.Ghidra", Manager: managerWinget},
+		{Name: "Ghostscript", ID: "ArtifexSoftware.GhostScript", Manager: managerWinget},
+		{Name: "ghx", ID: "ghx", Manager: managerWinget},
+		{Name: "GitHub CLI", ID: "GitHub.cli", Match: "Moniker: gh", Manager: managerWinget},
+		{Name: "gh", ID: "gh", Manager: managerChoco},
+	}
+
+	sortSearchPackages("gh", packages)
+
+	if packages[0].ID != "gh" {
+		t.Fatalf("expected exact package id before alias/prefix matches, got %#v", packages)
+	}
+	if packages[1].Name != "GitHub CLI" || packages[1].Match != "Moniker: gh" {
+		t.Fatalf("expected exact moniker match before prefix matches, got %#v", packages)
+	}
+	if packages[2].ID != "ghx" {
+		t.Fatalf("expected ghx prefix match after exact identity and exact moniker, got %#v", packages)
 	}
 }
 
@@ -555,6 +601,13 @@ func TestPackageCommandBuilders(t *testing.T) {
 			t.Fatalf("choco command missing %q: %s", expected, chocoUpgrade)
 		}
 	}
+
+	storeUpdate := strings.Join(managerCommand(managerStore, "update", "Codex", "--apply", "true"), " ")
+	for _, expected := range []string{"store", "update Codex", "--apply true"} {
+		if !strings.Contains(storeUpdate, expected) {
+			t.Fatalf("store update command missing %q: %s", expected, storeUpdate)
+		}
+	}
 }
 
 func TestParseStoreSearchAndUpdates(t *testing.T) {
@@ -580,6 +633,73 @@ Codex  OpenAI.Codex  1.0.0    1.1.0
 	updates := parseStoreUpdates(updateOutput)
 	if updates["store:openai.codex"] != "1.1.0" {
 		t.Fatalf("unexpected store updates parse: %#v", updates)
+	}
+}
+
+func TestParseStoreSearchBoxTable(t *testing.T) {
+	output := `
+Searching for "codex"…
+
+── Search Results for "codex" ──────────────────────────────────────────────────
+
+┌────────────────┬────────────────┬────────────────┬───────────────┬───────────┐
+│ Name           │ Product ID     │ Publisher      │ Categories    │ Price     │
+├────────────────┼────────────────┼────────────────┼───────────────┼───────────┤
+│ Codex          │ 9PLM9XGG6VKS   │ OpenAI         │ Entwicklungst │ Kostenlos │
+│                │                │                │ ools          │           │
+│ Codex (Beta)   │ 9N8CJ4W95TBZ   │ OpenAI         │ Entwicklungst │ Kostenlos │
+└────────────────┴────────────────┴────────────────┴───────────────┴───────────┘
+`
+	got := parseStoreSearch(output)
+	if len(got) != 2 {
+		t.Fatalf("expected two parsed Store rows, got %#v", got)
+	}
+	if got[0].Name != "Codex" || got[0].ID != "9PLM9XGG6VKS" || got[0].ActionBackend != backendStoreCLI {
+		t.Fatalf("unexpected first Store row: %#v", got[0])
+	}
+	if got[1].Name != "Codex (Beta)" || got[1].ID != "9N8CJ4W95TBZ" {
+		t.Fatalf("unexpected second Store row: %#v", got[1])
+	}
+}
+
+func TestParseStoreUpdatesBoxTable(t *testing.T) {
+	output := `
+Checking for updates…
+
+── Updates available (1 found) ─────────────────────────────────────────────────
+
+Store-managed update available
+This Store app update can be installed immediately.
+┌───────┬───────────┬───────────────┬────────────┐
+│ Name  │ Publisher │ Version       │ Date       │
+├───────┼───────────┼───────────────┼────────────┤
+│ Codex │ OpenAI    │ 26.609.4994.0 │ 2026-06-13 │
+└───────┴───────────┴───────────────┴────────────┘
+`
+	got := parseStoreUpdates(output)
+	if got["store:codex"] != "26.609.4994.0" {
+		t.Fatalf("expected Codex Store update from box table, got %#v", got)
+	}
+}
+
+func TestMergeWingetUpdateOutputForcesMSStoreSource(t *testing.T) {
+	output := `
+Name                 ID                                    Version          Available
+-----------------------------------------------------------------------------------
+Windows App Runtime  Microsoft.WindowsAppRuntime.Singleton  8000.318.101.0  8000.328.111.0
+Codex                OpenAI.Codex                          0.1.0            0.2.0
+`
+	updates := map[string]string{}
+	mergeWingetUpdateOutput(updates, output, managerStore)
+
+	if updates["store:microsoft.windowsappruntime.singleton"] != "8000.328.111.0" {
+		t.Fatalf("missing Windows App Runtime Store update: %#v", updates)
+	}
+	if updates["store:openai.codex"] != "0.2.0" {
+		t.Fatalf("missing Codex Store update: %#v", updates)
+	}
+	if _, ok := updates["winget:openai.codex"]; ok {
+		t.Fatalf("msstore-specific update should not be keyed as winget: %#v", updates)
 	}
 }
 
@@ -620,14 +740,18 @@ Commands:
 func TestParseAppxPackageJSON(t *testing.T) {
 	output := `[
 {"Name":"OpenAI.Codex","DisplayName":"Codex","PackageFullName":"OpenAI.Codex_1.0.0.0_x64__abc123","PackageFamilyName":"OpenAI.Codex_abc123","Version":"1.0.0.0","Publisher":"CN=OpenAI","InstallLocation":"C:\\Program Files\\WindowsApps\\OpenAI.Codex"},
-{"Name":"Microsoft.Todos","StartName":"Microsoft To Do","DisplayName":"ms-resource:AppName","PackageFullName":"Microsoft.Todos_2.130.0.0_x64__8wekyb3d8bbwe","PackageFamilyName":"Microsoft.Todos_8wekyb3d8bbwe","Version":"2.130.0.0","Publisher":"CN=Microsoft","InstallLocation":"C:\\Program Files\\WindowsApps\\Microsoft.Todos"}
+{"Name":"Microsoft.Todos","StartName":"Microsoft To Do","DisplayName":"ms-resource:AppName","PackageFullName":"Microsoft.Todos_2.130.0.0_x64__8wekyb3d8bbwe","PackageFamilyName":"Microsoft.Todos_8wekyb3d8bbwe","Version":"2.130.0.0","Publisher":"CN=Microsoft","InstallLocation":"C:\\Program Files\\WindowsApps\\Microsoft.Todos"},
+{"Name":"Microsoft.WindowsAppRuntime.Singleton","DisplayName":"","PackageFullName":"Microsoft.WindowsAppRuntime.Singleton_8000.318.101.0_x64__8wekyb3d8bbwe","PackageFamilyName":"Microsoft.WindowsAppRuntime.Singleton_8wekyb3d8bbwe","Version":"8000.318.101.0","Publisher":"CN=Microsoft","InstallLocation":"C:\\Program Files\\WindowsApps\\Microsoft.WindowsAppRuntime.Singleton"}
 ]`
 	got := parseAppxPackageJSON(output)
-	if len(got) != 2 {
-		t.Fatalf("expected two AppX packages, got %#v", got)
+	if len(got) != 3 {
+		t.Fatalf("expected three AppX packages, got %#v", got)
 	}
 	if got[0].Name != "Codex" || got[1].Name != "Microsoft To Do" {
 		t.Fatalf("expected friendly AppX display names, got %#v", got)
+	}
+	if got[2].Name != "Windows App Runtime Singleton" {
+		t.Fatalf("expected friendly Windows App Runtime name, got %#v", got[2])
 	}
 	if got[0].Manager != "store" || got[0].Source != "appx" || got[0].UpdateSupported {
 		t.Fatalf("unexpected AppX package metadata: %#v", got[0])
@@ -636,11 +760,15 @@ func TestParseAppxPackageJSON(t *testing.T) {
 
 func TestFriendlyAppxNameCleansPackageIdentity(t *testing.T) {
 	cases := map[string]string{
-		"19568ShareX.ShareX":                "ShareX",
-		"28017CharlesMilette.TranslucentTB": "Translucent TB",
-		"38002AlexanderFrangos.TwinkleTray": "Twinkle Tray",
-		"9662DuongDieuPhap.ImageGlass":      "Image Glass",
-		"Microsoft.WindowsNotepad":          "Windows Notepad",
+		"19568ShareX.ShareX":                             "ShareX",
+		"28017CharlesMilette.TranslucentTB":              "Translucent TB",
+		"38002AlexanderFrangos.TwinkleTray":              "Twinkle Tray",
+		"9662DuongDieuPhap.ImageGlass":                   "Image Glass",
+		"Microsoft.WindowsNotepad":                       "Windows Notepad",
+		"Microsoft.WindowsAppRuntime.Singleton":          "Windows App Runtime Singleton",
+		"Microsoft.WindowsAppRuntime.CBS.1.8":            "Windows App Runtime CBS 1.8",
+		"MicrosoftCorporationII.WinAppRuntime.Singleton": "Win App Runtime Singleton",
+		"Contoso.FooBar.Baz2":                            "Foo Bar Baz2",
 	}
 	for input, want := range cases {
 		if got := friendlyAppxName(input, ""); got != want {
@@ -711,6 +839,57 @@ func TestMergeStoreAppxPackagesPrefersResolvedStoreRow(t *testing.T) {
 	}
 	if got[0].Name != "Codex" || got[0].ActionBackend != "store-cli-resolved" || got[0].AvailableVersion != "1.1.0" || !got[0].UpdateAvailable {
 		t.Fatalf("resolved AppX row details were not preserved: %#v", got[0])
+	}
+}
+
+func TestApplyStoreUpdateVersionMatchesAppxFullName(t *testing.T) {
+	pkg := Package{
+		ID:            "OpenAI.Codex_1.0.0.0_x64__abc123",
+		Name:          "Codex",
+		Version:       "1.0.0.0",
+		Manager:       managerStore,
+		Source:        sourceAppX,
+		Match:         "OpenAI.Codex_abc123",
+		ActionBackend: backendAppXInventory,
+	}
+	updates := map[string]string{
+		packageKey(managerStore, strings.ToLower("OpenAI.Codex")): "1.1.0.0",
+	}
+
+	got := applyStoreUpdateVersion(pkg, updates, false)
+
+	if got.ID != "OpenAI.Codex" || got.Key != "store:OpenAI.Codex" {
+		t.Fatalf("expected AppX full name to collapse to Store action ID, got %#v", got)
+	}
+	if !got.UpdateAvailable || got.AvailableVersion != "1.1.0.0" || !got.UpdateSupported {
+		t.Fatalf("expected winget msstore update to mark Store package updateable, got %#v", got)
+	}
+	if got.ActionBackend != backendWingetMSStoreFallback {
+		t.Fatalf("expected winget msstore fallback backend, got %#v", got)
+	}
+}
+
+func TestApplyStoreUpdateVersionUsesStoreUpdateNameTarget(t *testing.T) {
+	pkg := Package{
+		ID:            "OpenAI.Codex_1.0.0.0_x64__abc123",
+		Name:          "Codex",
+		Version:       "1.0.0.0",
+		Manager:       managerStore,
+		Source:        sourceAppX,
+		Match:         "OpenAI.Codex_abc123",
+		ActionBackend: backendStoreCLIResolved,
+	}
+	updates := map[string]string{
+		packageKey(managerStore, "codex"): "26.609.4994.0",
+	}
+
+	got := applyStoreUpdateVersion(pkg, updates, true)
+
+	if got.ID != "Codex" || got.Key != "store:Codex" {
+		t.Fatalf("expected Store CLI update target to use app name, got %#v", got)
+	}
+	if !got.UpdateAvailable || !got.UpdateSupported || got.ActionBackend != backendStoreCLIResolved {
+		t.Fatalf("expected Store update to mark row updateable, got %#v", got)
 	}
 }
 
@@ -824,7 +1003,124 @@ func TestResolveStoreAppxPackagesKeepsMismatchInventoryOnly(t *testing.T) {
 	}
 }
 
-func TestResolveStoreAppxPackagesUsesCacheWithoutSearch(t *testing.T) {
+func TestResolveStoreAppxPackagesRejectsGenericContainedStoreResult(t *testing.T) {
+	appx := Package{
+		ID:              "Microsoft.Example.WindowsAppHelper_1.0.0.0_x64__abc123",
+		Name:            "Windows App Runtime Singleton",
+		Version:         "1.0.0.0",
+		Manager:         "store",
+		Source:          "appx",
+		UpdateSupported: false,
+		ActionBackend:   "appx-inventory",
+	}
+	if match, ok := chooseStoreResolution(appx, []Package{{Name: "Windows App", ID: "9MVJJ5Q28CJ2", Manager: "store"}}); ok {
+		t.Fatalf("generic contained Store result should not resolve, got %#v", match)
+	}
+}
+
+func TestResolveStoreAppxPackagesRejectsGenericCachedContainedStoreResult(t *testing.T) {
+	state := defaultState()
+	appxID := "MicrosoftCorporationII.WinAppRuntime.Singleton_8002.1.3.0_x64__8wekyb3d8bbwe"
+	state.StoreResolveCache[strings.ToLower(appxID)] = StoreResolveCacheEntry{
+		AppXVersion: "8002.1.3.0",
+		StoreID:     "9MVJJ5Q28CJ2",
+		StoreName:   "Windows App",
+		Resolved:    true,
+		ResolvedAt:  utcNow(),
+	}
+	appx := []Package{{
+		ID:              appxID,
+		Name:            "Windows App Runtime Singleton",
+		Version:         "8002.1.3.0",
+		Manager:         "store",
+		Source:          "appx",
+		UpdateSupported: false,
+		ActionBackend:   "appx-inventory",
+	}}
+
+	calls := 0
+	got, _, changed := resolveStoreAppxPackages(&state, appx, true, func(query string) ([]Package, CommandResult) {
+		calls++
+		return []Package{{Name: "Windows App", ID: "9MVJJ5Q28CJ2", Manager: "store"}}, CommandResult{OK: true}
+	})
+
+	if calls != 1 || !changed {
+		t.Fatalf("expected stale generic cache to be discarded and refreshed, calls=%d changed=%t", calls, changed)
+	}
+	if got[0].UpdateSupported || got[0].ActionBackend != backendAppXInventory {
+		t.Fatalf("generic cached Store result should not resolve, got %#v", got[0])
+	}
+	entry := state.StoreResolveCache[strings.ToLower(appxID)]
+	if entry.Resolved {
+		t.Fatalf("generic cached Store result should be replaced with unresolved cache, got %#v", entry)
+	}
+}
+
+func TestResolveStoreAppxPackagesRetriesStaleUnresolvedCache(t *testing.T) {
+	state := defaultState()
+	appxID := "OpenAI.Codex_1.0.0.0_x64__abc123"
+	state.StoreResolveCache[strings.ToLower(appxID)] = StoreResolveCacheEntry{
+		AppXVersion: "1.0.0.0",
+		Resolved:    false,
+		ResolvedAt:  time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339),
+	}
+	appx := []Package{{
+		ID:              appxID,
+		Name:            "Codex",
+		Version:         "1.0.0.0",
+		Manager:         "store",
+		Source:          "appx",
+		UpdateSupported: false,
+		ActionBackend:   "appx-inventory",
+	}}
+
+	calls := 0
+	got, _, changed := resolveStoreAppxPackages(&state, appx, true, func(query string) ([]Package, CommandResult) {
+		calls++
+		return []Package{{Name: "Codex", ID: "OpenAI.Codex", Version: "1.1.0.0", Manager: "store"}}, CommandResult{OK: true}
+	})
+
+	if calls != 1 || !changed {
+		t.Fatalf("expected stale unresolved cache to be retried, calls=%d changed=%t", calls, changed)
+	}
+	if !got[0].UpdateAvailable || got[0].ID != "OpenAI.Codex" {
+		t.Fatalf("expected retry to resolve Codex update, got %#v", got[0])
+	}
+}
+
+func TestResolveStoreAppxPackagesRetriesFreshUnresolvedCache(t *testing.T) {
+	state := defaultState()
+	appxID := "OpenAI.Codex_1.0.0.0_x64__abc123"
+	state.StoreResolveCache[strings.ToLower(appxID)] = StoreResolveCacheEntry{
+		AppXVersion: "1.0.0.0",
+		Resolved:    false,
+		ResolvedAt:  utcNow(),
+	}
+	appx := []Package{{
+		ID:              appxID,
+		Name:            "Codex",
+		Version:         "1.0.0.0",
+		Manager:         "store",
+		Source:          "appx",
+		UpdateSupported: false,
+		ActionBackend:   "appx-inventory",
+	}}
+
+	calls := 0
+	got, _, changed := resolveStoreAppxPackages(&state, appx, true, func(query string) ([]Package, CommandResult) {
+		calls++
+		return []Package{{Name: "Codex", ID: "9PLM9XGG6VKS", Manager: "store"}}, CommandResult{OK: true}
+	})
+
+	if calls != 1 || !changed {
+		t.Fatalf("expected fresh unresolved cache to be retried, calls=%d changed=%t", calls, changed)
+	}
+	if got[0].ID != "9PLM9XGG6VKS" || got[0].ActionBackend != backendStoreCLIResolved || !got[0].UpdateSupported {
+		t.Fatalf("expected retry to resolve Codex Store product ID, got %#v", got[0])
+	}
+}
+
+func TestResolveStoreAppxPackagesRefreshesResolvedCache(t *testing.T) {
 	state := defaultState()
 	appxID := "OpenAI.Codex_1.0.0.0_x64__abc123"
 	state.StoreResolveCache[strings.ToLower(appxID)] = StoreResolveCacheEntry{
@@ -847,14 +1143,86 @@ func TestResolveStoreAppxPackagesUsesCacheWithoutSearch(t *testing.T) {
 	calls := 0
 	got, results, changed := resolveStoreAppxPackages(&state, appx, true, func(query string) ([]Package, CommandResult) {
 		calls++
-		return nil, CommandResult{}
+		return []Package{{Name: "Codex", ID: "OpenAI.Codex", Manager: "store"}}, CommandResult{OK: true}
 	})
 
-	if calls != 0 || changed || len(results) != 0 {
-		t.Fatalf("cache hit should avoid search, calls=%d changed=%t results=%#v", calls, changed, results)
+	if calls != 1 || !changed || len(results) != 1 {
+		t.Fatalf("resolved cache should refresh version data, calls=%d changed=%t results=%#v", calls, changed, results)
 	}
 	if got[0].ID != "OpenAI.Codex" || got[0].ActionBackend != "store-cli-resolved" || !got[0].UpdateSupported {
 		t.Fatalf("cache hit did not resolve package: %#v", got[0])
+	}
+}
+
+func TestResolveStoreAppxPackagesRefreshesFreshCacheVersion(t *testing.T) {
+	state := defaultState()
+	appxID := "OpenAI.Codex_1.0.0.0_x64__abc123"
+	state.StoreResolveCache[strings.ToLower(appxID)] = StoreResolveCacheEntry{
+		AppXVersion:  "1.0.0.0",
+		StoreID:      "OpenAI.Codex",
+		StoreName:    "Codex",
+		StoreVersion: "1.0.0.0",
+		Resolved:     true,
+		ResolvedAt:   utcNow(),
+	}
+	appx := []Package{{
+		ID:              appxID,
+		Name:            "Codex",
+		Version:         "1.0.0.0",
+		Manager:         "store",
+		Source:          "appx",
+		UpdateSupported: false,
+		ActionBackend:   "appx-inventory",
+	}}
+
+	calls := 0
+	got, _, changed := resolveStoreAppxPackages(&state, appx, true, func(query string) ([]Package, CommandResult) {
+		calls++
+		return []Package{{Name: "Codex", ID: "OpenAI.Codex", Version: "1.1.0.0", Manager: "store"}}, CommandResult{OK: true}
+	})
+
+	if calls != 1 || !changed {
+		t.Fatalf("expected fresh cache to refresh Store version, calls=%d changed=%t", calls, changed)
+	}
+	if !got[0].UpdateAvailable || got[0].AvailableVersion != "1.1.0.0" {
+		t.Fatalf("expected refreshed Store version to mark Codex update, got %#v", got[0])
+	}
+	entry := state.StoreResolveCache[strings.ToLower(appxID)]
+	if entry.StoreVersion != "1.1.0.0" {
+		t.Fatalf("expected refreshed Store version in cache, got %#v", entry)
+	}
+}
+
+func TestResolveStoreAppxPackagesKeepsCachedMappingOnBadRefreshMatch(t *testing.T) {
+	state := defaultState()
+	appxID := "OpenAI.Codex_1.0.0.0_x64__abc123"
+	state.StoreResolveCache[strings.ToLower(appxID)] = StoreResolveCacheEntry{
+		AppXVersion: "1.0.0.0",
+		StoreID:     "OpenAI.Codex",
+		StoreName:   "Codex",
+		Resolved:    true,
+		ResolvedAt:  utcNow(),
+	}
+	appx := []Package{{
+		ID:              appxID,
+		Name:            "Codex",
+		Version:         "1.0.0.0",
+		Manager:         "store",
+		Source:          "appx",
+		UpdateSupported: false,
+		ActionBackend:   "appx-inventory",
+	}}
+
+	got, _, _ := resolveStoreAppxPackages(&state, appx, true, func(query string) ([]Package, CommandResult) {
+		return []Package{{Name: "Notepad", ID: "Microsoft.WindowsNotepad", Manager: "store"}}, CommandResult{OK: true}
+	})
+
+	if got[0].ID != "OpenAI.Codex" || got[0].ActionBackend != "store-cli-resolved" || !got[0].UpdateSupported {
+		t.Fatalf("bad refresh match should keep cached Store mapping, got %#v", got[0])
+	}
+	entry := state.StoreResolveCache[strings.ToLower(appxID)]
+	if !entry.Resolved || entry.StoreID != "OpenAI.Codex" {
+		t.Fatalf("bad refresh match should not overwrite safe cache entry: %#v", entry)
 	}
 }
 
@@ -1174,6 +1542,62 @@ func TestLogBufferAppendSinceAndRetention(t *testing.T) {
 	}
 }
 
+func TestAppendLogChunkDropsCarriageReturnSpinnerFrames(t *testing.T) {
+	oldLogs := sessionLogs
+	sessionLogs = newLogBuffer(10)
+	defer func() { sessionLogs = oldLogs }()
+
+	pending := appendLogChunk("stdout", "", "Downloading\r|\r/\r-\r")
+	pending = appendLogChunk("stdout", pending, `\`+"\rDone\n")
+	if pending != "" {
+		t.Fatalf("expected no pending log text, got %q", pending)
+	}
+
+	entries := sessionLogs.Since(0)
+	if len(entries) != 1 || entries[0].Message != "Done" {
+		t.Fatalf("expected only final line, got %#v", entries)
+	}
+}
+
+func TestStreamCommandOutputKeepsRawOutputWhileDroppingSpinnerLog(t *testing.T) {
+	oldLogs := sessionLogs
+	sessionLogs = newLogBuffer(10)
+	defer func() { sessionLogs = oldLogs }()
+
+	raw := "Downloading\r|\r/\r-\rDone\n"
+	var output bytes.Buffer
+	var wg sync.WaitGroup
+	wg.Add(1)
+	streamCommandOutput(strings.NewReader(raw), "stdout", &output, &wg)
+	wg.Wait()
+
+	if output.String() != raw {
+		t.Fatalf("raw output changed: got %q want %q", output.String(), raw)
+	}
+	entries := sessionLogs.Since(0)
+	if len(entries) != 1 || entries[0].Message != "Done" {
+		t.Fatalf("expected only final log line, got %#v", entries)
+	}
+}
+
+func TestAppendLogChunkPreservesNormalLines(t *testing.T) {
+	oldLogs := sessionLogs
+	sessionLogs = newLogBuffer(10)
+	defer func() { sessionLogs = oldLogs }()
+
+	pending := appendLogChunk("stdout", "", "first\r")
+	pending = appendLogChunk("stdout", pending, "\nsecond\nthird")
+	pending = appendLogChunk("stdout", pending, "\n")
+	if pending != "" {
+		t.Fatalf("expected no pending log text, got %q", pending)
+	}
+
+	entries := sessionLogs.Since(0)
+	if len(entries) != 3 || entries[0].Message != "first" || entries[1].Message != "second" || entries[2].Message != "third" {
+		t.Fatalf("unexpected normal log lines: %#v", entries)
+	}
+}
+
 func TestAPILogsRequiresTokenAndReturnsEntries(t *testing.T) {
 	oldLogs := sessionLogs
 	sessionLogs = newLogBuffer(10)
@@ -1270,6 +1694,270 @@ func TestMergeCommandResultsKeepsPrimaryFailureContext(t *testing.T) {
 	if !strings.Contains(merged.Stderr, "primary stderr") {
 		t.Fatalf("merged stderr lost primary context: %q", merged.Stderr)
 	}
+}
+
+func TestRunCommandContextCancellation(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows command cancellation test")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	result := runCommandContext(ctx, 10*time.Second, "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "Start-Sleep -Seconds 5")
+
+	if result.OK || result.Code != commandCancelledCode || !strings.Contains(result.Stderr, "Cancelled.") {
+		t.Fatalf("expected cancelled command result, got %#v", result)
+	}
+}
+
+func TestRunCommandContextCancellationWhileWaitingForMutationLock(t *testing.T) {
+	packageManagerMutationMu.Lock()
+	defer packageManagerMutationMu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	started := time.Now()
+	result := runCommandContext(ctx, 10*time.Second, "choco.exe", "upgrade", "example-package")
+	elapsed := time.Since(started)
+
+	if result.OK || result.Code != commandCancelledCode || !strings.Contains(result.Stderr, "Cancelled.") {
+		t.Fatalf("expected cancelled command result, got %#v", result)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("cancel while waiting for package-manager lock took too long: %s", elapsed)
+	}
+	if !strings.Contains(result.Command, "choco.exe upgrade example-package") {
+		t.Fatalf("unexpected command text: %q", result.Command)
+	}
+}
+
+func TestRunCommandContextTimeoutWhileWaitingForMutationLock(t *testing.T) {
+	packageManagerMutationMu.Lock()
+	defer packageManagerMutationMu.Unlock()
+
+	started := time.Now()
+	result := runCommandContext(context.Background(), 50*time.Millisecond, "choco.exe", "upgrade", "example-package")
+	elapsed := time.Since(started)
+
+	if result.OK || result.Code != 124 || !strings.Contains(result.Stderr, "Timed out.") {
+		t.Fatalf("expected timeout command result, got %#v", result)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("timeout while waiting for package-manager lock took too long: %s", elapsed)
+	}
+	if !strings.Contains(result.Command, "choco.exe upgrade example-package") {
+		t.Fatalf("unexpected command text: %q", result.Command)
+	}
+}
+
+func TestUpdateJobRejectsConcurrentStarts(t *testing.T) {
+	restore := replaceUpdateJobHooks(func(ctx context.Context, manager, id string) CommandResult {
+		<-ctx.Done()
+		return CommandResult{Code: commandCancelledCode, Command: id, Stderr: "Cancelled."}
+	})
+	defer restore()
+
+	app := testUpdateJobApp()
+	status, err := app.startUpdateJob(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Running || status.Total != 2 {
+		t.Fatalf("unexpected initial job status: %#v", status)
+	}
+	if len(status.PackageKeys) != 2 || status.PackageKeys[0] != "winget:Git.Git" || status.PackageKeys[1] != "choco:gh" {
+		t.Fatalf("unexpected job package keys: %#v", status.PackageKeys)
+	}
+
+	_, err = app.startUpdateJob(nil)
+	if !errors.Is(err, errUpdateJobRunning) {
+		t.Fatalf("expected concurrent start rejection, got %v", err)
+	}
+	app.cancelUpdateJob()
+	waitForUpdateJobStopped(t, app)
+}
+
+func TestUpdateJobCancelStopsQueuedPackages(t *testing.T) {
+	started := make(chan struct{})
+	var once sync.Once
+	var calls int
+	var mu sync.Mutex
+	restore := replaceUpdateJobHooks(func(ctx context.Context, manager, id string) CommandResult {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		once.Do(func() { close(started) })
+		<-ctx.Done()
+		return CommandResult{Code: commandCancelledCode, Command: id, Stderr: "Cancelled."}
+	})
+	defer restore()
+
+	app := testUpdateJobApp()
+	if _, err := app.startUpdateJob(nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("update job did not start first package")
+	}
+	cancelStatus := app.cancelUpdateJob()
+	if !cancelStatus.CancelRequested {
+		t.Fatalf("expected cancel requested status, got %#v", cancelStatus)
+	}
+	status := waitForUpdateJobStopped(t, app)
+	if !status.CancelRequested || status.Running || !status.RefreshStarted {
+		t.Fatalf("unexpected cancelled status: %#v", status)
+	}
+	if len(status.Results) != 1 || status.Results[0].Result.Code != commandCancelledCode {
+		t.Fatalf("expected one cancelled result, got %#v", status.Results)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("expected queued package to be skipped after cancel, calls=%d", calls)
+	}
+}
+
+func TestUpdateJobStatusEndpointReportsProgress(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	restore := replaceUpdateJobHooks(func(ctx context.Context, manager, id string) CommandResult {
+		once.Do(func() { close(started) })
+		select {
+		case <-release:
+			return CommandResult{OK: true, Command: id}
+		case <-ctx.Done():
+			return CommandResult{Code: commandCancelledCode, Command: id, Stderr: "Cancelled."}
+		}
+	})
+	defer restore()
+
+	app := testUpdateJobApp()
+	app.token = "test-token"
+	if _, err := app.startUpdateJob([]string{"winget:Git.Git"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("update job did not report progress")
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/update-all/status?token=test-token", nil)
+	response := httptest.NewRecorder()
+	app.serveHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected ok, got %d: %s", response.Code, response.Body.String())
+	}
+	var status UpdateJobStatus
+	if err := json.Unmarshal(response.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if !status.Running || status.CurrentPackage != "Git" || status.CurrentIndex != 1 || status.Total != 1 {
+		t.Fatalf("unexpected progress status: %#v", status)
+	}
+	if len(status.PackageKeys) != 1 || status.PackageKeys[0] != "winget:Git.Git" {
+		t.Fatalf("expected job package keys in status, got %#v", status.PackageKeys)
+	}
+	close(release)
+	waitForUpdateJobStopped(t, app)
+}
+
+func TestUpdateJobKeepsRunningUntilRefreshStarts(t *testing.T) {
+	refreshEntered := make(chan struct{})
+	releaseRefresh := make(chan struct{})
+	restore := replaceUpdateJobHooksWithRefresh(
+		func(ctx context.Context, manager, id string) CommandResult {
+			return CommandResult{OK: true, Command: id}
+		},
+		func(app *App) {
+			close(refreshEntered)
+			<-releaseRefresh
+		},
+	)
+	defer restore()
+
+	app := testUpdateJobApp()
+	if _, err := app.startUpdateJob([]string{"winget:Git.Git"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-refreshEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("update job did not start inventory refresh")
+	}
+	if status := app.updateJobStatus(); !status.Running || status.RefreshStarted {
+		t.Fatalf("job should not publish final status before refresh starts, got %#v", status)
+	}
+	close(releaseRefresh)
+	status := waitForUpdateJobStopped(t, app)
+	if status.Running || !status.RefreshStarted {
+		t.Fatalf("expected stopped job with refresh started, got %#v", status)
+	}
+}
+
+func TestUpdateJobRejectsConcurrentStartBeforeValidation(t *testing.T) {
+	restore := replaceUpdateJobHooks(func(ctx context.Context, manager, id string) CommandResult {
+		<-ctx.Done()
+		return CommandResult{Code: commandCancelledCode, Command: id, Stderr: "Cancelled."}
+	})
+	defer restore()
+
+	app := testUpdateJobApp()
+	if _, err := app.startUpdateJob(nil); err != nil {
+		t.Fatal(err)
+	}
+	_, err := app.startUpdateJob([]string{"not-a-valid-key"})
+	if !errors.Is(err, errUpdateJobRunning) {
+		t.Fatalf("expected running-job rejection before validation, got %v", err)
+	}
+	app.cancelUpdateJob()
+	waitForUpdateJobStopped(t, app)
+}
+
+func replaceUpdateJobHooks(runner func(context.Context, string, string) CommandResult) func() {
+	return replaceUpdateJobHooksWithRefresh(runner, func(app *App) {})
+}
+
+func replaceUpdateJobHooksWithRefresh(runner func(context.Context, string, string) CommandResult, refresh func(*App)) func() {
+	oldRunner := updatePackageRunner
+	oldRefresh := refreshInventoryAfterUpdateJob
+	updatePackageRunner = runner
+	refreshInventoryAfterUpdateJob = refresh
+	return func() {
+		updatePackageRunner = oldRunner
+		refreshInventoryAfterUpdateJob = oldRefresh
+	}
+}
+
+func testUpdateJobApp() *App {
+	return &App{inventory: Inventory{PackageLookup: PackageLookup{Packages: []Package{
+		{Key: "winget:Git.Git", Manager: managerWinget, ID: "Git.Git", Name: "Git", UpdateAvailable: true, UpdateSupported: true},
+		{Key: "choco:gh", Manager: managerChoco, ID: "gh", Name: "GitHub CLI", UpdateAvailable: true, UpdateSupported: true},
+	}}}}
+}
+
+func waitForUpdateJobStopped(t *testing.T, app *App) UpdateJobStatus {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		status := app.updateJobStatus()
+		if !status.Running {
+			return status
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("update job did not stop")
+	return UpdateJobStatus{}
 }
 
 func TestAPIRejectsInvalidRequests(t *testing.T) {
@@ -1411,13 +2099,26 @@ func TestRenderedHTMLContainsAsyncUpdateHooks(t *testing.T) {
 		`action="/api/install"`,
 		`action="/api/managers/install"`,
 		`runUpdateRequest("/api/update"`,
-		`runUpdateRequest("/api/update-all"`,
+		`startUpdateJob`,
+		`pollUpdateJobStatus`,
+		`checkActiveUpdateJob`,
+		`api("/api/update-all/status"`,
+		`postForm("/api/update-all/cancel"`,
+		`id="cancel-updates-button"`,
+		`status.package_keys`,
+		`applyUpdateJobPackageKeys`,
+		`response.status === 409 && status.running`,
+		`active && !status.cancel_requested`,
 		`installFromForm`,
 		`installManagerFromForm`,
 		`refreshPackagesAfterUpdate`,
 		`id="session-log-panel"`,
+		`id="copy-log-view"`,
 		`id="clear-log-view"`,
 		`id="log-autoscroll"`,
+		`copyLogView`,
+		`navigator.clipboard.writeText`,
+		`document.execCommand("copy")`,
 		`api("/api/logs"`,
 		`id="updates-body"`,
 		`id="installed-search"`,
@@ -1427,8 +2128,14 @@ func TestRenderedHTMLContainsAsyncUpdateHooks(t *testing.T) {
 		`renderUpdatesTable`,
 		`renderInstalledTable`,
 		`installedAction`,
+		`updating-current`,
 		`managerAvailabilityText`,
 		`managerDisplayDetails`,
+		`compactNoticeText`,
+		`truncateNoticeText`,
+		`firstMeaningfulOutputLine`,
+		`See Session Log for full output.`,
+		`max-height:96px`,
 		`manager.inventory_available`,
 		`pkg.action_backend`,
 		`Inventory only`,
@@ -1456,6 +2163,56 @@ func TestRenderedHTMLContainsAsyncUpdateHooks(t *testing.T) {
 		if strings.Contains(rendered, unexpected) {
 			t.Fatalf("rendered page should not contain %q", unexpected)
 		}
+	}
+	progressIndex := strings.Index(rendered, `id="update-progress"`)
+	updatesIndex := strings.Index(rendered, `Updates Available`)
+	if progressIndex < 0 || updatesIndex < 0 || progressIndex > updatesIndex {
+		t.Fatalf("expected update progress banner before updates table, progress=%d updates=%d", progressIndex, updatesIndex)
+	}
+}
+
+func TestUpdateAllFailureNoticeCompactsNoisyChocolateyOutput(t *testing.T) {
+	noisyOutput := `Chocolatey v2.7.2
+Upgrading the following packages:
+all
+By upgrading, you accept licenses for the packages.
+anaconda3 v2025.12.0 is the latest version available based on your source(s).
+arduino v2.3.6 is the latest version available based on your source(s).
+You have chocolatey v2.7.2 installed. Version 2.7.3 is available based on your source(s).
+Downloading package from source 'https://community.chocolatey.org/api/v2/'
+[Approved] chocolatey package files upgrade completed. Performing other installation steps.
+WARNING: It's very likely you will need to close and reopen shells before you can use choco.
+`
+	notice := updateAllFailureNotice([]UpdateResult{{
+		Key: packageKey(managerChoco, "*"),
+		Result: CommandResult{
+			Code:    1603,
+			Command: `C:\ProgramData\chocolatey\bin\choco.exe upgrade all -y --no-progress --no-color`,
+			Stdout:  noisyOutput,
+		},
+	}})
+
+	for _, expected := range []string{
+		"1 update command(s) finished with errors.",
+		"choco upgrade all failed with code 1603",
+		"WARNING:",
+		"See Session Log for full output.",
+	} {
+		if !strings.Contains(notice, expected) {
+			t.Fatalf("notice missing %q: %s", expected, notice)
+		}
+	}
+	for _, unexpected := range []string{
+		"anaconda3 v2025.12.0",
+		"arduino v2.3.6",
+		"[Approved] chocolatey package files",
+	} {
+		if strings.Contains(notice, unexpected) {
+			t.Fatalf("notice included noisy output %q: %s", unexpected, notice)
+		}
+	}
+	if len(notice) > 300 {
+		t.Fatalf("notice too long: %d %q", len(notice), notice)
 	}
 }
 
