@@ -1,0 +1,145 @@
+package updater
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"os/exec"
+	"strings"
+	"sync"
+	"time"
+)
+
+const commandCancelledCode = 130
+
+type CommandResult struct {
+	OK      bool   `json:"ok"`
+	Code    int    `json:"code"`
+	Stdout  string `json:"stdout"`
+	Stderr  string `json:"stderr"`
+	Command string `json:"command"`
+}
+
+func validationCommandResult(command string, err error) CommandResult {
+	return CommandResult{Code: 2, Stderr: err.Error(), Command: command}
+}
+
+func runCommand(timeout time.Duration, args ...string) CommandResult {
+	return runCommandContext(context.Background(), timeout, args...)
+}
+
+func runCommandContext(parent context.Context, timeout time.Duration, args ...string) CommandResult {
+	result := CommandResult{Command: strings.Join(args, " ")}
+	categories := logCategoriesForCommand(args)
+	logCommand := func(stream, message string) {
+		sessionLogs.AppendCategorized(stream, message, categories)
+	}
+	if len(args) == 0 {
+		result.Stderr = "empty command"
+		result.Code = 127
+		logCommand("command", "<empty command>")
+		logCommand("stderr", result.Stderr)
+		logCommand("exit", "empty command exited with code 127")
+		return result
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+
+	if isPackageManagerMutationCommand(args) {
+		if !lockMutexContext(ctx, &packageManagerMutationMu) {
+			return commandContextDoneResult(ctx, result.Command, "while waiting for package manager lock", categories)
+		}
+		defer packageManagerMutationMu.Unlock()
+	}
+	if isWingetCommand(args) {
+		if !lockMutexContext(ctx, &wingetCommandMu) {
+			return commandContextDoneResult(ctx, result.Command, "while waiting for winget lock", categories)
+		}
+		defer wingetCommandMu.Unlock()
+	}
+
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.Env = launchEnv()
+	cmd.SysProcAttr = hiddenSysProcAttr()
+	var stdout, stderr bytes.Buffer
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		result.Code = 127
+		result.Stderr = err.Error()
+		logCommand("command", result.Command)
+		logCommand("stderr", result.Stderr)
+		logCommand("exit", fmt.Sprintf("%s exited with code 127", result.Command))
+		return result
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		result.Code = 127
+		result.Stderr = err.Error()
+		logCommand("command", result.Command)
+		logCommand("stderr", result.Stderr)
+		logCommand("exit", fmt.Sprintf("%s exited with code 127", result.Command))
+		return result
+	}
+
+	logCommand("command", result.Command)
+	if err := cmd.Start(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			result.Code = 124
+			result.Stderr = "Timed out."
+			logCommand("stderr", result.Stderr)
+			logCommand("exit", fmt.Sprintf("%s timed out before start", result.Command))
+			return result
+		}
+		if ctx.Err() == context.Canceled {
+			result.Code = commandCancelledCode
+			result.Stderr = "Cancelled."
+			logCommand("stderr", result.Stderr)
+			logCommand("exit", fmt.Sprintf("%s cancelled before start", result.Command))
+			return result
+		}
+		result.Code = 127
+		result.Stderr = err.Error()
+		logCommand("stderr", result.Stderr)
+		logCommand("exit", fmt.Sprintf("%s exited with code 127", result.Command))
+		return result
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go streamCommandOutputCategorized(stdoutPipe, "stdout", &stdout, &wg, categories)
+	go streamCommandOutputCategorized(stderrPipe, "stderr", &stderr, &wg, categories)
+	err = cmd.Wait()
+	wg.Wait()
+
+	result.Stdout = stdout.String()
+	result.Stderr = stderr.String()
+	if ctx.Err() == context.DeadlineExceeded {
+		result.Code = 124
+		result.Stderr += "\nTimed out."
+		logCommand("stderr", "Timed out.")
+		logCommand("exit", fmt.Sprintf("%s exited with code 124", result.Command))
+		return result
+	}
+	if ctx.Err() == context.Canceled {
+		result.Code = commandCancelledCode
+		result.Stderr += "\nCancelled."
+		logCommand("stderr", "Cancelled.")
+		logCommand("exit", fmt.Sprintf("%s cancelled with code %d", result.Command, result.Code))
+		return result
+	}
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			result.Code = exitErr.ExitCode()
+		} else {
+			result.Code = 127
+			if result.Stderr == "" {
+				result.Stderr = err.Error()
+			}
+		}
+		logCommand("exit", fmt.Sprintf("%s exited with code %d", result.Command, result.Code))
+		return result
+	}
+	result.OK = true
+	logCommand("exit", fmt.Sprintf("%s exited with code 0", result.Command))
+	return result
+}

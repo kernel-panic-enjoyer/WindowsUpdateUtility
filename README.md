@@ -18,6 +18,14 @@ and Microsoft Store apps.
 - Scans Windows uninstall registry plus winget/Store inventory and reports apps newly detected since the previous scan.
 - Includes a dark/light WebUI theme with no separate frontend JavaScript dependency.
 
+## Project Layout
+
+- `main.go`: thin executable entrypoint.
+- `internal/updater`: application backend, WebUI, package-manager integrations, tests, and embedded assets.
+- `internal/updater/assets`: app icon and favicon source assets.
+- `tools/icongen`: icon generation utility.
+- `dist`: local build output.
+
 ## Build
 
 Use Go 1.22+ on Windows:
@@ -25,7 +33,7 @@ Use Go 1.22+ on Windows:
 ```cmd
 set GOCACHE=%CD%\.gocache
 go test ./...
-go build -ldflags="-H=windowsgui" -o WindowsUpdaterWebUI.exe .
+go build -ldflags="-H=windowsgui" -o dist\WindowsUpdaterWebUI.exe .
 ```
 
 If your Windows folder policy blocks writing `.exe` files into this directory,

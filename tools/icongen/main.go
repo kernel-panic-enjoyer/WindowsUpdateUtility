@@ -26,7 +26,7 @@ type rgba struct {
 var iconSizes = []int{16, 24, 32, 48, 64, 128, 256}
 
 func main() {
-	root := filepath.Join("assets")
+	root := filepath.Join("internal", "updater", "assets")
 	must(os.MkdirAll(root, 0o755))
 	base := renderIcon(1024)
 	must(writePNG(filepath.Join(root, "app-icon.png"), base))
