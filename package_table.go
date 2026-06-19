@@ -1,12 +1,40 @@
 package main
 
 import (
-	"regexp"
 	"strings"
+	"unicode"
 )
 
-var packageTableColumnSpacing = regexp.MustCompile(`\s{2,}`)
-
 func splitPackageTableColumns(line string) []string {
-	return packageTableColumnSpacing.Split(strings.TrimSpace(line), -1)
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return nil
+	}
+	var cols []string
+	var field strings.Builder
+	pendingSpace := 0
+	flush := func() {
+		value := strings.TrimSpace(field.String())
+		if value != "" {
+			cols = append(cols, value)
+		}
+		field.Reset()
+	}
+	for _, r := range line {
+		if unicode.IsSpace(r) {
+			pendingSpace++
+			continue
+		}
+		if pendingSpace > 0 {
+			if pendingSpace >= 2 {
+				flush()
+			} else if field.Len() > 0 {
+				field.WriteRune(' ')
+			}
+			pendingSpace = 0
+		}
+		field.WriteRune(r)
+	}
+	flush()
+	return cols
 }

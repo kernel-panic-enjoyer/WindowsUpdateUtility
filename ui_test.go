@@ -118,6 +118,8 @@ func TestRenderedHTMLContainsAsyncUpdateHooks(t *testing.T) {
 		`id="installed-search"`,
 		`id="installed-page-status"`,
 		`packageMatchesInstalledSearch`,
+		`packageAvailableCell`,
+		`Pending in Microsoft Store`,
 		`managersRendered`,
 		`renderUpdatesTable`,
 		`renderInstalledTable`,

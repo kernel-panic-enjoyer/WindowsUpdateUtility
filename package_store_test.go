@@ -77,6 +77,58 @@ This Store app update can be installed immediately.
 	}
 }
 
+func TestParseStoreUpdatePackages(t *testing.T) {
+	output := `
+Checking for updates...
+
+| Name                  | Publisher             | Version         | Date       |
+|-----------------------|-----------------------|-----------------|------------|
+| Codex                 | OpenAI                | 26.611.8604.0   | 2026-06-17 |
+| Microsoft Store       | Microsoft Corporation | 22605.1401.10.0 | 2026-06-16 |
+| Windows Web           | Microsoft Windows     | 526.11701.50.0  | 2026-06-01 |
+| Experience Pack       |                       |                 |            |
+
+Would you like to install the 3 Store update(s) now? [y/n] (y):
+Failed to read input in non-interactive mode.
+`
+	got := parseStoreUpdatePackages(output)
+	if len(got) != 3 {
+		t.Fatalf("expected three native Store update packages, got %#v", got)
+	}
+	if got[0].ID != "Codex" || got[0].AvailableVersion != "26.611.8604.0" || !got[0].UpdateAvailable {
+		t.Fatalf("unexpected Codex update package: %#v", got[0])
+	}
+	if got[1].ID != "Microsoft Store" || got[1].ActionBackend != backendStoreCLI {
+		t.Fatalf("unexpected Microsoft Store update package: %#v", got[1])
+	}
+	if got[2].ID != "Windows Web Experience Pack" || got[2].AvailableVersion != "526.11701.50.0" {
+		t.Fatalf("unexpected wrapped Store update package: %#v", got[2])
+	}
+}
+
+func TestParseStoreInstalledBoxTableMergesWrappedRows(t *testing.T) {
+	output := `
+Loading installed applications...
+
+| Name                 | Publisher           | Version      | Date       |
+|----------------------|---------------------|--------------|------------|
+| AVC                  | Microsoft           | 1.1.23.0     | 2026-05-02 |
+| Encoder-Videoerweite | Corporation         |              |            |
+| rung                 |                     |              |            |
+| Codex                | OpenAI              | 26.611.8604.0| 2026-06-17 |
+`
+	got := parseStoreInstalled(output)
+	if len(got) != 2 {
+		t.Fatalf("expected wrapped Store rows to merge into two packages, got %#v", got)
+	}
+	if got[0].Name != "AVC Encoder-Videoerweite rung" || got[0].Version != "1.1.23.0" {
+		t.Fatalf("wrapped Store row was not merged correctly: %#v", got[0])
+	}
+	if got[1].Name != "Codex" || !got[1].Installed || got[1].Key != "store:Codex" {
+		t.Fatalf("unexpected Codex installed row: %#v", got[1])
+	}
+}
+
 func TestParseStoreSearchSkipsBannerLines(t *testing.T) {
 	output := `
 Application Compatibility Enhancements

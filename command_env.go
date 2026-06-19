@@ -4,7 +4,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"syscall"
 )
@@ -173,16 +172,35 @@ func parseRegistryQueryValue(output, value string) string {
 	return ""
 }
 
-var windowsEnvRefPattern = regexp.MustCompile(`%([^%]+)%`)
-
 func expandWindowsEnvRefs(value string) string {
-	return windowsEnvRefPattern.ReplaceAllStringFunc(value, func(match string) string {
-		name := strings.Trim(match, "%")
-		if replacement := os.Getenv(name); replacement != "" {
-			return replacement
+	var expanded strings.Builder
+	for i := 0; i < len(value); {
+		if value[i] != '%' {
+			expanded.WriteByte(value[i])
+			i++
+			continue
 		}
-		return match
-	})
+		end := strings.IndexByte(value[i+1:], '%')
+		if end < 0 {
+			expanded.WriteByte(value[i])
+			i++
+			continue
+		}
+		end += i + 1
+		name := value[i+1 : end]
+		if name == "" {
+			expanded.WriteString("%%")
+			i = end + 1
+			continue
+		}
+		if replacement := os.Getenv(name); replacement != "" {
+			expanded.WriteString(replacement)
+		} else {
+			expanded.WriteString(value[i : end+1])
+		}
+		i = end + 1
+	}
+	return expanded.String()
 }
 
 func mergePathLists(paths ...string) string {

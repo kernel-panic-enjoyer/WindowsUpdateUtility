@@ -62,7 +62,12 @@ func collectInventoryInputs(managers map[string]ManagerStatus) inventoryInputs {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			inputs.nativeStoreUpdates, inputs.nativeStoreUpdatesResult = storeUpdates()
+			inputs.nativeStoreInstalled, inputs.nativeStoreInstalledResult = storeInstalled()
+		}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			inputs.nativeStoreUpdates, inputs.nativeStoreUpdatePackages, inputs.nativeStoreUpdatesResult = storeUpdates()
 		}()
 	}
 	for _, collector := range managerInventoryCollectors {

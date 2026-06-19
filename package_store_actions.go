@@ -72,7 +72,7 @@ func runWingetStoreUpdateFallback(ctx context.Context, pkg Package) CommandResul
 
 func runStoreSearchUpdateFallback(ctx context.Context, pkg Package, attempted []string) CommandResult {
 	query := strings.TrimSpace(pkg.Name)
-	if query == "" || len(query) > 160 || storeIDBlockedPattern.MatchString(query) {
+	if query == "" || len(query) > 160 || containsBlockedPackageActionChar(query) {
 		return CommandResult{}
 	}
 	appLog("Store update targets for %q missed; searching Store for a fresh update target.", query)

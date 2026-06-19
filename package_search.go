@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -246,10 +245,27 @@ func parseWingetSearchPackages(result CommandResult) []Package {
 func searchQueryVariants(query string) []string {
 	query = strings.TrimSpace(query)
 	variants := []string{query}
-	normalized := strings.Join(regexp.MustCompile(`[-_.]+`).Split(query, -1), " ")
+	normalized := normalizeSearchQuerySeparators(query)
 	normalized = strings.Join(strings.Fields(normalized), " ")
 	if normalized != "" && !strings.EqualFold(normalized, query) {
 		variants = append(variants, normalized)
 	}
 	return variants
+}
+
+func normalizeSearchQuerySeparators(query string) string {
+	var normalized strings.Builder
+	lastWasSeparator := false
+	for _, r := range query {
+		if r == '-' || r == '_' || r == '.' {
+			if !lastWasSeparator {
+				normalized.WriteRune(' ')
+				lastWasSeparator = true
+			}
+			continue
+		}
+		normalized.WriteRune(r)
+		lastWasSeparator = false
+	}
+	return normalized.String()
 }

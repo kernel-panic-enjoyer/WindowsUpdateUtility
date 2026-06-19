@@ -110,6 +110,66 @@ func TestMergeStoreAppxPackagesPrefersResolvedStoreRow(t *testing.T) {
 	}
 }
 
+func TestMergeStoreNativeUpdatePackagesKeepsUnmatchedUpdate(t *testing.T) {
+	got := mergeStoreNativeUpdatePackages(nil, []Package{
+		{
+			Key:              "store:Microsoft Store",
+			ID:               "Microsoft Store",
+			Name:             "Microsoft Store",
+			AvailableVersion: "22605.1401.10.0",
+			Manager:          managerStore,
+			Source:           sourceStoreCLI,
+			UpdateAvailable:  true,
+			UpdateSupported:  true,
+			Installed:        true,
+			ActionBackend:    backendStoreCLI,
+		},
+	})
+	if len(got) != 1 {
+		t.Fatalf("expected unmatched native Store update row to remain, got %#v", got)
+	}
+	if got[0].ID != "Microsoft Store" || !got[0].UpdateAvailable || got[0].AvailableVersion != "22605.1401.10.0" {
+		t.Fatalf("unexpected native Store update row: %#v", got[0])
+	}
+}
+
+func TestMergeStoreNativeUpdatePackagesMarksInstalledStoreRow(t *testing.T) {
+	installed := []Package{
+		{
+			Key:             "store:Codex",
+			ID:              "Codex",
+			Name:            "Codex",
+			Version:         "26.611.8604.0",
+			Manager:         managerStore,
+			Source:          sourceStoreCLI,
+			UpdateSupported: true,
+			Installed:       true,
+			ActionBackend:   backendStoreCLI,
+		},
+	}
+	updates := []Package{
+		{
+			Key:              "store:Codex",
+			ID:               "Codex",
+			Name:             "Codex",
+			AvailableVersion: "26.611.8604.0",
+			Manager:          managerStore,
+			Source:           sourceStoreCLI,
+			UpdateAvailable:  true,
+			UpdateSupported:  true,
+			Installed:        true,
+			ActionBackend:    backendStoreCLI,
+		},
+	}
+	got := mergeStoreNativeUpdatePackages(installed, updates)
+	if len(got) != 1 {
+		t.Fatalf("expected native Store update to merge into installed row, got %#v", got)
+	}
+	if !got[0].UpdateAvailable || got[0].AvailableVersion != "26.611.8604.0" {
+		t.Fatalf("expected installed Store row to be marked updateable, got %#v", got[0])
+	}
+}
+
 func TestApplyStoreUpdateVersionMatchesAppxFullName(t *testing.T) {
 	pkg := Package{
 		ID:            "OpenAI.Codex_1.0.0.0_x64__abc123",
@@ -161,7 +221,7 @@ func TestApplyStoreUpdateVersionUsesStoreUpdateNameTarget(t *testing.T) {
 	}
 }
 
-func TestApplyStoreUpdateVersionIgnoresEqualInstalledVersion(t *testing.T) {
+func TestApplyStoreUpdateVersionKeepsExplicitStoreUpdateWhenVersionsMatch(t *testing.T) {
 	pkg := Package{
 		ID:               "OpenAI.Codex_26.611.8273.0_x64__abc123",
 		Name:             "Codex",
@@ -180,8 +240,8 @@ func TestApplyStoreUpdateVersionIgnoresEqualInstalledVersion(t *testing.T) {
 
 	got := applyStoreUpdateVersion(pkg, updates, true)
 
-	if got.UpdateAvailable || got.AvailableVersion != "" {
-		t.Fatalf("equal Store/AppX versions should be current, got %#v", got)
+	if !got.UpdateAvailable || got.AvailableVersion != "26.611.8273.0" || got.ID != "Codex" {
+		t.Fatalf("explicit Store update row should remain updateable even when AppX version matches, got %#v", got)
 	}
 }
 

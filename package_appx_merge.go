@@ -47,6 +47,67 @@ func mergeStoreAppxPackages(packages, appxPackages []Package) []Package {
 	return packages
 }
 
+func mergeStoreNativeUpdatePackages(packages, updatePackages []Package) []Package {
+	seen := map[string]int{}
+	markSeen := func(index int, pkg Package) {
+		if pkg.Manager != managerStore {
+			return
+		}
+		for _, value := range storePackageIdentityCandidates(pkg) {
+			normalized := normalizePackageIdentity(value)
+			if normalized != "" {
+				seen[normalized] = index
+			}
+		}
+	}
+	for i, pkg := range packages {
+		markSeen(i, pkg)
+	}
+	for _, update := range updatePackages {
+		matchIndex := -1
+		for _, value := range storePackageIdentityCandidates(update) {
+			normalized := normalizePackageIdentity(value)
+			if normalized == "" {
+				continue
+			}
+			if index, ok := seen[normalized]; ok {
+				matchIndex = index
+				break
+			}
+		}
+		if matchIndex >= 0 {
+			packages[matchIndex] = mergeStoreNativeUpdatePackage(packages[matchIndex], update)
+			markSeen(matchIndex, packages[matchIndex])
+			continue
+		}
+		index := len(packages)
+		packages = append(packages, update)
+		markSeen(index, update)
+	}
+	return packages
+}
+
+func mergeStoreNativeUpdatePackage(existing, update Package) Package {
+	if update.Name != "" && (existing.Name == "" || existing.Name == existing.ID) {
+		existing.Name = update.Name
+	}
+	if update.ID != "" && (existing.ID == "" || existing.ActionBackend == backendAppXInventory) {
+		existing.ID = update.ID
+		existing.Key = packageKey(managerStore, update.ID)
+	}
+	if existing.AvailableVersion == "" {
+		existing.AvailableVersion = update.AvailableVersion
+	}
+	existing.Manager = managerStore
+	existing.UpdateAvailable = true
+	existing.UpdateSupported = true
+	existing.Installed = true
+	if existing.ActionBackend == "" || existing.ActionBackend == backendAppXInventory || existing.ActionBackend == backendWingetMSStoreFallback {
+		existing.ActionBackend = backendStoreCLI
+	}
+	return existing
+}
+
 func mergeStoreDuplicatePackage(existing, appx Package) Package {
 	if appx.Name != "" && (existing.Name == "" || existing.Name == existing.ID || appx.ActionBackend == backendStoreCLIResolved) {
 		existing.Name = appx.Name
@@ -73,6 +134,22 @@ func mergeStoreDuplicatePackage(existing, appx Package) Package {
 	}
 	existing.Installed = existing.Installed || appx.Installed
 	return existing
+}
+
+func storePackageIdentityCandidates(pkg Package) []string {
+	values := []string{pkg.ID, pkg.Name, pkg.Match, stableStoreActionID(pkg.ID), stableStoreActionID(pkg.Match)}
+	seen := map[string]bool{}
+	candidates := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		normalized := normalizePackageIdentity(value)
+		if normalized == "" || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		candidates = append(candidates, value)
+	}
+	return candidates
 }
 
 func storeUpdateVersionForPackage(pkg Package, updates map[string]string) string {
@@ -102,7 +179,8 @@ func applyStoreUpdateVersion(pkg Package, updates map[string]string, storeAvaila
 	if available == "" {
 		return pkg
 	}
-	if !versionGreater(available, pkg.Version) {
+	sameVersionStoreUpdate := storeAvailable && strings.EqualFold(strings.TrimSpace(available), strings.TrimSpace(pkg.Version))
+	if !versionGreater(available, pkg.Version) && !sameVersionStoreUpdate {
 		pkg.AvailableVersion = ""
 		pkg.UpdateAvailable = false
 		return pkg

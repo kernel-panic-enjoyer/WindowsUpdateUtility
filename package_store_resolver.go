@@ -166,10 +166,10 @@ func resolvedStoreTarget(entry StoreResolveCacheEntry) string {
 
 func validStoreResolvedTarget(entry StoreResolveCacheEntry) bool {
 	target := resolvedStoreTarget(entry)
-	if target == "" || len(target) > 160 || isStoreSearchNoiseLine(target) || storeIDBlockedPattern.MatchString(target) {
+	if target == "" || len(target) > 160 || isStoreSearchNoiseLine(target) || containsBlockedPackageActionChar(target) {
 		return false
 	}
-	if entry.StoreName != "" && (isStoreSearchNoiseLine(entry.StoreName) || storeIDBlockedPattern.MatchString(entry.StoreName)) {
+	if entry.StoreName != "" && (isStoreSearchNoiseLine(entry.StoreName) || containsBlockedPackageActionChar(entry.StoreName)) {
 		return false
 	}
 	return true

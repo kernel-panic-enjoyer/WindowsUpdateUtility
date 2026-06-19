@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -15,16 +14,14 @@ func normalizeText(value string) string {
 
 func normalizeRegistryKey(name, publisher, location string) string {
 	base := strings.ToLower(name + "|" + publisher + "|" + location)
-	re := regexp.MustCompile(`[^a-z0-9]+`)
-	key := strings.Trim(re.ReplaceAllString(base, "-"), "-")
+	key := registryKeySlug(base)
 	if key == "" {
-		key = strings.Trim(re.ReplaceAllString(strings.ToLower(name), "-"), "-")
+		key = registryKeySlug(strings.ToLower(name))
 	}
 	return key
 }
 
 func parseRegQuery(output, hive string) []ScannedApp {
-	valuePattern := regexp.MustCompile(`^\s+([^\s]+)\s+REG_\S+\s*(.*)$`)
 	apps := map[string]map[string]string{}
 	current := ""
 	for _, raw := range strings.Split(output, "\n") {
@@ -39,9 +36,9 @@ func parseRegQuery(output, hive string) []ScannedApp {
 		if current == "" {
 			continue
 		}
-		match := valuePattern.FindStringSubmatch(line)
-		if len(match) == 3 {
-			apps[current][match[1]] = normalizeText(match[2])
+		name, data, ok := parseRegistryValueLine(line)
+		if ok {
+			apps[current][name] = normalizeText(data)
 		}
 	}
 
@@ -73,6 +70,41 @@ func parseRegQuery(output, hive string) []ScannedApp {
 	}
 	sort.Slice(scanned, func(i, j int) bool { return strings.ToLower(scanned[i].Name) < strings.ToLower(scanned[j].Name) })
 	return scanned
+}
+
+func registryKeySlug(value string) string {
+	var slug strings.Builder
+	lastWasSeparator := true
+	for _, r := range value {
+		if r >= 'A' && r <= 'Z' {
+			r += 'a' - 'A'
+		}
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			slug.WriteRune(r)
+			lastWasSeparator = false
+			continue
+		}
+		if !lastWasSeparator {
+			slug.WriteRune('-')
+			lastWasSeparator = true
+		}
+	}
+	return strings.Trim(slug.String(), "-")
+}
+
+func parseRegistryValueLine(line string) (string, string, bool) {
+	if line == strings.TrimLeft(line, " \t") {
+		return "", "", false
+	}
+	fields := strings.Fields(strings.TrimSpace(line))
+	if len(fields) < 2 || !strings.HasPrefix(strings.ToUpper(fields[1]), "REG_") {
+		return "", "", false
+	}
+	data := ""
+	if len(fields) > 2 {
+		data = strings.Join(fields[2:], " ")
+	}
+	return fields[0], data, true
 }
 
 func readRegistryApps() ([]ScannedApp, error) {

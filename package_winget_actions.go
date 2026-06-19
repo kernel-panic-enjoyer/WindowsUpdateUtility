@@ -21,7 +21,7 @@ var wingetInteractiveFlags = []string{
 
 func wingetPackageCommand(action, source, id string, extra ...string) []string {
 	args := []string{action}
-	if id != "" && packageIDPattern.MatchString(id) {
+	if id != "" && isSafePackageID(id) {
 		args = append(args, "--id", id, "--exact")
 	} else {
 		args = append(args, id)

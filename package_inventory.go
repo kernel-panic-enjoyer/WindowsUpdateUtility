@@ -11,11 +11,14 @@ type managerInventory struct {
 }
 
 type inventoryInputs struct {
-	managerInventories       []managerInventory
-	appxPackages             []Package
-	appxResult               CommandResult
-	nativeStoreUpdates       map[string]string
-	nativeStoreUpdatesResult CommandResult
+	managerInventories         []managerInventory
+	appxPackages               []Package
+	appxResult                 CommandResult
+	nativeStoreInstalled       []Package
+	nativeStoreInstalledResult CommandResult
+	nativeStoreUpdates         map[string]string
+	nativeStoreUpdatePackages  []Package
+	nativeStoreUpdatesResult   CommandResult
 }
 
 var inventoryGetter = getInventory
@@ -29,6 +32,9 @@ func getInventory() Inventory {
 
 	inputs := collectInventoryInputs(managers)
 	commandResults["appx_inventory"] = inputs.appxResult
+	if inputs.nativeStoreInstalledResult.Command != "" {
+		commandResults["store_installed"] = inputs.nativeStoreInstalledResult
+	}
 	if inputs.nativeStoreUpdatesResult.Command != "" {
 		commandResults["store_updates"] = inputs.nativeStoreUpdatesResult
 		mergeUpdateVersions(storeUpdateVersions, inputs.nativeStoreUpdates)
@@ -41,6 +47,10 @@ func getInventory() Inventory {
 			mergeWingetStoreUpdateVersions(storeUpdateVersions, inventory.updates)
 		}
 		packages = append(packages, packagesFromManagerInventory(state, managers, inventory)...)
+	}
+	if managers[managerStore].Available {
+		packages = append(packages, packagesFromNativeStoreInstalled(state, inputs.nativeStoreInstalled)...)
+		packages = mergeStoreNativeUpdatePackages(packages, packagesFromNativeStoreUpdates(state, inputs.nativeStoreUpdatePackages))
 	}
 
 	if inputs.appxResult.OK || len(inputs.appxPackages) > 0 {

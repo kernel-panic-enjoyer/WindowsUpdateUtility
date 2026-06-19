@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 )
@@ -31,16 +30,13 @@ var packageActionRetryWait = func(ctx context.Context) bool {
 	}
 }
 
-var packageIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.+\-:]+$`)
-var storeIDBlockedPattern = regexp.MustCompile(`[\x00\r\n&|<>^"%]`)
-
 func validateManagerAndID(manager, id string) error {
 	if !isManagedPackageManager(manager) {
 		return managerValidationError()
 	}
 	id = strings.TrimSpace(id)
 	if manager == managerStore || manager == managerWinget {
-		if id == "" || len(id) > 240 || storeIDBlockedPattern.MatchString(id) {
+		if id == "" || len(id) > 240 || containsBlockedPackageActionChar(id) {
 			if manager == managerStore {
 				return errors.New("store package id or query contains unsupported characters")
 			}
@@ -48,10 +44,37 @@ func validateManagerAndID(manager, id string) error {
 		}
 		return nil
 	}
-	if id == "" || !packageIDPattern.MatchString(id) {
+	if id == "" || !isSafePackageID(id) {
 		return errors.New("package id contains unsupported characters")
 	}
 	return nil
+}
+
+func isSafePackageID(id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, r := range id {
+		if isASCIIAlphaNumeric(r) || r == '_' || r == '.' || r == '+' || r == '-' || r == ':' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func containsBlockedPackageActionChar(value string) bool {
+	for _, r := range value {
+		switch r {
+		case 0, '\r', '\n', '&', '|', '<', '>', '^', '"', '%':
+			return true
+		}
+	}
+	return false
+}
+
+func isASCIIAlphaNumeric(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
 }
 
 func installPackage(manager, id string) CommandResult {

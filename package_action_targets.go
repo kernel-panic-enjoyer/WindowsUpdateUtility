@@ -47,7 +47,7 @@ func wingetUpdateTargetCandidates(pkg Package) []string {
 
 func wingetNameFallbackTarget(pkg Package) string {
 	name := strings.TrimSpace(pkg.Name)
-	if name == "" || len(name) > 160 || storeIDBlockedPattern.MatchString(name) {
+	if name == "" || len(name) > 160 || containsBlockedPackageActionChar(name) {
 		return ""
 	}
 	for _, existing := range []string{pkg.ID, pkg.Match} {
@@ -70,7 +70,7 @@ func chocoUpdateTargetCandidates(pkg Package) []string {
 			values = append(values, id[:len(id)-len(suffix)])
 		}
 	}
-	if !strings.HasSuffix(lower, ".install") && !strings.HasSuffix(lower, ".portable") && packageIDPattern.MatchString(id) {
+	if !strings.HasSuffix(lower, ".install") && !strings.HasSuffix(lower, ".portable") && isSafePackageID(id) {
 		values = append(values, id+".install", id+".portable")
 	}
 	return uniquePackageIDTargets(values)
@@ -81,7 +81,7 @@ func uniqueUpdateTargets(values []string) []string {
 	var targets []string
 	for _, value := range values {
 		value = strings.TrimSpace(value)
-		if value == "" || len(value) > 240 || storeIDBlockedPattern.MatchString(value) {
+		if value == "" || len(value) > 240 || containsBlockedPackageActionChar(value) {
 			continue
 		}
 		normalized := strings.ToLower(value)
@@ -99,7 +99,7 @@ func uniquePackageIDTargets(values []string) []string {
 	var targets []string
 	for _, value := range values {
 		value = strings.TrimSpace(value)
-		if value == "" || !packageIDPattern.MatchString(value) {
+		if value == "" || !isSafePackageID(value) {
 			continue
 		}
 		normalized := strings.ToLower(value)

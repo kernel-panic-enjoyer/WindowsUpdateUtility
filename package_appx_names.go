@@ -1,7 +1,6 @@
 package main
 
 import (
-	"regexp"
 	"strings"
 )
 
@@ -21,13 +20,23 @@ func friendlyAppxName(name, displayName string, preferred ...string) string {
 	if strings.Contains(candidate, ".") {
 		candidate = friendlyDottedPackageIdentity(candidate)
 	}
-	candidate = regexp.MustCompile(`^\d+`).ReplaceAllString(candidate, "")
+	candidate = trimLeadingDigits(candidate)
 	candidate = strings.Trim(candidate, " ._-")
 	candidate = splitJoinedWords(candidate)
 	if candidate == "" {
 		return strings.TrimSpace(name)
 	}
 	return candidate
+}
+
+func trimLeadingDigits(value string) string {
+	value = strings.TrimSpace(value)
+	for index, r := range value {
+		if r < '0' || r > '9' {
+			return value[index:]
+		}
+	}
+	return ""
 }
 
 func friendlyDottedPackageIdentity(name string) string {

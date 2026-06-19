@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"regexp"
 	"strconv"
 	"strings"
 )
@@ -142,17 +141,31 @@ func versionGreater(candidate, current string) bool {
 }
 
 func versionParts(value string) []int {
-	fields := regexp.MustCompile(`\D+`).Split(strings.TrimSpace(value), -1)
 	parts := []int{}
-	for _, field := range fields {
-		if field == "" {
-			continue
+	var current strings.Builder
+	flush := func() bool {
+		if current.Len() == 0 {
+			return true
 		}
-		part, err := strconv.Atoi(field)
+		part, err := strconv.Atoi(current.String())
+		current.Reset()
 		if err != nil {
-			return nil
+			return false
 		}
 		parts = append(parts, part)
+		return true
+	}
+	for _, r := range strings.TrimSpace(value) {
+		if r >= '0' && r <= '9' {
+			current.WriteRune(r)
+			continue
+		}
+		if !flush() {
+			return nil
+		}
+	}
+	if !flush() {
+		return nil
 	}
 	return parts
 }
@@ -160,7 +173,13 @@ func versionParts(value string) []int {
 func normalizePackageIdentity(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	value = strings.TrimSuffix(value, "_8wekyb3d8bbwe")
-	return regexp.MustCompile(`[^a-z0-9]+`).ReplaceAllString(value, "")
+	var normalized strings.Builder
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			normalized.WriteRune(r)
+		}
+	}
+	return normalized.String()
 }
 
 func packageKey(manager, id string) string {
