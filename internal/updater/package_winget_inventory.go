@@ -45,16 +45,17 @@ func wingetInstalled() ([]Package, CommandResult) {
 	return tablePackages, listResult
 }
 
-func wingetUpdates() (map[string]string, CommandResult) {
+func wingetUpdates() (map[string]string, map[string]Package, CommandResult) {
 	updates := map[string]string{}
+	details := map[string]Package{}
 	result := runCommand(120*time.Second, managerCommand(managerWinget, "upgrade", "--accept-source-agreements", "--disable-interactivity")...)
-	mergeWingetUpdateOutput(updates, result.Stdout+"\n"+result.Stderr, "")
+	mergeWingetUpdateOutput(updates, details, result.Stdout+"\n"+result.Stderr, "")
 	storeResult := runCommand(120*time.Second, managerCommand(managerWinget, "upgrade", "--source", sourceMSStore, "--accept-source-agreements", "--disable-interactivity")...)
-	mergeWingetUpdateOutput(updates, storeResult.Stdout+"\n"+storeResult.Stderr, managerStore)
-	return updates, mergeReadOnlyCommandResults(result, storeResult, "winget msstore update check")
+	mergeWingetUpdateOutput(updates, details, storeResult.Stdout+"\n"+storeResult.Stderr, managerStore)
+	return updates, details, mergeReadOnlyCommandResults(result, storeResult, "winget msstore update check")
 }
 
-func mergeWingetUpdateOutput(updates map[string]string, output, forceManager string) {
+func mergeWingetUpdateOutput(updates map[string]string, details map[string]Package, output, forceManager string) {
 	for _, pkg := range parseWingetTable(output) {
 		if pkg.AvailableVersion == "" {
 			continue
@@ -70,7 +71,13 @@ func mergeWingetUpdateOutput(updates map[string]string, output, forceManager str
 		if forceManager != "" {
 			manager = forceManager
 		}
-		updates[packageKey(manager, strings.ToLower(pkg.ID))] = pkg.AvailableVersion
+		key := packageKey(manager, strings.ToLower(pkg.ID))
+		pkg.Key = key
+		pkg.Manager = manager
+		updates[key] = pkg.AvailableVersion
+		if details != nil {
+			details[key] = pkg
+		}
 	}
 }
 

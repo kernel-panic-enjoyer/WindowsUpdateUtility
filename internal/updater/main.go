@@ -21,12 +21,14 @@ const (
 	defaultPort = 4183
 )
 
-func randomToken() string {
+var cryptoRandomRead = rand.Read
+
+func randomToken() (string, error) {
 	b := make([]byte, 24)
-	if _, err := rand.Read(b); err != nil {
-		return fmt.Sprintf("%d", time.Now().UnixNano())
+	if _, err := cryptoRandomRead(b); err != nil {
+		return "", fmt.Errorf("generate secure token: %w", err)
 	}
-	return hex.EncodeToString(b)
+	return hex.EncodeToString(b), nil
 }
 
 func freePort(start int) int {
@@ -46,7 +48,11 @@ func runServer(noBrowser bool) error {
 		token = os.Getenv("UPDATER_TOKEN")
 	}
 	if token == "" {
-		token = randomToken()
+		generated, err := randomToken()
+		if err != nil {
+			return err
+		}
+		token = generated
 	}
 	port := freePort(defaultPort)
 	if override, ok := argValue("--port"); ok {
@@ -58,10 +64,20 @@ func runServer(noBrowser bool) error {
 			port = parsed
 		}
 	}
-	app := &App{token: token}
+	sessionToken, err := randomToken()
+	if err != nil {
+		return err
+	}
+	app := &App{token: token, sessionToken: sessionToken, listenHost: defaultHost, listenPort: port}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", app.serveHTTP)
-	server := &http.Server{Addr: fmt.Sprintf("%s:%d", defaultHost, port), Handler: mux}
+	server := &http.Server{
+		Addr:              fmt.Sprintf("%s:%d", defaultHost, port),
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      30 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
+	}
 	app.server = server
 	app.refreshStatus(true)
 	app.refreshInventory(true)

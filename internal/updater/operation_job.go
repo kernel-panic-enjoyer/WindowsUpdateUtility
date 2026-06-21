@@ -23,25 +23,28 @@ const (
 )
 
 type OperationJobStatus struct {
-	JobID           string         `json:"job_id,omitempty"`
-	Type            string         `json:"type,omitempty"`
-	Mode            string         `json:"mode,omitempty"`
-	State           string         `json:"state"`
-	Running         bool           `json:"running"`
-	CancelRequested bool           `json:"cancel_requested"`
-	CurrentPackage  string         `json:"current_package,omitempty"`
-	CurrentKey      string         `json:"current_key,omitempty"`
-	PackageKeys     []string       `json:"package_keys,omitempty"`
-	CurrentIndex    int            `json:"current_index"`
-	Total           int            `json:"total"`
-	Results         []UpdateResult `json:"results,omitempty"`
-	Result          *CommandResult `json:"result,omitempty"`
-	Scan            *ScanResult    `json:"scan,omitempty"`
-	RefreshStarted  bool           `json:"refresh_started"`
-	StartedAt       string         `json:"started_at,omitempty"`
-	FinishedAt      string         `json:"finished_at,omitempty"`
-	Notice          string         `json:"notice,omitempty"`
-	Error           string         `json:"error,omitempty"`
+	JobID               string         `json:"job_id,omitempty"`
+	Type                string         `json:"type,omitempty"`
+	Mode                string         `json:"mode,omitempty"`
+	State               string         `json:"state"`
+	Running             bool           `json:"running"`
+	CancelRequested     bool           `json:"cancel_requested"`
+	CurrentPackage      string         `json:"current_package,omitempty"`
+	CurrentKey          string         `json:"current_key,omitempty"`
+	PackageKeys         []string       `json:"package_keys,omitempty"`
+	Packages            []Package      `json:"packages,omitempty"`
+	CurrentIndex        int            `json:"current_index"`
+	Total               int            `json:"total"`
+	Results             []UpdateResult `json:"results,omitempty"`
+	Result              *CommandResult `json:"result,omitempty"`
+	Scan                *ScanResult    `json:"scan,omitempty"`
+	RefreshStarted      bool           `json:"refresh_started"`
+	AllowUnknownVersion bool           `json:"allow_unknown_version,omitempty"`
+	AllowPinned         bool           `json:"allow_pinned,omitempty"`
+	StartedAt           string         `json:"started_at,omitempty"`
+	FinishedAt          string         `json:"finished_at,omitempty"`
+	Notice              string         `json:"notice,omitempty"`
+	Error               string         `json:"error,omitempty"`
 }
 
 type OperationJob struct {
@@ -51,20 +54,28 @@ type OperationJob struct {
 }
 
 func (app *App) startOperationJob(jobType, mode string, total int, packageKeys []string, run func(context.Context, *OperationJob)) OperationJobStatus {
+	return app.startOperationJobWithPackageSnapshot(jobType, mode, total, packageKeys, nil, run)
+}
+
+func (app *App) startOperationJobWithPackageSnapshot(jobType, mode string, total int, packageKeys []string, packages []Package, run func(context.Context, *OperationJob)) OperationJobStatus {
 	app.jobsMu.Lock()
 	if app.jobs == nil {
 		app.jobs = map[string]*OperationJob{}
 	}
+	allowUnknown, allowPinned := updateOptionsFromPackageSnapshot(packages)
 	app.jobSeq++
 	job := &OperationJob{
 		run: run,
 		status: OperationJobStatus{
-			JobID:       fmt.Sprintf("job-%d", app.jobSeq),
-			Type:        jobType,
-			Mode:        mode,
-			State:       jobStateQueued,
-			Total:       total,
-			PackageKeys: append([]string(nil), packageKeys...),
+			JobID:               fmt.Sprintf("job-%d", app.jobSeq),
+			Type:                jobType,
+			Mode:                mode,
+			State:               jobStateQueued,
+			Total:               total,
+			PackageKeys:         append([]string(nil), packageKeys...),
+			Packages:            append([]Package(nil), packages...),
+			AllowUnknownVersion: allowUnknown,
+			AllowPinned:         allowPinned,
 		},
 	}
 	app.jobs[job.status.JobID] = job
@@ -80,6 +91,15 @@ func (app *App) startOperationJob(jobType, mode string, total int, packageKeys [
 		go app.runOperationJobQueue()
 	}
 	return status
+}
+
+func updateOptionsFromPackageSnapshot(packages []Package) (bool, bool) {
+	var allowUnknown, allowPinned bool
+	for _, pkg := range packages {
+		allowUnknown = allowUnknown || pkg.AllowUnknownVersionUpdate
+		allowPinned = allowPinned || pkg.AllowPinnedUpdate
+	}
+	return allowUnknown, allowPinned
 }
 
 func (app *App) runOperationJobQueue() {
@@ -154,6 +174,7 @@ func operationJobHasFailures(status OperationJobStatus) bool {
 
 func cloneOperationJobStatus(status OperationJobStatus) OperationJobStatus {
 	status.PackageKeys = append([]string(nil), status.PackageKeys...)
+	status.Packages = append([]Package(nil), status.Packages...)
 	status.Results = append([]UpdateResult(nil), status.Results...)
 	if status.Result != nil {
 		result := *status.Result

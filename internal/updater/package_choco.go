@@ -50,7 +50,7 @@ func chocoInstalled() ([]Package, CommandResult) {
 	return parseChocoList(result.Stdout + "\n" + result.Stderr), result
 }
 
-func chocoUpdates() (map[string]string, CommandResult) {
+func chocoUpdates() (map[string]string, map[string]Package, CommandResult) {
 	result := runCommand(120*time.Second, managerCommand(managerChoco, "outdated", "--limit-output", "--no-color")...)
-	return parseChocoOutdated(result.Stdout + "\n" + result.Stderr), result
+	return parseChocoOutdated(result.Stdout + "\n" + result.Stderr), nil, result
 }

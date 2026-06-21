@@ -40,6 +40,10 @@ func asyncSnapshot(loading bool, fetchedAt time.Time, errText string) AsyncSnaps
 
 type App struct {
 	token              string
+	sessionToken       string
+	listenHost         string
+	listenPort         int
+	bootstrapUsed      bool
 	server             *http.Server
 	mu                 sync.RWMutex
 	inventory          Inventory

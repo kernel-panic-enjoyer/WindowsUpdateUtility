@@ -2,6 +2,9 @@ package updater
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -69,6 +72,23 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func testSessionApp() *App {
+	return &App{token: "test-token", sessionToken: "test-session"}
+}
+
+func addTestSessionCookie(app *App, request *http.Request) {
+	if app.sessionToken == "" {
+		app.sessionToken = "test-session"
+	}
+	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: app.sessionToken})
+}
+
+func authenticatedRequest(app *App, method, target string, body io.Reader) *http.Request {
+	request := httptest.NewRequest(method, target, body)
+	addTestSessionCookie(app, request)
+	return request
 }
 
 func testUpdateJobApp() *App {

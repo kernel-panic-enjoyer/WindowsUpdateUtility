@@ -15,7 +15,6 @@ const pageJS = pageScriptShell +
 
 const pageScriptShell = `
 (function(){
-  var token = document.body.dataset.token || "";
   var packages = [];
   var updateBusy = false;
   var updatePage = 1;
@@ -41,6 +40,8 @@ const pageScriptShell = `
   var completedJobIDs = {};
   var activeUpdateKeys = [];
   var activeUpdateJobID = "";
+  var pendingBulkUpdate = null;
+  var lastUpdateResultJob = null;
   var latestStatus = null;
   var latestPackagesLoading = true;
   var statusRequestSeq = 0;
@@ -57,7 +58,6 @@ const pageScriptShell = `
   function $(id){ return document.getElementById(id); }
   function api(path, params){
     var url = new URL(path, window.location.origin);
-    url.searchParams.set("token", token);
     Object.keys(params || {}).forEach(function(key){ url.searchParams.set(key, params[key]); });
     return url.toString();
   }

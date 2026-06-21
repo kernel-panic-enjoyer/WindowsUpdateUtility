@@ -62,6 +62,9 @@ func (app *App) updateJobPackages(packageKeys []string, options UpdateOptions) (
 		if pkg.UnknownVersion && !options.AllowUnknownVersion {
 			return nil, updateJobModeSelected, fmt.Errorf("%s has an unknown installed version and requires an explicit global unknown-version update choice", normalized)
 		}
+		if pkg.Pinned && !options.AllowPinned {
+			return nil, updateJobModeSelected, fmt.Errorf("%s is pinned and requires an explicit global pinned update choice", normalized)
+		}
 		pkg.Key = normalized
 		applyUpdateOptions(&pkg, options)
 		packages = append(packages, pkg)
@@ -74,7 +77,10 @@ func (app *App) updateJobPackages(packageKeys []string, options UpdateOptions) (
 }
 
 func packageAllowedInBulkUpdate(pkg Package, options UpdateOptions) bool {
-	return pkg.UpdateAvailable && pkg.UpdateSupported != false && (!pkg.UnknownVersion || options.AllowUnknownVersion)
+	return pkg.UpdateAvailable &&
+		pkg.UpdateSupported != false &&
+		(!pkg.UnknownVersion || options.AllowUnknownVersion) &&
+		(!pkg.Pinned || options.AllowPinned)
 }
 
 func applyUpdateOptions(pkg *Package, options UpdateOptions) {

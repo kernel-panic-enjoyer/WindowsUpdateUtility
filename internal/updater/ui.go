@@ -3,7 +3,6 @@ package updater
 import "html/template"
 
 type PageData struct {
-	Token       string
 	Admin       bool
 	StateDir    string
 	Theme       string
@@ -23,7 +22,7 @@ var pageTemplate = template.Must(template.New("page").Funcs(template.FuncMap{
   <script>!function(){try{var t=localStorage.getItem("windows-updater-theme");if(t==="light"||t==="dark"){document.documentElement.dataset.theme=t}}catch(e){}}();</script>
   <style>` + pageCSS + `</style>
 </head>
-<body data-token="{{.Token}}">
+<body>
   <header class="app-header">
     <div class="brand-block">
       <span class="app-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5.8 12 2l8 3.8v6.1c0 4.9-3.3 8.4-8 10.1-4.7-1.7-8-5.2-8-10.1V5.8Z"/><path d="m8 12.4 2.4 2.4L16.5 8.8"/></svg></span>
@@ -35,7 +34,7 @@ var pageTemplate = template.Must(template.New("page").Funcs(template.FuncMap{
     <div class="header-actions">
       <button id="theme-toggle" class="ghost" type="button"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 1 0 6 6c0 5-4 9-9 9a6 6 0 0 0 3-15Z"/></svg></span><span>Theme</span></button>
       <button id="scan-button" class="ghost" type="button"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7V5a1 1 0 0 1 1-1h2"/><path d="M17 4h2a1 1 0 0 1 1 1v2"/><path d="M20 17v2a1 1 0 0 1-1 1h-2"/><path d="M7 20H5a1 1 0 0 1-1-1v-2"/><path d="M7 12h10"/></svg></span><span>Scan Apps</span></button>
-      <form method="post" action="/shutdown"><input type="hidden" name="token" value="{{.Token}}"><button class="danger" type="submit"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v8"/><path d="M7.1 6.9a8 8 0 1 0 9.8 0"/></svg></span><span>Stop</span></button></form>
+      <form method="post" action="/shutdown"><button class="danger" type="submit"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v8"/><path d="M7.1 6.9a8 8 0 1 0 9.8 0"/></svg></span><span>Stop</span></button></form>
     </div>
   </header>
   <main>
@@ -49,7 +48,6 @@ var pageTemplate = template.Must(template.New("page").Funcs(template.FuncMap{
         <p class="muted">Winget, Chocolatey, and Store inventory are merged into one local control surface.</p>
       </div>
       <form id="search-form" class="search hero-search" method="get" action="/">
-        <input type="hidden" name="token" value="{{.Token}}">
         <label class="search-field" for="search-input"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4"/></svg></span><input id="search-input" name="q" placeholder="Search and install packages"></label>
         <button type="submit"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg></span><span>Search</span></button>
       </form>
@@ -89,10 +87,24 @@ var pageTemplate = template.Must(template.New("page").Funcs(template.FuncMap{
 
     <section id="update-progress" class="progress-panel hidden"><div class="progress-header"><div><span class="panel-kicker">Update job</span><div class="progress-title"><span class="loading-text"><span class="spinner" aria-hidden="true"></span><span>Updating packages...</span></span></div></div><button id="cancel-updates-button" class="secondary hidden" type="button"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 6l12 12"/><path d="M18 6 6 18"/></svg></span><span>Cancel Updates</span></button></div><div class="progress-bar"><span></span></div></section>
 
+    <section id="update-preflight-panel" class="panel table-panel hidden">
+      <div class="section-heading"><div><span class="panel-kicker">Confirm bulk update</span><h2>Update Preflight</h2></div><div class="button-row"><button id="confirm-update-job" type="button"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg></span><span>Confirm Update</span></button><button id="cancel-update-preflight" class="ghost" type="button">Cancel</button></div></div>
+      <div id="update-preflight-summary" class="summary-line"></div>
+      <div id="update-preflight-overrides" class="summary-line muted"></div>
+      <div class="table-wrap"><table><thead><tr><th>Package</th><th>Source</th><th>Installed</th><th>Target</th><th>Manager / Backend / Notes</th></tr></thead><tbody id="update-preflight-body"></tbody></table></div>
+      <div id="update-preflight-excluded" class="preflight-excluded"></div>
+    </section>
+
+    <section id="update-results-panel" class="panel table-panel hidden">
+      <div class="section-heading"><div><span class="panel-kicker">Structured record</span><h2>Update Results</h2></div><div class="button-row"><button id="retry-failed-updates" type="button" disabled><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 4v6h-6"/></svg></span><span>Retry Failed</span></button></div></div>
+      <div id="update-results-summary" class="summary-line"></div>
+      <div class="table-wrap"><table><thead><tr><th>Status</th><th>Package</th><th>Source</th><th>Installed</th><th>Target</th><th>Result</th></tr></thead><tbody id="update-results-body"></tbody></table></div>
+    </section>
+
 	<section id="updates-section" class="panel table-panel priority-panel">
-	  <div class="section-heading"><div><span class="panel-kicker">Primary queue</span><h2>Updates Available</h2></div><div class="button-row"><button id="updates-prev" class="ghost" type="button" disabled>Previous</button><span id="updates-page-status" class="muted">Page 1</span><button id="updates-next" class="ghost" type="button" disabled>Next</button><button id="refresh-packages" class="ghost" type="button"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 1-15.5 6.2"/><path d="M3 12a9 9 0 0 1 15.5-6.2"/><path d="M3 18v-6h6"/><path d="M21 6v6h-6"/></svg></span><span>Refresh</span></button><form class="update-all-form" method="post" action="/api/update-all"><input type="hidden" name="token" value="{{.Token}}"><button id="update-all-button" type="submit"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></span><span>Update All</span></button></form></div></div>
+	  <div class="section-heading"><div><span class="panel-kicker">Primary queue</span><h2>Updates Available</h2></div><div class="button-row"><button id="updates-prev" class="ghost" type="button" disabled>Previous</button><span id="updates-page-status" class="muted">Page 1</span><button id="updates-next" class="ghost" type="button" disabled>Next</button><button id="refresh-packages" class="ghost" type="button"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 1-15.5 6.2"/><path d="M3 12a9 9 0 0 1 15.5-6.2"/><path d="M3 18v-6h6"/><path d="M21 6v6h-6"/></svg></span><span>Refresh</span></button><form class="update-all-form" method="post" action="/api/update-all"><button id="update-all-button" type="submit"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></span><span>Update All</span></button></form></div></div>
 	  <div class="update-options" aria-label="Global update options"><span class="muted">Global update options</span><label class="check-control"><input id="update-allow-unknown" type="checkbox" name="allow_unknown_version" value="true"> Allow unknown version updates</label><label class="check-control"><input id="update-allow-pinned" type="checkbox" name="allow_pinned" value="true"> Allow pinned updates</label></div>
-	  <form id="update-selected-form" method="post" action="/api/update-all"><input type="hidden" name="token" value="{{.Token}}"></form>
+	  <form id="update-selected-form" method="post" action="/api/update-all"></form>
 	  <div class="table-wrap"><table><thead><tr><th></th><th>Name</th><th>Manager</th><th>Installed</th><th>Available</th><th>Auto</th><th>Action</th></tr></thead><tbody id="updates-body"><tr><td colspan="7"><span class="loading-text"><span class="spinner" aria-hidden="true"></span><span>Loading packages...</span></span></td></tr></tbody></table></div>
 	  <div class="table-footer"><button id="update-selected-button" form="update-selected-form" type="submit"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg></span><span>Update Selected</span></button></div>
 	</section>

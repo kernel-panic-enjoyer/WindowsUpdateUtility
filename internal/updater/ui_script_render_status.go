@@ -66,7 +66,7 @@ const pageScriptStatusRender = `
       if(manager.available){
         return '<div class="manager manager-ok"><div class="manager-main"><span class="manager-dot">' + icon("check") + '</span><div><strong>' + html(managerLabel(name)) + '</strong><span class="muted">' + html(manager.path || '') + '</span></div></div><span class="badge ok">' + html(managerAvailabilityText(name, manager)) + '</span>' + details + '</div>';
       }
-      return '<div class="manager manager-missing"><div class="manager-main"><span class="manager-dot">' + icon("alert") + '</span><div><strong>' + html(managerLabel(name)) + '</strong><span class="muted">' + html(manager.error || '') + '</span></div></div><span class="badge error">Missing</span>' + details + '<form class="manager-install-form" method="post" action="/api/managers/install"><input type="hidden" name="token" value="' + attr(token) + '"><input type="hidden" name="manager" value="' + attr(name) + '"><button type="submit">' + icon("install") + '<span>Install ' + html(managerLabel(name)) + '</span></button></form></div>';
+      return '<div class="manager manager-missing"><div class="manager-main"><span class="manager-dot">' + icon("alert") + '</span><div><strong>' + html(managerLabel(name)) + '</strong><span class="muted">' + html(manager.error || '') + '</span></div></div><span class="badge error">Missing</span>' + details + '<form class="manager-install-form" method="post" action="/api/managers/install"><input type="hidden" name="manager" value="' + attr(name) + '"><button type="submit">' + icon("install") + '<span>Install ' + html(managerLabel(name)) + '</span></button></form></div>';
     }).join("");
     if(target.innerHTML !== markup){ target.innerHTML = markup; }
   }

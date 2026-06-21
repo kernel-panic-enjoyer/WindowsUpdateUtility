@@ -1,13 +1,14 @@
 package updater
 
 type managerInventory struct {
-	manager      string
-	installed    []Package
-	listResult   CommandResult
-	updates      map[string]string
-	updateResult CommandResult
-	listKey      string
-	updateKey    string
+	manager       string
+	installed     []Package
+	listResult    CommandResult
+	updates       map[string]string
+	updateDetails map[string]Package
+	updateResult  CommandResult
+	listKey       string
+	updateKey     string
 }
 
 type inventoryInputs struct {

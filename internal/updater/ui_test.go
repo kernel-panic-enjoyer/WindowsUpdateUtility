@@ -9,7 +9,6 @@ import (
 func TestRenderedHTMLContainsAsyncUpdateHooks(t *testing.T) {
 	var output bytes.Buffer
 	data := PageData{
-		Token: "test-token",
 		Theme: "dark",
 	}
 	if err := pageTemplate.Execute(&output, data); err != nil {
@@ -65,6 +64,7 @@ func TestRenderedHTMLContainsAsyncUpdateHooks(t *testing.T) {
 		`activeUpdateJobRunning`,
 		`Queued`,
 		`postCommandPayload`,
+		`postForm("/api/status/refresh"`,
 		`payload.result && !payload.result.ok`,
 		`Application scan completed with errors`,
 		`Could not update startup setting`,
@@ -105,6 +105,29 @@ func TestRenderedHTMLContainsAsyncUpdateHooks(t *testing.T) {
 		`postForm("/api/inventory/refresh"`,
 		`postForm(cancelID ? "/api/jobs/cancel"`,
 		`id="cancel-updates-button"`,
+		`id="update-preflight-panel"`,
+		`id="confirm-update-job"`,
+		`id="cancel-update-preflight"`,
+		`id="update-preflight-summary"`,
+		`id="update-preflight-body"`,
+		`id="update-preflight-excluded"`,
+		`buildUpdatePreflight`,
+		`renderUpdatePreflight`,
+		`confirmPendingUpdateJob`,
+		`hideUpdatePreflight`,
+		`packageRiskNotes`,
+		`pinned-package override`,
+		`id="update-results-panel"`,
+		`id="retry-failed-updates"`,
+		`id="update-results-summary"`,
+		`id="update-results-body"`,
+		`renderUpdateResultPanel`,
+		`renderLatestUpdateResult`,
+		`retryFailedUpdateResults`,
+		`Succeeded`,
+		`Failed`,
+		`Skipped`,
+		`Cancelled`,
 		`status.package_keys`,
 		`applyUpdateJobPackageKeys`,
 		`response.status === 409 && status.running`,
@@ -217,6 +240,9 @@ func TestRenderedHTMLContainsAsyncUpdateHooks(t *testing.T) {
 		`queuedRowUpdateKeys`,
 		`showNotice(message, active || !!(status && status.refresh_started))`,
 		`showNotice(message || "Starting updates...", true)`,
+		`data-token`,
+		`name="token"`,
+		`searchParams.set("token"`,
 	} {
 		if strings.Contains(rendered, unexpected) {
 			t.Fatalf("rendered page should not contain %q", unexpected)

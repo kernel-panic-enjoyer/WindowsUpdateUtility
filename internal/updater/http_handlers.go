@@ -8,18 +8,6 @@ import (
 	"time"
 )
 
-func (app *App) tokenOK(r *http.Request) bool {
-	token := r.URL.Query().Get("token")
-	if token == "" {
-		_ = r.ParseForm()
-		token = r.Form.Get("token")
-	}
-	if token == "" {
-		token = r.Header.Get("X-Updater-Token")
-	}
-	return token == app.token
-}
-
 func formBool(r *http.Request, name string) (bool, bool) {
 	if !r.Form.Has(name) {
 		return false, false
@@ -55,8 +43,13 @@ func (app *App) serveAPI(w http.ResponseWriter, r *http.Request) {
 		if !requireMethod(w, r, http.MethodGet) {
 			return
 		}
-		app.refreshStatus(r.URL.Query().Get("refresh") == "1")
 		writeJSON(w, http.StatusOK, app.statusSnapshot())
+	case "/api/status/refresh":
+		if !requireMethod(w, r, http.MethodPost) {
+			return
+		}
+		app.refreshStatus(true)
+		writeJSON(w, http.StatusAccepted, app.statusSnapshot())
 	case "/api/packages":
 		if !requireMethod(w, r, http.MethodGet) {
 			return
@@ -126,6 +119,11 @@ func logExportFilename(now time.Time) string {
 }
 
 func (app *App) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	setSecurityHeaders(w)
+	if !app.trustedHost(r) {
+		writeAPIError(w, http.StatusMisdirectedRequest, "untrusted host")
+		return
+	}
 	if r.URL.Path == "/favicon.ico" {
 		w.Header().Set("Content-Type", "image/x-icon")
 		w.Header().Set("Cache-Control", "no-cache, max-age=0, must-revalidate")
@@ -133,16 +131,25 @@ func (app *App) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(appIconICO)
 		return
 	}
-	if r.URL.Path == "/shutdown" && app.tokenOK(r) {
+	if app.handleBootstrap(w, r) {
+		return
+	}
+	if !app.sessionOK(r) {
+		http.Error(w, "Unauthorized. Start the app and use the tokenized bootstrap URL.", http.StatusUnauthorized)
+		return
+	}
+	if !app.requestBoundaryOK(w, r) {
+		return
+	}
+	if r.URL.Path == "/shutdown" {
+		if !requireMethod(w, r, http.MethodPost) {
+			return
+		}
 		_, _ = io.WriteString(w, "Stopping")
 		go func() {
 			time.Sleep(200 * time.Millisecond)
 			app.requestShutdown("WebUI Stop")
 		}()
-		return
-	}
-	if !app.tokenOK(r) {
-		http.Error(w, "Unauthorized. Start the app and use the tokenized URL.", http.StatusUnauthorized)
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/api/") {
@@ -160,7 +167,6 @@ func (app *App) serveHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (app *App) render(w http.ResponseWriter, r *http.Request, data PageData) {
 	state := loadState()
-	data.Token = app.token
 	data.Admin = isAdmin()
 	data.StateDir, _ = stateDir()
 	data.Theme = state.Theme

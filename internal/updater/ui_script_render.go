@@ -76,10 +76,14 @@ const pageScriptThemeAndLabels = `
     return params;
   }
   function packageAutoUpdateable(pkg){
-    return pkg.update_supported !== false && !pkg.unknown_version;
+    return pkg.update_supported !== false && !pkg.unknown_version && !pkg.pinned;
   }
   function packageBulkUpdateable(pkg){
-    return !!pkg.update_available && pkg.update_supported !== false && (!pkg.unknown_version || allowUnknownVersionUpdates());
+    var options = arguments.length > 1 && arguments[1] ? arguments[1] : {allowUnknown:allowUnknownVersionUpdates(), allowPinned:allowPinnedUpdates()};
+    return !!pkg.update_available &&
+      pkg.update_supported !== false &&
+      (!pkg.unknown_version || options.allowUnknown) &&
+      (!pkg.pinned || options.allowPinned);
   }
   function pagedItems(items, currentPage, pageSize){
     var total = items.length;

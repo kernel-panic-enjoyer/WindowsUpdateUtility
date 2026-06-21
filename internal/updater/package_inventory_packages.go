@@ -47,6 +47,7 @@ func packageFromManagerInventory(state State, managers map[string]ManagerStatus,
 		displayManager = wingetSourceManager(pkg.Source)
 	}
 	available := inventory.updates[packageKey(displayManager, strings.ToLower(pkg.ID))]
+	updateDetail := inventory.updateDetails[packageKey(displayManager, strings.ToLower(pkg.ID))]
 	if available == "" && inventory.manager == managerWinget {
 		available = pkg.AvailableVersion
 	}
@@ -57,6 +58,7 @@ func packageFromManagerInventory(state State, managers map[string]ManagerStatus,
 	pkg.UpdateSupported = true
 	pkg.Installed = true
 	pkg.UnknownVersion = pkg.UnknownVersion || isUnknownPackageVersion(pkg.Version)
+	pkg.Pinned = pkg.Pinned || updateDetail.Pinned
 	pkg.AutoUpdate = packageAutoUpdateEnabled(state, pkg)
 	if pkg.ActionBackend == "" {
 		pkg.ActionBackend = displayManager

@@ -89,6 +89,85 @@ func TestUpdateJobAllowsSelectedUnknownVersionPackageWithGlobalOption(t *testing
 	}
 }
 
+func TestUpdateJobRejectsSelectedPinnedPackage(t *testing.T) {
+	app := testUpdateJobApp()
+	app.mu.Lock()
+	app.inventory.Packages = append(app.inventory.Packages, Package{
+		Key:              "winget:Vendor.Pinned",
+		Manager:          managerWinget,
+		ID:               "Vendor.Pinned",
+		Name:             "Pinned App",
+		Version:          "1.0",
+		AvailableVersion: "2.0",
+		UpdateAvailable:  true,
+		UpdateSupported:  true,
+		Pinned:           true,
+	})
+	app.mu.Unlock()
+
+	_, _, err := app.updateJobPackages([]string{"winget:Vendor.Pinned"}, UpdateOptions{})
+	if err == nil || !strings.Contains(err.Error(), "pinned") {
+		t.Fatalf("expected pinned package rejection, got %v", err)
+	}
+}
+
+func TestUpdateJobAllowsSelectedPinnedPackageWithGlobalOption(t *testing.T) {
+	app := testUpdateJobApp()
+	app.mu.Lock()
+	app.inventory.Packages = append(app.inventory.Packages, Package{
+		Key:              "winget:Vendor.Pinned",
+		Manager:          managerWinget,
+		ID:               "Vendor.Pinned",
+		Name:             "Pinned App",
+		Version:          "1.0",
+		AvailableVersion: "2.0",
+		UpdateAvailable:  true,
+		UpdateSupported:  true,
+		Pinned:           true,
+	})
+	app.mu.Unlock()
+
+	packages, _, err := app.updateJobPackages([]string{"winget:Vendor.Pinned"}, UpdateOptions{AllowPinned: true})
+	if err != nil {
+		t.Fatalf("expected pinned package with override to be allowed, got %v", err)
+	}
+	if len(packages) != 1 || !packages[0].Pinned || !packages[0].AllowPinnedUpdate {
+		t.Fatalf("expected pinned package metadata and override, got %#v", packages)
+	}
+}
+
+func TestUpdateJobStatusKeepsPackageSnapshotAndOverrides(t *testing.T) {
+	restore := replaceUpdateJobHooks(func(ctx context.Context, manager, id string) CommandResult {
+		<-ctx.Done()
+		return CommandResult{Code: commandCancelledCode, Command: id, Stderr: "Cancelled."}
+	})
+	defer restore()
+
+	app := testUpdateJobApp()
+	app.mu.Lock()
+	app.inventory.Packages = append(app.inventory.Packages, Package{
+		Key:              "winget:Vendor.Pinned",
+		Manager:          managerWinget,
+		ID:               "Vendor.Pinned",
+		Name:             "Pinned App",
+		Version:          "1.0",
+		AvailableVersion: "2.0",
+		UpdateAvailable:  true,
+		UpdateSupported:  true,
+		Pinned:           true,
+	})
+	app.mu.Unlock()
+
+	status, err := app.startUpdateJobWithOptions([]string{"winget:Vendor.Pinned"}, UpdateOptions{AllowPinned: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.cancelOperationJob(status.JobID)
+	if !status.AllowPinned || len(status.Packages) != 1 || !status.Packages[0].Pinned || status.Packages[0].Name != "Pinned App" {
+		t.Fatalf("expected durable package snapshot and override in job status, got %#v", status)
+	}
+}
+
 func TestUpdateJobBulkIncludesUnknownVersionWithGlobalOption(t *testing.T) {
 	app := testUpdateJobApp()
 	packages, mode, err := app.updateJobPackages(nil, UpdateOptions{AllowUnknownVersion: true})
@@ -161,7 +240,7 @@ func TestUpdateJobStatusEndpointReportsProgress(t *testing.T) {
 	defer restore()
 
 	app := testUpdateJobApp()
-	app.token = "test-token"
+	app.sessionToken = "test-session"
 	if _, err := app.startUpdateJob([]string{"winget:Git.Git"}); err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +250,7 @@ func TestUpdateJobStatusEndpointReportsProgress(t *testing.T) {
 		t.Fatal("update job did not report progress")
 	}
 
-	request := httptest.NewRequest(http.MethodGet, "/api/update-all/status?token=test-token", nil)
+	request := authenticatedRequest(app, http.MethodGet, "/api/update-all/status", nil)
 	response := httptest.NewRecorder()
 	app.serveHTTP(response, request)
 	if response.Code != http.StatusOK {

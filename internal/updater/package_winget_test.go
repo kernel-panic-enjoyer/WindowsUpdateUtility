@@ -70,6 +70,40 @@ PowerToys         Microsoft.PowerToys      0.95.0             winget
 	}
 }
 
+func TestParseWingetTableMarksPinnedRows(t *testing.T) {
+	output := `
+Name        ID             Version  Available Source  Pinned
+-------------------------------------------------------------
+Pinned App  Vendor.Pinned  1.0      2.0       winget  Pinned
+Normal App  Vendor.Normal  1.0      2.0       winget
+`
+	got := parseWingetTable(output)
+	if len(got) != 2 {
+		t.Fatalf("expected two rows, got %#v", got)
+	}
+	if !got[0].Pinned || got[0].Source != sourceWinget || got[0].AvailableVersion != "2.0" {
+		t.Fatalf("expected pinned update row with source and version, got %#v", got[0])
+	}
+	if got[1].Pinned {
+		t.Fatalf("normal row should not be pinned: %#v", got[1])
+	}
+}
+
+func TestMergeWingetUpdateOutputCarriesPinnedMetadata(t *testing.T) {
+	output := `
+Name        ID             Version  Available Source  Pinned
+-------------------------------------------------------------
+Pinned App  Vendor.Pinned  1.0      2.0       winget  Pinned
+`
+	updates := map[string]string{}
+	details := map[string]Package{}
+	mergeWingetUpdateOutput(updates, details, output, "")
+	key := packageKey(managerWinget, strings.ToLower("Vendor.Pinned"))
+	if updates[key] != "2.0" || !details[key].Pinned {
+		t.Fatalf("expected pinned metadata in update details, updates=%#v details=%#v", updates, details)
+	}
+}
+
 func TestParseWingetExport(t *testing.T) {
 	output := `{
   "Sources": [{
@@ -169,7 +203,7 @@ Windows App Runtime  Microsoft.WindowsAppRuntime.Singleton  8000.318.101.0  8000
 Codex                OpenAI.Codex                          0.1.0            0.2.0
 `
 	updates := map[string]string{}
-	mergeWingetUpdateOutput(updates, output, managerStore)
+	mergeWingetUpdateOutput(updates, nil, output, managerStore)
 
 	if updates["store:microsoft.windowsappruntime.singleton"] != "8000.328.111.0" {
 		t.Fatalf("missing Windows App Runtime Store update: %#v", updates)
@@ -215,7 +249,7 @@ WinAppRuntime.Main.1.8  MSIX\MicrosoftCorporationII.WinAppRuntime.Main.1.8_8000.
 `
 	updates := map[string]string{}
 
-	mergeWingetUpdateOutput(updates, storeOutput, managerStore)
+	mergeWingetUpdateOutput(updates, nil, storeOutput, managerStore)
 
 	if updates[packageKey(managerStore, strings.ToLower("WinAppRuntime.Main.1.8"))] != "8000.900.1.0" {
 		t.Fatalf("expected truncated MSIX update to be keyed by package name, got %#v", updates)
@@ -225,7 +259,7 @@ Name               ID                                                           
 ------------------------------------------------------------------------------------------------------------
 Truncated Desktop  SomeVendor.SomeReallyLongDesktopPackageIdentifierThatCannotFit…  1.0     1.1       winget
 `
-	mergeWingetUpdateOutput(updates, desktopOutput, "")
+	mergeWingetUpdateOutput(updates, nil, desktopOutput, "")
 	if updates[packageKey(managerWinget, strings.ToLower("Truncated Desktop"))] != "1.1" {
 		t.Fatalf("expected truncated desktop update to be keyed by package name, got %#v", updates)
 	}

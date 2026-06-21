@@ -32,7 +32,8 @@ const pageScriptDataLoading = `
     statusController = abortControllerOrNull();
     try{
       var options = statusController ? {signal:statusController.signal} : {};
-      var data = await (await fetch(api("/api/status", force ? {refresh:"1"} : {}), options)).json();
+      var response = force ? await postForm("/api/status/refresh", {}) : await fetch(api("/api/status"), options);
+      var data = await response.json();
       if(seq !== statusRequestSeq){ return null; }
       renderStatus(data);
       statusPollDelay = data.loading ? Math.min(15000, Math.round(statusPollDelay * 1.35)) : 800;
@@ -198,6 +199,7 @@ const pageScriptDataLoading = `
     }
     reconcileAuxiliaryJobProgress(activeServerJobs().filter(function(job){ return !jobIsUpdate(job); }));
     renderPackageTables();
+    renderLatestUpdateResult(serverJobs);
     reconcileCompletedJobs(serverJobs);
     jobsInitialized = true;
   }

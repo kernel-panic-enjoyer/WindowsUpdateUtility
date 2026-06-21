@@ -50,6 +50,10 @@ const pageScriptEvents = `
         showNotice("Enable the global unknown-version option before updating this package.");
         return;
       }
+      if(form.dataset.pinned === "true" && !allowPinnedUpdates()){
+        showNotice("Enable the global pinned update option before updating this package.");
+        return;
+      }
       enqueueUpdateRequest(form);
       return;
     }
@@ -61,13 +65,13 @@ const pageScriptEvents = `
         showNotice("Select at least one package to update.");
         return;
       }
-      startUpdateJob(params, keys, "Updating selected packages...");
+      renderUpdatePreflight(buildUpdatePreflight("selected", keys, params, "Updating selected packages..."));
       return;
     }
     if(form.matches(".update-all-form")){
       event.preventDefault();
       var allKeys = updateableUpdateKeys();
-      startUpdateJob(appendGlobalUpdateOptions(new URLSearchParams(new FormData(form))), allKeys, "Updating all packages...");
+      renderUpdatePreflight(buildUpdatePreflight("all", allKeys, appendGlobalUpdateOptions(new URLSearchParams(new FormData(form))), "Updating all packages..."));
     }
   });
   $("theme-toggle").addEventListener("click", function(){
@@ -182,4 +186,7 @@ const pageScriptEvents = `
   $("copy-log-view").addEventListener("click", function(){ copyLogView(); });
   $("export-log-view").addEventListener("click", function(){ exportLogs(); });
   $("cancel-updates-button").addEventListener("click", function(){ cancelUpdateJob(); });
+  $("confirm-update-job").addEventListener("click", function(){ confirmPendingUpdateJob(); });
+  $("cancel-update-preflight").addEventListener("click", function(){ hideUpdatePreflight(); });
+  $("retry-failed-updates").addEventListener("click", function(){ retryFailedUpdateResults(); });
 `

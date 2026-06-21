@@ -116,7 +116,7 @@ func (app *App) startBulkUpdateJob(packageKeys []string, options UpdateOptions) 
 
 func (app *App) startUpdatePackagesOperation(jobType, mode string, packages []Package) OperationJobStatus {
 	keys := updateJobPackageKeys(packages)
-	return app.startOperationJob(jobType, mode, len(packages), keys, func(ctx context.Context, job *OperationJob) {
+	return app.startOperationJobWithPackageSnapshot(jobType, mode, len(packages), keys, packages, func(ctx context.Context, job *OperationJob) {
 		for index, pkg := range packages {
 			app.mutateOperationJob(job, func(status *OperationJobStatus) {
 				status.CurrentIndex = index + 1

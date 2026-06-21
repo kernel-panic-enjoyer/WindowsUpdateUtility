@@ -17,7 +17,7 @@ func TestAPILogsRequiresTokenAndReturnsEntries(t *testing.T) {
 	defer func() { sessionLogs = oldLogs }()
 
 	sessionLogs.Append("app", "hello")
-	app := &App{token: "test-token"}
+	app := testSessionApp()
 
 	badRequest := httptest.NewRequest(http.MethodGet, "/api/logs", nil)
 	badResponse := httptest.NewRecorder()
@@ -26,7 +26,7 @@ func TestAPILogsRequiresTokenAndReturnsEntries(t *testing.T) {
 		t.Fatalf("expected unauthorized log request, got %d", badResponse.Code)
 	}
 
-	request := httptest.NewRequest(http.MethodGet, "/api/logs?token=test-token", nil)
+	request := authenticatedRequest(app, http.MethodGet, "/api/logs", nil)
 	response := httptest.NewRecorder()
 	app.serveHTTP(response, request)
 	if response.Code != http.StatusOK {
@@ -49,7 +49,7 @@ func TestAPILogsRequiresTokenAndReturnsEntries(t *testing.T) {
 }
 
 func TestAPIJobsRequiresTokenAndReturnsJobs(t *testing.T) {
-	app := &App{token: "test-token"}
+	app := testSessionApp()
 	status := app.startOperationJob(jobTypeInventoryRefresh, "", 1, nil, func(ctx context.Context, job *OperationJob) {
 		app.mutateOperationJob(job, func(status *OperationJobStatus) {
 			status.State = jobStateSucceeded
@@ -63,7 +63,7 @@ func TestAPIJobsRequiresTokenAndReturnsJobs(t *testing.T) {
 		t.Fatalf("expected unauthorized jobs request, got %d", badResponse.Code)
 	}
 
-	request := httptest.NewRequest(http.MethodGet, "/api/jobs?token=test-token", nil)
+	request := authenticatedRequest(app, http.MethodGet, "/api/jobs", nil)
 	response := httptest.NewRecorder()
 	app.serveHTTP(response, request)
 	if response.Code != http.StatusOK {
@@ -86,7 +86,7 @@ func TestAPILogsExportRequiresTokenAndReturnsZip(t *testing.T) {
 	sessionLogs.Append("app", "app started")
 	sessionLogs.AppendCategorized("command", "winget search gh", logCategoriesForCommand([]string{"winget", "search", "gh"}))
 	sessionLogs.AppendCategorized("stdout", "GitHub CLI", logCategoriesForCommand([]string{"winget", "search", "gh"}))
-	app := &App{token: "test-token"}
+	app := testSessionApp()
 
 	badRequest := httptest.NewRequest(http.MethodGet, "/api/logs/export", nil)
 	badResponse := httptest.NewRecorder()
@@ -95,7 +95,7 @@ func TestAPILogsExportRequiresTokenAndReturnsZip(t *testing.T) {
 		t.Fatalf("expected unauthorized export request, got %d", badResponse.Code)
 	}
 
-	request := httptest.NewRequest(http.MethodGet, "/api/logs/export?token=test-token", nil)
+	request := authenticatedRequest(app, http.MethodGet, "/api/logs/export", nil)
 	response := httptest.NewRecorder()
 	app.serveHTTP(response, request)
 	if response.Code != http.StatusOK {
@@ -134,7 +134,7 @@ func TestLogExportFilenameUsesTimestampPrefix(t *testing.T) {
 }
 
 func TestFaviconServesEmbeddedAppIconWithoutToken(t *testing.T) {
-	app := &App{token: "test-token"}
+	app := testSessionApp()
 	request := httptest.NewRequest(http.MethodGet, "/favicon.ico", nil)
 	response := httptest.NewRecorder()
 
@@ -156,13 +156,134 @@ func TestFaviconServesEmbeddedAppIconWithoutToken(t *testing.T) {
 	}
 }
 
+func TestBootstrapTokenCreatesHttpOnlySessionAndRedirectsClean(t *testing.T) {
+	app := &App{token: "bootstrap-token", sessionToken: "session-token", listenHost: defaultHost, listenPort: 4183}
+	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:4183/?token=bootstrap-token", nil)
+	response := httptest.NewRecorder()
+
+	app.serveHTTP(response, request)
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("expected bootstrap redirect, got %d: %s", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("Location"); got != "/" {
+		t.Fatalf("expected clean redirect location, got %q", got)
+	}
+	cookies := response.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("expected one session cookie, got %#v", cookies)
+	}
+	cookie := cookies[0]
+	if cookie.Name != sessionCookieName || cookie.Value != "session-token" || !cookie.HttpOnly || cookie.SameSite != http.SameSiteStrictMode || cookie.Domain != "" {
+		t.Fatalf("unexpected session cookie: %#v", cookie)
+	}
+
+	tokenOnlyAPI := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:4183/api/logs?token=bootstrap-token", nil)
+	tokenOnlyResponse := httptest.NewRecorder()
+	app.serveHTTP(tokenOnlyResponse, tokenOnlyAPI)
+	if tokenOnlyResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("query token should not authorize API requests, got %d", tokenOnlyResponse.Code)
+	}
+
+	reuse := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:4183/?token=bootstrap-token", nil)
+	reuseResponse := httptest.NewRecorder()
+	app.serveHTTP(reuseResponse, reuse)
+	if reuseResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("bootstrap token should be one-time without an existing session, got %d", reuseResponse.Code)
+	}
+
+	authenticated := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:4183/api/logs", nil)
+	addTestSessionCookie(app, authenticated)
+	authenticatedResponse := httptest.NewRecorder()
+	app.serveHTTP(authenticatedResponse, authenticated)
+	if authenticatedResponse.Code != http.StatusOK {
+		t.Fatalf("expected session cookie to authorize API, got %d: %s", authenticatedResponse.Code, authenticatedResponse.Body.String())
+	}
+}
+
+func TestBrowserSecurityHeadersAndNoTokenInRenderedHTML(t *testing.T) {
+	app := &App{token: "bootstrap-token", sessionToken: "session-token", listenHost: defaultHost, listenPort: 4183}
+	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:4183/", nil)
+	addTestSessionCookie(app, request)
+	response := httptest.NewRecorder()
+
+	app.serveHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected page ok, got %d: %s", response.Code, response.Body.String())
+	}
+	headers := response.Header()
+	if got := headers.Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("expected no-store cache header, got %q", got)
+	}
+	if got := headers.Get("Referrer-Policy"); got != "no-referrer" {
+		t.Fatalf("expected no-referrer, got %q", got)
+	}
+	if got := headers.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("expected nosniff, got %q", got)
+	}
+	csp := headers.Get("Content-Security-Policy")
+	for _, want := range []string{"default-src 'self'", "object-src 'none'", "frame-ancestors 'none'", "form-action 'self'"} {
+		if !strings.Contains(csp, want) {
+			t.Fatalf("CSP %q missing %q", csp, want)
+		}
+	}
+	body := response.Body.String()
+	for _, leaked := range []string{"bootstrap-token", "session-token", "data-token", `name="token"`} {
+		if strings.Contains(body, leaked) {
+			t.Fatalf("rendered page leaked %q", leaked)
+		}
+	}
+}
+
+func TestRequestBoundaryRejectsBadHostOriginAndFetchMetadata(t *testing.T) {
+	app := &App{token: "bootstrap-token", sessionToken: "session-token", listenHost: defaultHost, listenPort: 4183}
+
+	badHost := httptest.NewRequest(http.MethodGet, "http://evil.test:4183/", nil)
+	addTestSessionCookie(app, badHost)
+	badHostResponse := httptest.NewRecorder()
+	app.serveHTTP(badHostResponse, badHost)
+	if badHostResponse.Code != http.StatusMisdirectedRequest {
+		t.Fatalf("expected bad host rejection, got %d", badHostResponse.Code)
+	}
+
+	badOrigin := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:4183/api/scan", nil)
+	addTestSessionCookie(app, badOrigin)
+	badOrigin.Header.Set("Origin", "http://evil.test:4183")
+	badOriginResponse := httptest.NewRecorder()
+	app.serveHTTP(badOriginResponse, badOrigin)
+	if badOriginResponse.Code != http.StatusForbidden {
+		t.Fatalf("expected bad origin rejection, got %d", badOriginResponse.Code)
+	}
+
+	badFetch := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:4183/api/scan", nil)
+	addTestSessionCookie(app, badFetch)
+	badFetch.Header.Set("Sec-Fetch-Site", "cross-site")
+	badFetchResponse := httptest.NewRecorder()
+	app.serveHTTP(badFetchResponse, badFetch)
+	if badFetchResponse.Code != http.StatusForbidden {
+		t.Fatalf("expected bad fetch metadata rejection, got %d", badFetchResponse.Code)
+	}
+
+	shutdownGet := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:4183/shutdown", nil)
+	addTestSessionCookie(app, shutdownGet)
+	shutdownGetResponse := httptest.NewRecorder()
+	app.serveHTTP(shutdownGetResponse, shutdownGet)
+	if shutdownGetResponse.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected shutdown GET to be rejected, got %d", shutdownGetResponse.Code)
+	}
+}
+
 func TestShutdownRouteStopsServer(t *testing.T) {
-	app := &App{token: "test-token"}
+	app := testSessionApp()
 	server := httptest.NewServer(http.HandlerFunc(app.serveHTTP))
 	app.server = server.Config
 	defer server.Close()
 
-	response, err := server.Client().Post(server.URL+"/shutdown?token=test-token", "application/x-www-form-urlencoded", nil)
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/shutdown", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addTestSessionCookie(app, request)
+	response, err := server.Client().Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +294,7 @@ func TestShutdownRouteStopsServer(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		check, err := server.Client().Get(server.URL + "/?token=test-token")
+		check, err := server.Client().Get(server.URL + "/")
 		if err != nil {
 			return
 		}
@@ -200,7 +321,7 @@ func TestAPIUpdateIgnoresCanceledRequestContext(t *testing.T) {
 	}()
 
 	app := &App{
-		token: "test-token",
+		sessionToken: "test-session",
 		inventory: Inventory{PackageLookup: PackageLookup{Packages: []Package{{
 			Key:             "winget:Git.Git",
 			Manager:         managerWinget,
@@ -212,8 +333,9 @@ func TestAPIUpdateIgnoresCanceledRequestContext(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	request := httptest.NewRequest(http.MethodPost, "/api/update", strings.NewReader("token=test-token&manager=winget&package_id=Git.Git")).WithContext(ctx)
+	request := httptest.NewRequest(http.MethodPost, "/api/update", strings.NewReader("manager=winget&package_id=Git.Git")).WithContext(ctx)
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	addTestSessionCookie(app, request)
 	response := httptest.NewRecorder()
 
 	app.serveHTTP(response, request)
@@ -250,20 +372,20 @@ func TestAPIRejectsInvalidRequests(t *testing.T) {
 		wantResult bool
 		wantText   string
 	}{
-		{"update form", "/api/update?token=test-token", "manager=invalid&package_id=Git.Git", "application/x-www-form-urlencoded", true, managerValidationMessage},
-		{"install form", "/api/install?token=test-token", "manager=invalid&package_id=Git.Git", "application/x-www-form-urlencoded", true, managerValidationMessage},
-		{"manager install form", "/api/managers/install?token=test-token", "manager=invalid", "application/x-www-form-urlencoded", true, managerValidationMessage},
-		{"update all form", "/api/update-all?token=test-token", "package_key=not-a-valid-key", "application/x-www-form-urlencoded", false, "package key must be manager:id"},
-		{"update json", "/api/update?token=test-token", `{"manager":"invalid","package_id":"Git.Git"}`, "application/json", true, managerValidationMessage},
-		{"install json", "/api/install?token=test-token", `{"manager":"winget","package_id":"bad&id"}`, "application/json", true, "winget package id or query contains unsupported characters"},
-		{"manager install json", "/api/managers/install?token=test-token", `{"manager":"invalid"}`, "application/json", true, managerValidationMessage},
-		{"update all json", "/api/update-all?token=test-token", `{"package_keys":["not-a-valid-key"]}`, "application/json", false, "package key must be manager:id"},
+		{"update form", "/api/update", "manager=invalid&package_id=Git.Git", "application/x-www-form-urlencoded", true, managerValidationMessage},
+		{"install form", "/api/install", "manager=invalid&package_id=Git.Git", "application/x-www-form-urlencoded", true, managerValidationMessage},
+		{"manager install form", "/api/managers/install", "manager=invalid", "application/x-www-form-urlencoded", true, managerValidationMessage},
+		{"update all form", "/api/update-all", "package_key=not-a-valid-key", "application/x-www-form-urlencoded", false, "package key must be manager:id"},
+		{"update json", "/api/update", `{"manager":"invalid","package_id":"Git.Git"}`, "application/json", true, managerValidationMessage},
+		{"install json", "/api/install", `{"manager":"winget","package_id":"bad&id"}`, "application/json", true, "winget package id or query contains unsupported characters"},
+		{"manager install json", "/api/managers/install", `{"manager":"invalid"}`, "application/json", true, managerValidationMessage},
+		{"update all json", "/api/update-all", `{"package_keys":["not-a-valid-key"]}`, "application/json", false, "package key must be manager:id"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			app := &App{token: "test-token"}
-			request := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			app := testSessionApp()
+			request := authenticatedRequest(app, http.MethodPost, tc.path, strings.NewReader(tc.body))
 			request.Header.Set("Content-Type", tc.content)
 			response := httptest.NewRecorder()
 
@@ -340,15 +462,15 @@ func TestSettingsAPIsRejectMalformedJSONBeforeSideEffects(t *testing.T) {
 		body       string
 		wantResult bool
 	}{
-		{"startup", "/api/settings/startup?token=test-token", `{"enabled":`, true},
-		{"auto update", "/api/settings/auto-update?token=test-token", `{"package_keys":{}}`, true},
-		{"theme", "/api/settings/theme?token=test-token", `{"theme":`, false},
+		{"startup", "/api/settings/startup", `{"enabled":`, true},
+		{"auto update", "/api/settings/auto-update", `{"package_keys":{}}`, true},
+		{"theme", "/api/settings/theme", `{"theme":`, false},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			app := &App{token: "test-token"}
-			request := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			app := testSessionApp()
+			request := authenticatedRequest(app, http.MethodPost, tc.path, strings.NewReader(tc.body))
 			request.Header.Set("Content-Type", "application/json")
 			response := httptest.NewRecorder()
 

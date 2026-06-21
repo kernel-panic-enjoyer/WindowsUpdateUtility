@@ -138,6 +138,16 @@ main{width:min(1500px,100%);margin:0 auto;padding:22px 28px 28px}
   .search-provenance{margin:0 16px 12px;padding:10px 12px;border:1px solid var(--line);border-left:4px solid var(--blue);border-radius:8px;background:var(--surface-strong);display:grid;gap:5px;color:var(--muted)}
   .search-provenance.hidden{display:none}
   .provenance-item{overflow-wrap:anywhere}
+  .summary-line{margin:0 16px 12px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface-strong);overflow-wrap:anywhere}
+  .preflight-excluded{margin:12px 16px 16px}
+  .preflight-excluded h3{margin:0 0 8px;font-size:15px}
+  .mini-list{display:grid;gap:6px;margin:0;padding:0;list-style:none}
+  .mini-list li{padding:7px 9px;border:1px solid var(--line);border-radius:6px;background:var(--surface-strong);overflow-wrap:anywhere}
+  .result-status{font-weight:800}
+  .result-status.succeeded{color:var(--green)}
+  .result-status.failed{color:var(--red)}
+  .result-status.skipped{color:var(--muted)}
+  .result-status.cancelled{color:var(--amber)}
   .package-id{display:inline-block;max-width:100%;padding:2px 5px;border:1px solid var(--line);border-radius:5px;background:var(--input);font:12px/1.45 Consolas,"Cascadia Mono","Courier New",monospace;color:var(--text);white-space:normal;overflow-wrap:anywhere}
   .install-route{display:block;margin-top:6px;max-width:210px}
   .update-options{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin:0 16px 12px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface-strong)}

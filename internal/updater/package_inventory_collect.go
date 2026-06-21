@@ -5,7 +5,7 @@ import "sync"
 type managerInventoryCollector struct {
 	manager   string
 	installed func() ([]Package, CommandResult)
-	updates   func() (map[string]string, CommandResult)
+	updates   func() (map[string]string, map[string]Package, CommandResult)
 	listKey   string
 	updateKey string
 }
@@ -18,13 +18,14 @@ var managerInventoryCollectors = []managerInventoryCollector{
 func collectManagerInventory(
 	manager string,
 	installedFn func() ([]Package, CommandResult),
-	updatesFn func() (map[string]string, CommandResult),
+	updatesFn func() (map[string]string, map[string]Package, CommandResult),
 	listKey string,
 	updateKey string,
 ) managerInventory {
 	var installed []Package
 	var listResult CommandResult
 	var updates map[string]string
+	var updateDetails map[string]Package
 	var updateResult CommandResult
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -34,17 +35,18 @@ func collectManagerInventory(
 	}()
 	go func() {
 		defer wg.Done()
-		updates, updateResult = updatesFn()
+		updates, updateDetails, updateResult = updatesFn()
 	}()
 	wg.Wait()
 	return managerInventory{
-		manager:      manager,
-		installed:    installed,
-		listResult:   listResult,
-		updates:      updates,
-		updateResult: updateResult,
-		listKey:      listKey,
-		updateKey:    updateKey,
+		manager:       manager,
+		installed:     installed,
+		listResult:    listResult,
+		updates:       updates,
+		updateDetails: updateDetails,
+		updateResult:  updateResult,
+		listKey:       listKey,
+		updateKey:     updateKey,
 	}
 }
 

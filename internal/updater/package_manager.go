@@ -26,6 +26,7 @@ type Package struct {
 	UpdateAvailable  bool   `json:"update_available"`
 	UpdateSupported  bool   `json:"update_supported"`
 	UnknownVersion   bool   `json:"unknown_version,omitempty"`
+	Pinned           bool   `json:"pinned,omitempty"`
 	Installed        bool   `json:"installed"`
 	AutoUpdate       bool   `json:"auto_update"`
 	Source           string `json:"source,omitempty"`

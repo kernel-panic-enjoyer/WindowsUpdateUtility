@@ -23,6 +23,19 @@ func isWingetMatchColumn(value string) bool {
 	return false
 }
 
+func isWingetPinnedColumn(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" || strings.Contains(value, "not pinned") || strings.Contains(value, "nicht") {
+		return false
+	}
+	for _, token := range []string{"pinned", "pinning", "angeheftet", "gepinnt", "fixiert"} {
+		if strings.Contains(value, token) {
+			return true
+		}
+	}
+	return false
+}
+
 func wingetMatchValue(value string) string {
 	value = strings.TrimSpace(value)
 	if before, after, ok := strings.Cut(value, ":"); ok && before != "" {
@@ -57,12 +70,21 @@ func parseWingetTable(output string) []Package {
 		pkg := Package{Name: cols[0], ID: cols[1], Version: cols[2], Manager: managerWinget}
 		pkg.UnknownVersion = isUnknownPackageVersion(pkg.Version)
 		rest := cols[3:]
-		if len(rest) > 0 {
-			if isSourceToken(rest[len(rest)-1]) {
-				pkg.Source = strings.ToLower(rest[len(rest)-1])
+		for i := len(rest) - 1; i >= 0; i-- {
+			if isSourceToken(rest[i]) {
+				pkg.Source = strings.ToLower(rest[i])
 				pkg.Manager = wingetSourceManager(pkg.Source)
-				rest = rest[:len(rest)-1]
+				rest = append(rest[:i], rest[i+1:]...)
+				break
 			}
+		}
+		for i := 0; i < len(rest); {
+			if isWingetPinnedColumn(rest[i]) {
+				pkg.Pinned = true
+				rest = append(rest[:i], rest[i+1:]...)
+				continue
+			}
+			i++
 		}
 		if len(rest) > 0 {
 			if isWingetMatchColumn(rest[0]) {

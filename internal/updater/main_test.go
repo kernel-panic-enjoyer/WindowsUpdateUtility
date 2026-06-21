@@ -1,7 +1,9 @@
 package updater
 
 import (
+	"errors"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -18,5 +20,21 @@ func TestArgValueParsesEqualsAndSeparatedForms(t *testing.T) {
 	}
 	if got, ok := argValue("--missing"); ok || got != "" {
 		t.Fatalf("unexpected missing arg: %q %t", got, ok)
+	}
+}
+
+func TestRandomTokenFailsClosedWhenCryptoRandomFails(t *testing.T) {
+	oldRead := cryptoRandomRead
+	cryptoRandomRead = func([]byte) (int, error) {
+		return 0, errors.New("entropy unavailable")
+	}
+	defer func() { cryptoRandomRead = oldRead }()
+
+	token, err := randomToken()
+	if err == nil || !strings.Contains(err.Error(), "entropy unavailable") {
+		t.Fatalf("expected crypto failure, token=%q err=%v", token, err)
+	}
+	if token != "" {
+		t.Fatalf("expected no fallback token, got %q", token)
 	}
 }

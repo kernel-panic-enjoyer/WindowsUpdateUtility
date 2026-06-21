@@ -6,6 +6,9 @@ const pageScriptPackageRender = `
     if(pkg.unknown_version){
       secondary += " - unknown installed version";
     }
+    if(pkg.pinned){
+      secondary += " - pinned";
+    }
     return '<strong>' + html(pkg.name) + '</strong><br><span class="muted">' + html(secondary) + '</span>';
   }
 	function managerCell(pkg){
@@ -16,7 +19,7 @@ const pageScriptPackageRender = `
     if(pkg.update_supported === false){
       return '<span class="muted">N/A</span>';
     }
-    if(pkg.unknown_version){
+    if(pkg.unknown_version || pkg.pinned){
       return '<span class="muted">Explicit only</span>';
     }
     return '<button class="auto-package toggle-button" type="button" data-key="' + attr(pkg.key) + '" data-enabled="' + (pkg.auto_update ? 'true' : 'false') + '"' + (updateBusy ? ' disabled' : '') + '><span>' + (pkg.auto_update ? 'On' : 'Off') + '</span></button>';
@@ -33,12 +36,13 @@ const pageScriptPackageRender = `
 			return '<span class="muted">Inventory only</span>';
 		}
     var blockedUnknown = pkg.unknown_version && !allowUnknownVersionUpdates();
+    var blockedPinned = pkg.pinned && !allowPinnedUpdates();
     var updateState = rowUpdateState(pkg.key);
-    var disabled = updateBusy || !!updateState || blockedUnknown;
+    var disabled = updateBusy || !!updateState || blockedUnknown || blockedPinned;
     var label = updateState === "active" ? "Updating" : (updateState === "queued" ? "Queued" : "Update");
-    var title = blockedUnknown ? ' title="Enable the global unknown-version option first"' : '';
-		return '<form class="update-form" data-key="' + attr(pkg.key) + '" data-unknown-version="' + (pkg.unknown_version ? 'true' : 'false') + '" data-blocked-unknown="' + (blockedUnknown ? 'true' : 'false') + '" method="post" action="/api/update"><input type="hidden" name="token" value="' + attr(token) + '"><input type="hidden" name="manager" value="' + attr(pkg.manager) + '"><input type="hidden" name="package_id" value="' + attr(pkg.id) + '"><button type="submit"' + (disabled ? ' disabled' : '') + title + '>' + icon("update") + '<span>' + html(label) + '</span></button><div class="row-progress' + (updateState ? '' : ' hidden') + '"><div class="progress-bar"><span></span></div></div></form>';
-	}
+    var title = blockedUnknown ? ' title="Enable the global unknown-version option first"' : (blockedPinned ? ' title="Enable the global pinned update option first"' : '');
+		return '<form class="update-form" data-key="' + attr(pkg.key) + '" data-unknown-version="' + (pkg.unknown_version ? 'true' : 'false') + '" data-pinned="' + (pkg.pinned ? 'true' : 'false') + '" data-blocked-unknown="' + (blockedUnknown ? 'true' : 'false') + '" data-blocked-pinned="' + (blockedPinned ? 'true' : 'false') + '" method="post" action="/api/update"><input type="hidden" name="manager" value="' + attr(pkg.manager) + '"><input type="hidden" name="package_id" value="' + attr(pkg.id) + '"><button type="submit"' + (disabled ? ' disabled' : '') + title + '>' + icon("update") + '<span>' + html(label) + '</span></button><div class="row-progress' + (updateState ? '' : ' hidden') + '"><div class="progress-bar"><span></span></div></div></form>';
+  }
 	function installedAction(pkg){
 		if(pkg.action_backend === "store-cli-resolved" && pkg.update_available){
 			return updateForm(pkg);
@@ -87,7 +91,7 @@ const pageScriptPackageRender = `
     var page = pagedItems(visiblePackages, installedPage, installedPageSize);
     installedPage = page.page;
 	target.innerHTML = page.items.map(function(pkg){
-		var rowStatus = pkg.update_supported === false ? '<span class="badge">Inventory only</span>' : (pkg.unknown_version && pkg.update_available ? '<span class="badge warn">Explicit update</span>' : (pkg.update_available ? '<span class="badge warn">Update</span>' : '<span class="badge ok">Current</span>'));
+		var rowStatus = pkg.update_supported === false ? '<span class="badge">Inventory only</span>' : ((pkg.unknown_version || pkg.pinned) && pkg.update_available ? '<span class="badge warn">Explicit update</span>' : (pkg.update_available ? '<span class="badge warn">Update</span>' : '<span class="badge ok">Current</span>'));
     var rowClass = rowUpdateState(pkg.key) === "active" ? ' class="updating-current"' : '';
 		return '<tr data-key="' + attr(pkg.key) + '"' + rowClass + '><td>' + packageNameCell(pkg) + '</td><td>' + managerCell(pkg) + '</td><td>' + html(pkg.version) + '</td><td>' + packageAvailableCell(pkg) + '</td><td>' + rowStatus + '</td><td>' + autoButton(pkg) + '</td><td>' + installedAction(pkg) + '</td></tr>';
 	}).join("");
