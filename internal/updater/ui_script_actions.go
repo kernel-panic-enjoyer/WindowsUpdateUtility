@@ -86,6 +86,8 @@ const pageScriptActions = `
     try{
       await postCommandPayload("/api/settings/auto-update", params, "Could not update auto setting");
       button.dataset.enabled = enabled ? "true" : "false";
+      button.setAttribute("aria-pressed", enabled ? "true" : "false");
+      button.setAttribute("aria-label", "Auto-update for " + (button.dataset.packageName || key));
       button.innerHTML = '<span>' + (enabled ? 'On' : 'Off') + '</span>';
       showNotice("Auto-update setting updated.");
       showToast("Auto-update setting updated.", "success");

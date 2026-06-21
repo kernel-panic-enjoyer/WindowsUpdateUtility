@@ -4,8 +4,14 @@ const pageScriptRequests = `
   function setGlobalProgress(show, message, cancelVisible){
     var panel = $("update-progress");
     if(!panel){ return; }
+    panel.setAttribute("aria-busy", show ? "true" : "false");
     var title = panel.querySelector(".progress-title");
     if(title){ title.innerHTML = show ? loadingText(message || "Updating packages...") : html(message || "Updating packages..."); }
+    var bar = panel.querySelector("[role=progressbar]");
+    if(bar){
+      bar.setAttribute("aria-label", message || "Updating packages");
+      bar.setAttribute("aria-valuetext", show ? "In progress" : "Idle");
+    }
     var cancel = $("cancel-updates-button");
     if(cancel){
       cancel.classList.toggle("hidden", !cancelVisible);
@@ -16,8 +22,14 @@ const pageScriptRequests = `
   function setInstallProgress(show, message){
     var panel = $("install-progress");
     if(!panel){ return; }
+    panel.setAttribute("aria-busy", show ? "true" : "false");
     var title = panel.querySelector(".progress-title");
     if(title){ title.innerHTML = show ? loadingText(message || "Installing package...") : html(message || "Installing package..."); }
+    var bar = panel.querySelector("[role=progressbar]");
+    if(bar){
+      bar.setAttribute("aria-label", message || "Installing package");
+      bar.setAttribute("aria-valuetext", show ? "In progress" : "Idle");
+    }
     panel.classList.toggle("hidden", !show);
   }
   function setUpdateBusy(busy, keys, currentKey){
@@ -36,6 +48,10 @@ const pageScriptRequests = `
       var active = busy && (keys == null || keySet[form.dataset.key]);
       var progress = form.querySelector(".row-progress");
       if(progress){ progress.classList.toggle("hidden", !active); }
+      var progressBar = form.querySelector("[role=progressbar]");
+      if(progressBar){
+        progressBar.setAttribute("aria-valuetext", active ? "In progress" : "Idle");
+      }
     });
     document.querySelectorAll("tr[data-key]").forEach(function(row){
       row.classList.toggle("updating-current", !!currentKey && row.dataset.key === currentKey);

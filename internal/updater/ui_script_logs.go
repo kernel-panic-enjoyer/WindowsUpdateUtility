@@ -109,8 +109,23 @@ const pageScriptLogConsole = `
       var active = button.dataset.logCategory === activeLogCategory;
       button.classList.toggle("active", active);
       button.setAttribute("aria-selected", active ? "true" : "false");
+      button.setAttribute("tabindex", active ? "0" : "-1");
+      if(active){
+        var panel = $("session-log");
+        if(panel){ panel.setAttribute("aria-labelledby", button.id); }
+      }
     });
     renderLogLines(false);
+  }
+  function focusAdjacentLogTab(current, direction){
+    var tabs = Array.prototype.slice.call(document.querySelectorAll(".log-tab"));
+    if(tabs.length === 0){ return; }
+    var index = Math.max(0, tabs.indexOf(current));
+    if(direction === "home"){ index = 0; }
+    else if(direction === "end"){ index = tabs.length - 1; }
+    else{ index = (index + direction + tabs.length) % tabs.length; }
+    tabs[index].focus();
+    setActiveLogCategory(tabs[index].dataset.logCategory || "all");
   }
   function clearCurrentLogView(){
     clearedLogBeforeByCategory[activeLogCategory || "all"] = lastLogID;

@@ -76,6 +76,9 @@ const pageScriptShell = `
   function loadingTableRow(colspan, message){
     return '<tr><td colspan="' + colspan + '">' + loadingText(message) + '</td></tr>';
   }
+  function progressBar(label){
+    return '<div class="progress-bar" role="progressbar" aria-label="' + attr(label || "Operation in progress") + '" aria-valuetext="In progress"><span></span></div>';
+  }
   function icon(name){
     var paths = {
       moon:'<path d="M12 3a6 6 0 1 0 6 6c0 5-4 9-9 9a6 6 0 0 0 3-15Z"/>',

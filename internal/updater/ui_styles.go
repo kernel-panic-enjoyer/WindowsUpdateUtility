@@ -80,6 +80,7 @@ svg{display:block}
 .header-actions{justify-content:flex-end}
 main{width:min(1500px,100%);margin:0 auto;padding:22px 28px 28px}
 .hidden{display:none!important}
+.sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}
 .dashboard-hero{display:grid;grid-template-columns:minmax(0,1fr) minmax(360px,560px);gap:18px;align-items:end;margin-bottom:16px;padding:22px;border:1px solid var(--line);border-radius:8px;background:linear-gradient(135deg,color-mix(in srgb,var(--surface) 92%,var(--blue)),var(--surface));box-shadow:var(--shadow-soft)}
 .hero-copy h2{margin:5px 0 7px;font-size:28px;line-height:1.14;letter-spacing:0;max-width:760px}
 .hero-copy p{margin:0}

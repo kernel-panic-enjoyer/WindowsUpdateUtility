@@ -77,6 +77,7 @@ const pageScriptStatusRender = `
     if(startup){
       startup.disabled = !!data.loading;
       startup.dataset.enabled = data.startup_enabled ? "true" : "false";
+      startup.setAttribute("aria-pressed", data.startup_enabled ? "true" : "false");
       startup.innerHTML = data.loading ? loadingText("Checking startup...") : icon("refresh") + '<span>' + (data.startup_enabled ? "Disable Start With Windows" : "Enable Start With Windows") + '</span>';
     }
     var auto = $("auto-global-toggle");
@@ -84,6 +85,7 @@ const pageScriptStatusRender = `
     if(auto){
       auto.disabled = !!data.loading;
       auto.dataset.enabled = globalEnabled ? "true" : "false";
+      auto.setAttribute("aria-pressed", globalEnabled ? "true" : "false");
       auto.innerHTML = data.loading ? loadingText("Checking auto-update...") : icon("update") + '<span>' + (globalEnabled ? "Disable Daily Auto-Update" : "Enable Daily Auto-Update") + '</span>';
     }
     var status = $("automation-status");

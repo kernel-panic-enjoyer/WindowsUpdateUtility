@@ -127,7 +127,7 @@ const pageScriptAuxiliaryRender = `
     return '<span class="badge manager-badge">' + html(managerLabel(pkg.manager)) + '</span><br><span class="muted">Backend: ' + html(executionBackendLabel(pkg)) + '</span>';
   }
   function searchActionCell(pkg){
-    return '<form class="install-form" method="post" action="/api/install" data-backend-label="' + attr(executionBackendLabel(pkg)) + '"><input type="hidden" name="manager" value="' + attr(pkg.manager) + '"><input type="hidden" name="package_id" value="' + attr(pkg.id) + '"><button type="submit">' + icon("install") + '<span>Install</span></button><span class="muted install-route">' + html(installRouteText(pkg)) + '</span></form>';
+    return '<form class="install-form" method="post" action="/api/install" data-backend-label="' + attr(executionBackendLabel(pkg)) + '"><input type="hidden" name="manager" value="' + attr(pkg.manager) + '"><input type="hidden" name="package_id" value="' + attr(pkg.id) + '"><button type="submit" aria-label="Install ' + attr(pkg.name || pkg.id) + '">' + icon("install") + '<span>Install</span></button><span class="muted install-route">' + html(installRouteText(pkg)) + '</span></form>';
   }
   function renderSearchTable(){
     var body = $("search-results-body");

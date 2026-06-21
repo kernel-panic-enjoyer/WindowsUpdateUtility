@@ -22,7 +22,7 @@ const pageScriptPackageRender = `
     if(pkg.unknown_version || pkg.pinned){
       return '<span class="muted">Explicit only</span>';
     }
-    return '<button class="auto-package toggle-button" type="button" data-key="' + attr(pkg.key) + '" data-enabled="' + (pkg.auto_update ? 'true' : 'false') + '"' + (updateBusy ? ' disabled' : '') + '><span>' + (pkg.auto_update ? 'On' : 'Off') + '</span></button>';
+    return '<button class="auto-package toggle-button" type="button" data-key="' + attr(pkg.key) + '" data-package-name="' + attr(pkg.name) + '" data-enabled="' + (pkg.auto_update ? 'true' : 'false') + '" aria-pressed="' + (pkg.auto_update ? 'true' : 'false') + '" aria-label="Auto-update for ' + attr(pkg.name) + '"' + (updateBusy ? ' disabled' : '') + '><span>' + (pkg.auto_update ? 'On' : 'Off') + '</span></button>';
   }
   function packageAvailableCell(pkg){
     var available = html(pkg.available_version);
@@ -41,7 +41,7 @@ const pageScriptPackageRender = `
     var disabled = updateBusy || !!updateState || blockedUnknown || blockedPinned;
     var label = updateState === "active" ? "Updating" : (updateState === "queued" ? "Queued" : "Update");
     var title = blockedUnknown ? ' title="Enable the global unknown-version option first"' : (blockedPinned ? ' title="Enable the global pinned update option first"' : '');
-		return '<form class="update-form" data-key="' + attr(pkg.key) + '" data-unknown-version="' + (pkg.unknown_version ? 'true' : 'false') + '" data-pinned="' + (pkg.pinned ? 'true' : 'false') + '" data-blocked-unknown="' + (blockedUnknown ? 'true' : 'false') + '" data-blocked-pinned="' + (blockedPinned ? 'true' : 'false') + '" method="post" action="/api/update"><input type="hidden" name="manager" value="' + attr(pkg.manager) + '"><input type="hidden" name="package_id" value="' + attr(pkg.id) + '"><button type="submit"' + (disabled ? ' disabled' : '') + title + '>' + icon("update") + '<span>' + html(label) + '</span></button><div class="row-progress' + (updateState ? '' : ' hidden') + '"><div class="progress-bar"><span></span></div></div></form>';
+		return '<form class="update-form" data-key="' + attr(pkg.key) + '" data-unknown-version="' + (pkg.unknown_version ? 'true' : 'false') + '" data-pinned="' + (pkg.pinned ? 'true' : 'false') + '" data-blocked-unknown="' + (blockedUnknown ? 'true' : 'false') + '" data-blocked-pinned="' + (blockedPinned ? 'true' : 'false') + '" method="post" action="/api/update"><input type="hidden" name="manager" value="' + attr(pkg.manager) + '"><input type="hidden" name="package_id" value="' + attr(pkg.id) + '"><button type="submit" aria-label="' + attr(label + " " + pkg.name) + '"' + (disabled ? ' disabled' : '') + title + '>' + icon("update") + '<span>' + html(label) + '</span></button><div class="row-progress' + (updateState ? '' : ' hidden') + '">' + progressBar((updateState ? label : "Update progress") + " for " + pkg.name) + '</div></form>';
   }
 	function installedAction(pkg){
 		if(pkg.action_backend === "store-cli-resolved" && pkg.update_available){
@@ -72,7 +72,7 @@ const pageScriptPackageRender = `
     target.innerHTML = page.items.map(function(pkg){
       var selectable = packageBulkUpdateable(pkg);
       var rowClass = rowUpdateState(pkg.key) === "active" ? ' class="updating-current"' : '';
-      return '<tr data-key="' + attr(pkg.key) + '"' + rowClass + '><td><input form="update-selected-form" type="checkbox" name="package_key" value="' + attr(pkg.key) + '"' + ((updateBusy || !selectable) ? ' disabled' : '') + '></td><td>' + packageNameCell(pkg) + '</td><td>' + managerCell(pkg) + '</td><td>' + html(pkg.version) + '</td><td>' + packageAvailableCell(pkg) + '</td><td>' + autoButton(pkg) + '</td><td>' + updateForm(pkg) + '</td></tr>';
+      return '<tr data-key="' + attr(pkg.key) + '"' + rowClass + '><td><input form="update-selected-form" type="checkbox" name="package_key" value="' + attr(pkg.key) + '" aria-label="Select ' + attr(pkg.name) + ' for update"' + ((updateBusy || !selectable) ? ' disabled' : '') + '></td><td>' + packageNameCell(pkg) + '</td><td>' + managerCell(pkg) + '</td><td>' + html(pkg.version) + '</td><td>' + packageAvailableCell(pkg) + '</td><td>' + autoButton(pkg) + '</td><td>' + updateForm(pkg) + '</td></tr>';
     }).join("");
     renderPager(page, status, prev, next);
   }

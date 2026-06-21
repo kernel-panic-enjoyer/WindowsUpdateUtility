@@ -18,6 +18,30 @@ const pageScriptEvents = `
       return;
     }
   });
+  document.addEventListener("keydown", function(event){
+    var tab = event.target.closest(".log-tab");
+    if(!tab){ return; }
+    switch(event.key){
+    case "ArrowRight":
+    case "ArrowDown":
+      event.preventDefault();
+      focusAdjacentLogTab(tab, 1);
+      break;
+    case "ArrowLeft":
+    case "ArrowUp":
+      event.preventDefault();
+      focusAdjacentLogTab(tab, -1);
+      break;
+    case "Home":
+      event.preventDefault();
+      focusAdjacentLogTab(tab, "home");
+      break;
+    case "End":
+      event.preventDefault();
+      focusAdjacentLogTab(tab, "end");
+      break;
+    }
+  });
   document.addEventListener("submit", function(event){
     var form = event.target;
     if(form.id === "search-form"){
