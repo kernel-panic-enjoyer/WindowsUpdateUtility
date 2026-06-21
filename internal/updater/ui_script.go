@@ -41,6 +41,7 @@ const pageScriptShell = `
   var latestPackagesLoading = true;
   var toastSeq = 0;
   var toasts = [];
+  var toastAnimationFrame = 0;
   function $(id){ return document.getElementById(id); }
   function api(path, params){
     var url = new URL(path, window.location.origin);
@@ -91,6 +92,7 @@ const pageScriptShell = `
       id: ++toastSeq,
       message: String(message || ""),
       kind: kind || "info",
+      totalDuration: Math.max(duration || 10000, 10000),
       remaining: Math.max(duration || 10000, 10000),
       timer: null,
       startedAt: 0
@@ -104,19 +106,24 @@ const pageScriptShell = `
     var region = $("toast-region");
     if(!region){ return; }
     region.innerHTML = toasts.map(function(toast){
-      return '<article class="toast toast-' + attr(toast.kind) + '" data-toast-id="' + attr(toast.id) + '"><div><strong>' + html(toastTitle(toast.kind)) + '</strong><p>' + html(toast.message) + '</p></div><button class="toast-close ghost" type="button" aria-label="Dismiss notification">&times;</button></article>';
+      return '<article class="toast toast-' + attr(toast.kind) + '" data-toast-id="' + attr(toast.id) + '" style="--toast-progress:' + attr(toastProgress(toast)) + '"><div><strong>' + html(toastTitle(toast.kind)) + '</strong><p>' + html(toast.message) + '</p></div><button class="toast-close ghost" type="button" aria-label="Dismiss notification">&times;</button><span class="toast-progress" aria-hidden="true"><span></span></span></article>';
     }).join("");
+    updateToastProgress();
   }
   function toastTitle(kind){
     if(kind === "success"){ return "Success"; }
     if(kind === "error"){ return "Needs attention"; }
     return "Notice";
   }
+  function toastProgress(toast){
+    return Math.max(0, Math.min(1, toast.remaining / Math.max(1, toast.totalDuration)));
+  }
   function startToastTimer(toast){
     clearToastTimer(toast);
     if(document.hidden){ return; }
     toast.startedAt = Date.now();
     toast.timer = setTimeout(function(){ removeToast(toast.id); }, Math.max(0, toast.remaining));
+    startToastProgressLoop();
   }
   function clearToastTimer(toast){
     if(toast.timer){
@@ -131,6 +138,8 @@ const pageScriptShell = `
         clearToastTimer(toast);
       }
     });
+    stopToastProgressLoop();
+    updateToastProgress();
   }
   function resumeToastTimers(){
     toasts.slice().forEach(function(toast){
@@ -140,6 +149,7 @@ const pageScriptShell = `
         startToastTimer(toast);
       }
     });
+    startToastProgressLoop();
   }
   function removeToast(id){
     toasts = toasts.filter(function(toast){
@@ -150,6 +160,33 @@ const pageScriptShell = `
       return true;
     });
     renderToasts();
+    if(toasts.length === 0){ stopToastProgressLoop(); }
+  }
+  function updateToastProgress(){
+    toasts.forEach(function(toast){
+      if(toast.timer){
+        var elapsed = Date.now() - toast.startedAt;
+        var currentRemaining = Math.max(0, toast.remaining - elapsed);
+        var element = document.querySelector('.toast[data-toast-id="' + toast.id + '"]');
+        if(element){ element.style.setProperty("--toast-progress", String(Math.max(0, Math.min(1, currentRemaining / Math.max(1, toast.totalDuration))))); }
+      }
+    });
+  }
+  function startToastProgressLoop(){
+    if(toastAnimationFrame || document.hidden || toasts.length === 0){ return; }
+    function tick(){
+      toastAnimationFrame = 0;
+      if(document.hidden || toasts.length === 0){ return; }
+      updateToastProgress();
+      toastAnimationFrame = window.requestAnimationFrame(tick);
+    }
+    toastAnimationFrame = window.requestAnimationFrame(tick);
+  }
+  function stopToastProgressLoop(){
+    if(toastAnimationFrame){
+      window.cancelAnimationFrame(toastAnimationFrame);
+      toastAnimationFrame = 0;
+    }
   }
   function updatePayloadSucceeded(payload){
     if(payload && payload.result){ return !!payload.result.ok; }

@@ -103,12 +103,14 @@ main{width:min(1500px,100%);margin:0 auto;padding:22px 28px 28px}
 .muted{color:var(--muted)}
 .notice{border-left:4px solid var(--blue);max-height:96px;overflow:auto;overflow-wrap:anywhere;white-space:normal}
 .toast-region{position:fixed;right:18px;bottom:18px;z-index:20;display:grid;gap:10px;width:min(360px,calc(100vw - 28px));pointer-events:none}
-.toast{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:start;padding:12px 12px 12px 14px;border:1px solid var(--line);border-left:4px solid var(--blue);border-radius:8px;background:color-mix(in srgb,var(--surface) 96%,var(--bg));box-shadow:var(--shadow);pointer-events:auto}
-.toast-success{border-left-color:var(--green)}
-.toast-error{border-left-color:var(--red)}
+.toast{position:relative;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:start;padding:12px 12px 14px 14px;overflow:hidden;border:1px solid var(--line);border-left:4px solid var(--blue);border-radius:8px;background:color-mix(in srgb,var(--surface) 96%,var(--bg));box-shadow:var(--shadow);pointer-events:auto;--toast-accent:var(--blue)}
+.toast-success{border-left-color:var(--green);--toast-accent:var(--green)}
+.toast-error{border-left-color:var(--red);--toast-accent:var(--red)}
 .toast strong{display:block;margin-bottom:2px;font-size:13px}
 .toast p{margin:0;color:var(--muted);overflow-wrap:anywhere}
 .toast-close{min-height:28px;width:28px;padding:0;font-size:18px;line-height:1;color:var(--muted)}
+.toast-progress{position:absolute;left:0;right:0;bottom:0;height:3px;background:color-mix(in srgb,var(--line) 58%,transparent)}
+.toast-progress span{display:block;width:100%;height:100%;background:var(--toast-accent);transform:scaleX(var(--toast-progress,1));transform-origin:left center}
 .progress-panel{border-left:4px solid var(--amber)}
 .install-progress-panel{border-left-color:var(--blue)}
 .progress-header{justify-content:space-between;margin-bottom:10px}
