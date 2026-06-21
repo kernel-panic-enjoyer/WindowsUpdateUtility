@@ -61,7 +61,27 @@
     return '<span class="spinner" aria-hidden="true"></span>';
   }
   function loadingText(message){
-    return '<span class="loading-text">' + spinner() + '<span>' + html(message) + '</span></span>';
+    return '<span class="loading-text">' + spinner() + '<span class="loading-message">' + html(message) + '</span></span>';
+  }
+  function setLoadingContent(target, message, loading){
+    if(!target){ return; }
+    message = String(message || "");
+    if(!loading){
+      target.textContent = message;
+      return;
+    }
+    var loadingNode = target.querySelector(".loading-text");
+    var messageNode = loadingNode ? loadingNode.querySelector(".loading-message") : null;
+    if(!messageNode && loadingNode){
+      messageNode = loadingNode.lastElementChild;
+    }
+    if(loadingNode && loadingNode.querySelector(".spinner") && messageNode){
+      if(messageNode.textContent !== message){
+        messageNode.textContent = message;
+      }
+      return;
+    }
+    target.innerHTML = loadingText(message);
   }
   function loadingTableRow(colspan, message){
     return '<tr><td colspan="' + colspan + '">' + loadingText(message) + '</td></tr>';
@@ -85,11 +105,7 @@
   function showNotice(message, loading){
     var notice = $("notice");
     if(!notice){ return; }
-    if(loading && message){
-      notice.innerHTML = loadingText(message);
-    }else{
-      notice.textContent = message || "";
-    }
+    setLoadingContent(notice, message || "", !!(loading && message));
     notice.classList.toggle("hidden", !message);
   }
   function showToast(message, kind, duration){
@@ -418,7 +434,7 @@
     if(!panel){ return; }
     panel.setAttribute("aria-busy", show ? "true" : "false");
     var title = panel.querySelector(".progress-title");
-    if(title){ title.innerHTML = show ? loadingText(message || "Updating packages...") : html(message || "Updating packages..."); }
+    if(title){ setLoadingContent(title, message || "Updating packages...", show); }
     var bar = panel.querySelector("[role=progressbar]");
     if(bar){
       bar.setAttribute("aria-label", message || "Updating packages");
@@ -436,7 +452,7 @@
     if(!panel){ return; }
     panel.setAttribute("aria-busy", show ? "true" : "false");
     var title = panel.querySelector(".progress-title");
-    if(title){ title.innerHTML = show ? loadingText(message || "Installing package...") : html(message || "Installing package..."); }
+    if(title){ setLoadingContent(title, message || "Installing package...", show); }
     var bar = panel.querySelector("[role=progressbar]");
     if(bar){
       bar.setAttribute("aria-label", message || "Installing package");
@@ -526,7 +542,7 @@
   }
   function postForm(path, params){
     var body = params instanceof URLSearchParams ? params : new URLSearchParams(params || {});
-    return fetch(api(path), {method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"}, body:body});
+    return fetch(api(path), {method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded","X-Windows-Updater-WebUI":"1"}, body:body});
   }
   async function postCommandPayload(path, params, fallbackMessage){
     var response = await postForm(path, params);
@@ -1824,6 +1840,21 @@
       url.searchParams.set("q", query);
       window.history.replaceState(null, "", url.toString());
       loadSearch(query);
+      return;
+    }
+    if(form.id === "shutdown-form"){
+      event.preventDefault();
+      var button = $("shutdown-button");
+      if(button){ button.disabled = true; }
+      showNotice("Stopping application...", true);
+      postForm("/shutdown", {}).then(function(response){
+        if(!response.ok){ throw new Error(response.statusText || "Stop request failed"); }
+        showNotice("Application is stopping.");
+      }).catch(function(e){
+        if(button){ button.disabled = false; }
+        showNotice("Stop failed: " + e.message);
+        showToast("Stop failed: " + e.message, "error");
+      });
       return;
     }
     if(form.matches(".install-form")){

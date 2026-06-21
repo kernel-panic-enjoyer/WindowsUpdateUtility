@@ -89,7 +89,7 @@ func parseStorePackageTable(output string) []Package {
 	}
 	for _, raw := range lines {
 		line := strings.TrimSpace(normalizeStoreTableDelimiters(raw))
-		if line == "" || isStoreSearchNoiseLine(line) {
+		if line == "" || isStoreOutputNoiseLine(line) {
 			continue
 		}
 		if !headerSeen {
@@ -148,6 +148,10 @@ func isStoreTableHeader(line string) bool {
 		}
 	}
 	return hasName && hasKnownColumn
+}
+
+func storeUpdatesCommand() []string {
+	return managerCommand(managerStore, "updates", "--apply", "false")
 }
 
 func splitStoreColumns(line string) []string {
@@ -232,7 +236,7 @@ func normalizeStoreTableDelimiters(line string) string {
 	).Replace(line)
 }
 
-func isStoreSearchNoiseLine(line string) bool {
+func isStoreOutputNoiseLine(line string) bool {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" {
 		return true
@@ -240,11 +244,27 @@ func isStoreSearchNoiseLine(line string) bool {
 	lower := strings.ToLower(trimmed)
 	normalized := normalizePackageIdentity(trimmed)
 	if strings.Contains(normalized, "searchresultsfor") ||
+		strings.Contains(normalized, "updatesavailable") ||
 		strings.HasPrefix(normalized, "resultsfor") ||
-		strings.Contains(lower, "no results") {
+		strings.Contains(lower, "no results") ||
+		strings.Contains(lower, "no updates found") ||
+		strings.Contains(lower, "checking for updates") ||
+		strings.Contains(lower, "checking updates") ||
+		strings.Contains(lower, "looking up product") ||
+		strings.Contains(lower, "already up to date") ||
+		strings.Contains(lower, "would you like to install") ||
+		strings.Contains(lower, "failed to read input") ||
+		strings.Contains(lower, "non-interactive mode") ||
+		strings.HasPrefix(lower, "pending:") ||
+		strings.HasPrefix(lower, "downloading:") ||
+		strings.HasPrefix(lower, "ready to download:") {
 		return true
 	}
 	return isStoreDividerLine(trimmed)
+}
+
+func isStoreSearchNoiseLine(line string) bool {
+	return isStoreOutputNoiseLine(line)
 }
 
 func isStoreDividerLine(line string) bool {
@@ -294,7 +314,7 @@ func storePackageFromColumns(header, cols []string) (Package, bool) {
 	if name == "" && len(cols) > 0 {
 		name = strings.TrimSpace(cols[0])
 	}
-	if name == "" || strings.HasPrefix(name, "[") || isStoreSearchNoiseLine(name) {
+	if name == "" || strings.HasPrefix(name, "[") || isStoreOutputNoiseLine(name) {
 		return Package{}, false
 	}
 	id := storeColumnValue(header, cols, "id", "product id", "package id")
@@ -408,7 +428,7 @@ func storeInstalled() ([]Package, CommandResult) {
 }
 
 func storeUpdates() (map[string]string, []Package, CommandResult) {
-	result := runCommand(120*time.Second, managerCommand(managerStore, "updates")...)
+	result := runCommand(120*time.Second, storeUpdatesCommand()...)
 	output := result.Stdout + "\n" + result.Stderr
 	return parseStoreUpdates(output), parseStoreUpdatePackages(output), result
 }

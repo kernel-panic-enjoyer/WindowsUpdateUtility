@@ -31,6 +31,15 @@ Codex  OpenAI.Codex  1.0.0    1.1.0
 	}
 }
 
+func TestStoreUpdatesCommandIsNonApplying(t *testing.T) {
+	command := strings.Join(storeUpdatesCommand(), " ")
+	for _, expected := range []string{"store", "updates", "--apply", "false"} {
+		if !strings.Contains(command, expected) {
+			t.Fatalf("Store update discovery command missing %q: %s", expected, command)
+		}
+	}
+}
+
 func TestParseStoreSearchBoxTable(t *testing.T) {
 	output := `
 Searching for "codex"…
@@ -103,6 +112,37 @@ Failed to read input in non-interactive mode.
 	}
 	if got[2].ID != "Windows Web Experience Pack" || got[2].AvailableVersion != "526.11701.50.0" {
 		t.Fatalf("unexpected wrapped Store update package: %#v", got[2])
+	}
+}
+
+func TestParseStoreUpdatesIgnoresPromptAndProgressNoise(t *testing.T) {
+	output := `
+Looking up product...
+Checking updates...
+Checking updates for Codex...
+
+Pending: 0%
+Downloading: 26%
+Ready to Download: 0%
+Would you like to install the 2 Store update(s) now? [y/n] (y):
+Failed to read input in non-interactive mode.
+`
+	if got := parseStoreUpdatePackages(output); len(got) != 0 {
+		t.Fatalf("Store prompt/progress noise should not become update packages: %#v", got)
+	}
+	if got := parseStoreUpdates(output); len(got) != 0 {
+		t.Fatalf("Store prompt/progress noise should not become update map entries: %#v", got)
+	}
+}
+
+func TestParseStoreUpdatesNoUpdatesFound(t *testing.T) {
+	output := `
+Checking for updates...
+
+No updates found.
+`
+	if got := parseStoreUpdatePackages(output); len(got) != 0 {
+		t.Fatalf("no-updates output should not create packages: %#v", got)
 	}
 }
 

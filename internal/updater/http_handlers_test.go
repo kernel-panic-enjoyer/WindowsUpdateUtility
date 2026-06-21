@@ -254,6 +254,35 @@ func TestRequestBoundaryRejectsBadHostOriginAndFetchMetadata(t *testing.T) {
 		t.Fatalf("expected bad origin rejection, got %d", badOriginResponse.Code)
 	}
 
+	nullOriginWithoutUIHeader := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:4183/api/scan", nil)
+	addTestSessionCookie(app, nullOriginWithoutUIHeader)
+	nullOriginWithoutUIHeader.Header.Set("Origin", "null")
+	nullOriginWithoutUIHeaderResponse := httptest.NewRecorder()
+	app.serveHTTP(nullOriginWithoutUIHeaderResponse, nullOriginWithoutUIHeader)
+	if nullOriginWithoutUIHeaderResponse.Code != http.StatusForbidden {
+		t.Fatalf("expected null origin without UI header rejection, got %d", nullOriginWithoutUIHeaderResponse.Code)
+	}
+
+	nullOriginUIRequest := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:4183/shutdown", nil)
+	addTestSessionCookie(app, nullOriginUIRequest)
+	nullOriginUIRequest.Header.Set("Origin", "null")
+	nullOriginUIRequest.Header.Set(trustedUIRequestHeader, "1")
+	nullOriginUIRequestResponse := httptest.NewRecorder()
+	app.serveHTTP(nullOriginUIRequestResponse, nullOriginUIRequest)
+	if nullOriginUIRequestResponse.Code != http.StatusOK {
+		t.Fatalf("expected trusted UI null origin request to pass boundary, got %d: %s", nullOriginUIRequestResponse.Code, nullOriginUIRequestResponse.Body.String())
+	}
+
+	badOriginWithUIHeader := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:4183/api/scan", nil)
+	addTestSessionCookie(app, badOriginWithUIHeader)
+	badOriginWithUIHeader.Header.Set("Origin", "http://evil.test:4183")
+	badOriginWithUIHeader.Header.Set(trustedUIRequestHeader, "1")
+	badOriginWithUIHeaderResponse := httptest.NewRecorder()
+	app.serveHTTP(badOriginWithUIHeaderResponse, badOriginWithUIHeader)
+	if badOriginWithUIHeaderResponse.Code != http.StatusForbidden {
+		t.Fatalf("expected bad origin with UI header rejection, got %d", badOriginWithUIHeaderResponse.Code)
+	}
+
 	badFetch := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:4183/api/scan", nil)
 	addTestSessionCookie(app, badFetch)
 	badFetch.Header.Set("Sec-Fetch-Site", "cross-site")

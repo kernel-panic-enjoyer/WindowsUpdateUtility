@@ -10,6 +10,7 @@ import (
 )
 
 const sessionCookieName = "WindowsUpdaterWebUI"
+const trustedUIRequestHeader = "X-Windows-Updater-WebUI"
 
 func setSecurityHeaders(w http.ResponseWriter) {
 	header := w.Header()
@@ -147,8 +148,10 @@ func (app *App) requestBoundaryOK(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" && !app.sameOrigin(origin) {
-		writeAPIError(w, http.StatusForbidden, "forbidden origin")
-		return false
+		if !(strings.EqualFold(origin, "null") && app.trustedUIRequest(r)) {
+			writeAPIError(w, http.StatusForbidden, "forbidden origin")
+			return false
+		}
 	}
 	switch strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site"))) {
 	case "", "same-origin", "none":
@@ -157,4 +160,8 @@ func (app *App) requestBoundaryOK(w http.ResponseWriter, r *http.Request) bool {
 		writeAPIError(w, http.StatusForbidden, "forbidden fetch context")
 		return false
 	}
+}
+
+func (app *App) trustedUIRequest(r *http.Request) bool {
+	return r.Header.Get(trustedUIRequestHeader) == "1" && app.trustedHost(r)
 }

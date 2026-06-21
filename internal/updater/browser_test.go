@@ -176,6 +176,34 @@ func TestBrowserAuthBootstrapURLCleanupAndSecurityHeaders(t *testing.T) {
 	}
 }
 
+func TestBrowserStopButtonUsesAsyncShutdownRequest(t *testing.T) {
+	app := newBrowserTestApp()
+	server := startBrowserTestServer(t, app)
+	ctx, cancel := newBrowserContext(t)
+	defer cancel()
+
+	navigateAuthenticated(t, ctx, server.URL)
+	if err := chromedp.Run(ctx,
+		chromedp.Click(`#shutdown-button`, chromedp.ByQuery),
+	); err != nil {
+		t.Fatal(err)
+	}
+	notice := waitForText(t, ctx, `#notice`, "Application is stopping")
+	var currentURL, body string
+	if err := chromedp.Run(ctx,
+		chromedp.Location(&currentURL),
+		chromedp.Text(`body`, &body, chromedp.ByQuery),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(currentURL, "/shutdown") {
+		t.Fatalf("stop button navigated to shutdown response: %s", currentURL)
+	}
+	if strings.Contains(body, "forbidden origin") || strings.Contains(body, `"error"`) {
+		t.Fatalf("stop button rendered JSON error instead of staying on dashboard; notice=%q body=%q", notice, body)
+	}
+}
+
 func TestBrowserSearchShowsPartialFailuresAndProvenance(t *testing.T) {
 	restoreManagers := replaceManagerDetectionCache(map[string]ManagerStatus{
 		managerWinget: {Available: true},
@@ -276,6 +304,33 @@ func TestBrowserReloadDuringJobAndCancellation(t *testing.T) {
 		t.Fatal("update job did not start")
 	}
 	waitForText(t, ctx, `#update-progress-status`, "Browser Test App")
+	var spinnerMarked bool
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`(() => {
+		  const spinner = document.querySelector("#update-progress-status .spinner");
+		  if (!spinner) return false;
+		  spinner.dataset.persistCheck = "yes";
+		  return true;
+		})()`, &spinnerMarked),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !spinnerMarked {
+		t.Fatal("update progress spinner was not present")
+	}
+	time.Sleep(1300 * time.Millisecond)
+	var spinnerPreserved bool
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`(() => {
+		  const spinner = document.querySelector("#update-progress-status .spinner");
+		  return !!spinner && spinner.dataset.persistCheck === "yes";
+		})()`, &spinnerPreserved),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !spinnerPreserved {
+		t.Fatal("update progress spinner was recreated during status polling")
+	}
 	if err := chromedp.Run(ctx,
 		chromedp.Reload(),
 		chromedp.WaitVisible(`#search-input`, chromedp.ByQuery),
