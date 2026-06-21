@@ -122,21 +122,47 @@ func (app *App) handleEventsAPI(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	ticker := time.NewTicker(750 * time.Millisecond)
-	defer ticker.Stop()
+	heartbeatDue := time.Now().Add(10 * time.Second)
 	for {
+		jobs := app.operationJobsSnapshot()
+		active := false
+		for _, job := range jobs {
+			if !operationJobComplete(job) {
+				active = true
+				break
+			}
+		}
+		delay := 5 * time.Second
+		if active {
+			delay = 1 * time.Second
+		}
+		timer := time.NewTimer(delay)
 		select {
 		case <-r.Context().Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
-			if !send("jobs", jobsAPIResponse{Jobs: app.operationJobsSnapshot()}) {
-				return
+		case <-timer.C:
+			jobs = app.operationJobsSnapshot()
+			active = false
+			for _, job := range jobs {
+				if !operationJobComplete(job) {
+					active = true
+					break
+				}
 			}
 			entries := sessionLogs.Since(since)
 			latestID := sessionLogs.LatestID()
-			if len(entries) == 0 {
-				if !send("heartbeat", map[string]any{"latest_id": latestID}) {
+			if active || len(entries) > 0 {
+				if !send("jobs", jobsAPIResponse{Jobs: jobs}) {
 					return
+				}
+			}
+			if len(entries) == 0 {
+				if time.Now().After(heartbeatDue) {
+					if !send("heartbeat", map[string]any{"latest_id": latestID}) {
+						return
+					}
+					heartbeatDue = time.Now().Add(10 * time.Second)
 				}
 				continue
 			}

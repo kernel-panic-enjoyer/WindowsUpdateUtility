@@ -10,6 +10,26 @@ const pageScriptLogConsole = `
     var stream = (entry.stream || "app").toUpperCase();
     return "[" + stamp + "] " + stream + " " + (entry.message || "");
   }
+  function logEntryClientSize(entry){
+    var size = 48;
+    size += String(entry.timestamp || "").length;
+    size += String(entry.stream || "").length;
+    size += String(entry.message || "").length;
+    (entry.categories || []).forEach(function(category){ size += String(category || "").length + 1; });
+    return size;
+  }
+  function prepareLogEntry(entry){
+    entry._formatted = formatLogEntry(entry);
+    entry._size = logEntryClientSize(entry);
+    return entry;
+  }
+  function trimBrowserLogs(){
+    while(logEntries.length > 0 && (logEntries.length > maxBrowserLogEntries || logBytes > maxBrowserLogBytes)){
+      var removed = logEntries.shift();
+      logBytes -= Number(removed && removed._size || 0);
+    }
+    if(logBytes < 0){ logBytes = 0; }
+  }
   function logEntryInActiveCategory(entry){
     var category = activeLogCategory || "all";
     var categories = entry.categories || ["all", "application"];
@@ -24,12 +44,19 @@ const pageScriptLogConsole = `
       target.scrollTop = target.scrollHeight;
     }
   }
+  function scheduleLogRender(shouldScroll){
+    if(logRenderFrame){ return; }
+    logRenderFrame = window.requestAnimationFrame(function(){
+      logRenderFrame = 0;
+      renderLogLines(shouldScroll);
+    });
+  }
   function filteredLogLines(){
     var query = logSearchQuery.trim().toLowerCase();
     var clearedBefore = clearedLogBeforeByCategory[activeLogCategory || "all"] || 0;
     return logEntries.filter(function(entry){
       return Number(entry.id || 0) > clearedBefore && logEntryInActiveCategory(entry);
-    }).map(formatLogEntry).filter(function(line){
+    }).map(function(entry){ return entry._formatted || formatLogEntry(entry); }).filter(function(line){
       return !query || line.toLowerCase().indexOf(query) !== -1;
     });
   }
@@ -37,20 +64,42 @@ const pageScriptLogConsole = `
     if(!entries || entries.length === 0){ return; }
     entries.forEach(function(entry){
       lastLogID = Math.max(lastLogID, Number(entry.id || 0));
-      logEntries.push(entry);
+      logEntries.push(prepareLogEntry(entry));
+      logBytes += Number(entry._size || 0);
     });
+    trimBrowserLogs();
     var auto = $("log-autoscroll");
-    renderLogLines(!auto || auto.checked);
+    scheduleLogRender(!auto || auto.checked);
+  }
+  function setLogConnectionState(state, message){
+    var target = $("log-connection-status");
+    if(!target){ return; }
+    target.textContent = message || state;
+    target.classList.toggle("ok", state === "connected");
+    target.classList.toggle("warn", state === "reconnecting");
+    target.classList.toggle("error", state === "disconnected");
   }
   async function loadLogs(){
     try{
-      var data = await (await fetch(api("/api/logs", {since:String(lastLogID)}))).json();
+      setLogConnectionState("reconnecting", "Reconnecting");
+      var response = await fetch(api("/api/logs", {since:String(lastLogID)}));
+      var data = await response.json();
+      if(!response.ok){ throw new Error(data.error || "Log polling failed"); }
       appendLogEntries(data.entries || []);
       if(typeof data.latest_id === "number" && data.latest_id > lastLogID && (!data.entries || data.entries.length === 0)){
         lastLogID = data.latest_id;
       }
-      logPollDelay = 1000;
+      setLogConnectionState("connected", "Connected");
+      if(data.entries && data.entries.length){
+        logPollDelay = 1000;
+      }else if(activeServerJobs().length > 0){
+        logPollDelay = 1500;
+      }else{
+        logPollDelay = Math.min(10000, Math.round(logPollDelay * 1.35));
+      }
     }catch(e){
+      setLogConnectionState("disconnected", "Log disconnected; retrying");
+      showNotice("Session log disconnected. Reconnecting...");
       logPollDelay = Math.min(15000, Math.round(logPollDelay * 1.6));
     }
   }
@@ -79,7 +128,11 @@ const pageScriptLogConsole = `
     }
     stopLogPolling();
     if(eventStream){ eventStream.close(); }
+    setLogConnectionState("reconnecting", "Connecting");
     eventStream = new EventSource(api("/api/events", {since:String(lastLogID)}));
+    eventStream.onopen = function(){
+      setLogConnectionState("connected", "Connected");
+    };
     eventStream.addEventListener("logs", function(event){
       try{
         var data = JSON.parse(event.data || "{}");
@@ -96,6 +149,8 @@ const pageScriptLogConsole = `
       }catch(e){}
     });
     eventStream.onerror = function(){
+      setLogConnectionState("disconnected", "Log disconnected; retrying");
+      showNotice("Session log disconnected. Reconnecting...");
       if(eventStream){
         eventStream.close();
         eventStream = null;

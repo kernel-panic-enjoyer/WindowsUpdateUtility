@@ -17,14 +17,20 @@ type LogEntry struct {
 }
 
 type LogBuffer struct {
-	mu      sync.Mutex
-	nextID  int64
-	entries []LogEntry
+	mu         sync.Mutex
+	nextID     int64
+	entries    []LogEntry
+	totalBytes int
+	maxEntries int
+	maxBytes   int
 }
 
 var sessionLogs = &LogBuffer{}
 
 const (
+	defaultLogMaxEntries = 5000
+	defaultLogMaxBytes   = 2 * 1024 * 1024
+
 	logCategoryAll         = "all"
 	logCategoryApplication = "application"
 	logCategorySearches    = "searches"
@@ -126,7 +132,41 @@ func (buffer *LogBuffer) AppendCategorized(stream, message string, categories []
 		Categories: normalizeLogCategories(categories),
 	}
 	buffer.entries = append(buffer.entries, entry)
+	buffer.totalBytes += logEntrySize(entry)
+	buffer.trimLocked()
 	return entry
+}
+
+func (buffer *LogBuffer) limits() (int, int) {
+	maxEntries := buffer.maxEntries
+	if maxEntries <= 0 {
+		maxEntries = defaultLogMaxEntries
+	}
+	maxBytes := buffer.maxBytes
+	if maxBytes <= 0 {
+		maxBytes = defaultLogMaxBytes
+	}
+	return maxEntries, maxBytes
+}
+
+func logEntrySize(entry LogEntry) int {
+	size := len(entry.Timestamp) + len(entry.Stream) + len(entry.Message) + 32
+	for _, category := range entry.Categories {
+		size += len(category) + 1
+	}
+	return size
+}
+
+func (buffer *LogBuffer) trimLocked() {
+	maxEntries, maxBytes := buffer.limits()
+	for len(buffer.entries) > 0 && (len(buffer.entries) > maxEntries || buffer.totalBytes > maxBytes) {
+		buffer.totalBytes -= logEntrySize(buffer.entries[0])
+		copy(buffer.entries[0:], buffer.entries[1:])
+		buffer.entries = buffer.entries[:len(buffer.entries)-1]
+	}
+	if buffer.totalBytes < 0 {
+		buffer.totalBytes = 0
+	}
 }
 
 func (buffer *LogBuffer) Since(since int64) []LogEntry {

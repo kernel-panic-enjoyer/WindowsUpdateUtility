@@ -168,6 +168,47 @@ func TestLogBufferAppendAndSince(t *testing.T) {
 	}
 }
 
+func TestLogBufferRetainsNewestEntriesByCount(t *testing.T) {
+	buffer := &LogBuffer{maxEntries: 3, maxBytes: 64 * 1024}
+	for _, message := range []string{"one", "two", "three", "four", "five"} {
+		buffer.Append("app", message)
+	}
+
+	entries := buffer.Since(0)
+	if len(entries) != 3 {
+		t.Fatalf("expected three retained entries, got %#v", entries)
+	}
+	if entries[0].ID != 3 || entries[0].Message != "three" || entries[2].ID != 5 || entries[2].Message != "five" {
+		t.Fatalf("expected newest entries to be retained, got %#v", entries)
+	}
+	if older := buffer.Since(1); len(older) != 3 || older[0].ID != 3 {
+		t.Fatalf("since older than retained range should return retained window, got %#v", older)
+	}
+}
+
+func TestLogBufferRetainsNewestEntriesByBytes(t *testing.T) {
+	buffer := &LogBuffer{maxEntries: 100, maxBytes: 260}
+	buffer.Append("stdout", strings.Repeat("a", 80))
+	buffer.Append("stdout", strings.Repeat("b", 80))
+	latest := buffer.Append("stdout", strings.Repeat("c", 80))
+
+	entries := buffer.Snapshot()
+	if len(entries) == 0 {
+		t.Fatal("expected at least the newest entry to be retained")
+	}
+	if entries[len(entries)-1].ID != latest.ID || entries[len(entries)-1].Message != latest.Message {
+		t.Fatalf("expected latest entry to be retained, got %#v latest=%#v", entries, latest)
+	}
+	if buffer.totalBytes > buffer.maxBytes {
+		t.Fatalf("expected byte bound %d, got %d", buffer.maxBytes, buffer.totalBytes)
+	}
+	for i := 1; i < len(entries); i++ {
+		if entries[i].ID <= entries[i-1].ID {
+			t.Fatalf("entries out of order after trim: %#v", entries)
+		}
+	}
+}
+
 func TestLogEntryCategoryMetadata(t *testing.T) {
 	cases := []struct {
 		name       string
