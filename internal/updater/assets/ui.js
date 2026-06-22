@@ -931,7 +931,8 @@
   }
 
 
-  function packageNameCell(pkg){
+  function packageNameCell(pkg, options){
+    options = options || {};
     var secondary = pkg.action_backend === "appx-inventory" ? "Store app" : pkg.id;
     if(pkg.unknown_version){
       secondary += " - unknown installed version";
@@ -939,11 +940,8 @@
     if(pkg.pinned){
       secondary += " - pinned";
     }
-    var identity = "";
-    if(storeAssessmentActive(pkg) && pkg.installed_package_family_name){
-      identity = '<br><span class="muted">PFN: ' + html(pkg.installed_package_family_name) + '</span>';
-    }
-    return '<strong>' + html(pkg.name) + '</strong><br><span class="muted">' + html(secondary) + '</span>' + identity + (storeAssessmentActive(pkg) ? providerDiagnosticsMarkup(pkg) : '');
+    var diagnostics = options.diagnostics && storeAssessmentActive(pkg) ? providerDiagnosticsMarkup(pkg) : "";
+    return '<strong>' + html(pkg.name || "Store app") + '</strong><br><span class="muted">' + html(secondary) + '</span>' + diagnostics;
   }
 	function managerCell(pkg){
 		var backend = pkg.action_backend ? '<br><span class="muted">' + html(backendLabel(pkg.action_backend)) + '</span>' : '';
@@ -1040,7 +1038,7 @@
     target.innerHTML = page.items.map(function(pkg){
       var selectable = packageBulkUpdateable(pkg);
       var rowClass = rowUpdateState(pkg.key) === "active" ? ' class="updating-current"' : '';
-      return '<tr data-key="' + attr(pkg.key) + '"' + rowClass + '><td><input form="update-selected-form" type="checkbox" name="package_key" value="' + attr(pkg.key) + '" aria-label="Select ' + attr(pkg.name) + ' for update"' + ((updateBusy || !selectable) ? ' disabled' : '') + '></td><td>' + packageNameCell(pkg) + '</td><td>' + managerCell(pkg) + '</td><td>' + html(pkg.version) + '</td><td>' + packageAvailableCell(pkg) + '</td><td>' + autoButton(pkg) + '</td><td>' + updateForm(pkg) + '</td></tr>';
+      return '<tr data-key="' + attr(pkg.key) + '"' + rowClass + '><td><input form="update-selected-form" type="checkbox" name="package_key" value="' + attr(pkg.key) + '" aria-label="Select ' + attr(pkg.name) + ' for update"' + ((updateBusy || !selectable) ? ' disabled' : '') + '></td><td>' + packageNameCell(pkg, {diagnostics:true}) + '</td><td>' + managerCell(pkg) + '</td><td>' + html(pkg.version) + '</td><td>' + packageAvailableCell(pkg) + '</td><td>' + autoButton(pkg) + '</td><td>' + updateForm(pkg) + '</td></tr>';
     }).join("");
     renderPager(page, status, prev, next);
   }

@@ -44,6 +44,7 @@ type Package struct {
 	ProviderSummaries          []StorePackageProviderSummary `json:"provider_summaries,omitempty"`
 	InstalledPackageFamilyName string                        `json:"installed_package_family_name,omitempty"`
 	StoreProductID             string                        `json:"store_product_id,omitempty"`
+	StoreUpdateID              string                        `json:"store_update_id,omitempty"`
 	InstalledVersion           string                        `json:"installed_version,omitempty"`
 	OfferedVersion             string                        `json:"offered_version,omitempty"`
 	Applicability              string                        `json:"applicability,omitempty"`
@@ -54,6 +55,7 @@ type Package struct {
 
 type StorePackageProviderSummary struct {
 	Name       string `json:"name"`
+	Version    string `json:"version,omitempty"`
 	Health     string `json:"health"`
 	Kind       string `json:"kind"`
 	ObservedAt string `json:"observed_at,omitempty"`

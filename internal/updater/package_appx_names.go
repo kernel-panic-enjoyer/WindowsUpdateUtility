@@ -17,6 +17,10 @@ func friendlyAppxName(name, displayName string, preferred ...string) string {
 	if candidate == "" {
 		return candidate
 	}
+	candidate = stripAppxIdentitySuffix(candidate)
+	if looksLikeOpaqueAppxIdentity(candidate) {
+		return "Store app"
+	}
 	if strings.Contains(candidate, ".") {
 		candidate = friendlyDottedPackageIdentity(candidate)
 	}
@@ -27,6 +31,31 @@ func friendlyAppxName(name, displayName string, preferred ...string) string {
 		return strings.TrimSpace(name)
 	}
 	return candidate
+}
+
+func stripAppxIdentitySuffix(value string) string {
+	value = strings.TrimSpace(value)
+	if before, _, ok := strings.Cut(value, "_"); ok && strings.TrimSpace(before) != "" {
+		return strings.TrimSpace(before)
+	}
+	return value
+}
+
+func looksLikeOpaqueAppxIdentity(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.Contains(value, ".") {
+		return false
+	}
+	hyphens := strings.Count(value, "-")
+	if hyphens < 4 {
+		return false
+	}
+	for _, r := range value {
+		if (r >= 'g' && r <= 'z') || (r >= 'G' && r <= 'Z') {
+			return false
+		}
+	}
+	return true
 }
 
 func trimLeadingDigits(value string) string {

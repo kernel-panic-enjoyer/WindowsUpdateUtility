@@ -242,6 +242,7 @@ func TestRenderedHTMLContainsAsyncUpdateHooks(t *testing.T) {
 		`id="installed-page-status"`,
 		`packageMatchesInstalledSearch`,
 		`packageAvailableCell`,
+		`packageNameCell(pkg, {diagnostics:true})`,
 		`managersRendered`,
 		`renderUpdatesTable`,
 		`renderInstalledTable`,
@@ -310,6 +311,7 @@ func TestRenderedHTMLContainsAsyncUpdateHooks(t *testing.T) {
 		`data-token`,
 		`name="token"`,
 		`searchParams.set("token"`,
+		`PFN:`,
 	} {
 		if strings.Contains(surface, unexpected) {
 			t.Fatalf("rendered page or embedded assets should not contain %q", unexpected)

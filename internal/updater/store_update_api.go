@@ -2,7 +2,6 @@ package updater
 
 import (
 	"fmt"
-	"runtime"
 	"strings"
 	"time"
 )
@@ -67,7 +66,7 @@ func projectStorePackageAssessment(
 	pfn := storeInstalledPackageFamilyName(pkg)
 	pkg.InstalledPackageFamilyName = pfn
 	pkg.ExactIdentityAvailable = userSID != "" && pfn != ""
-	pkg.ExactActionTargetAvailable = pkg.ExactActionTargetAvailable && pkg.StoreProductID != ""
+	pkg.ExactActionTargetAvailable = pkg.ExactActionTargetAvailable && (pkg.StoreProductID != "" || pkg.StoreUpdateID != "")
 	pkg.ProviderSummaries = providerSummariesForStorePackage(pkg, results, now, sidErr)
 	pkg.Applicability = "unknown"
 
@@ -95,6 +94,7 @@ func projectStorePackageAssessment(
 		pkg.AvailableVersion = cached.OfferedVersion
 		pkg.OfferedVersion = cached.OfferedVersion
 		pkg.StoreProductID = cached.StoreProductID
+		pkg.StoreUpdateID = cached.StoreUpdateID
 		pkg.Applicability = firstNonEmpty(cached.Applicability, "unknown")
 		pkg.ExactActionTargetAvailable = cached.ExactActionTargetAvailable
 	}
@@ -147,7 +147,7 @@ func packageHasExactStoreUpdateTarget(pkg Package) bool {
 	}
 	return pkg.ExactActionTargetAvailable &&
 		storeInstalledPackageFamilyName(pkg) != "" &&
-		strings.TrimSpace(pkg.StoreProductID) != ""
+		(strings.TrimSpace(pkg.StoreProductID) != "" || strings.TrimSpace(pkg.StoreUpdateID) != "")
 }
 
 func storeInstalledPackageFamilyName(pkg Package) string {
@@ -287,6 +287,7 @@ func cacheStorePositiveAssessment(state *State, pkg Package, userSID string) boo
 		InstalledVersion:           pkg.InstalledVersion,
 		OfferedVersion:             firstNonEmpty(pkg.OfferedVersion, pkg.AvailableVersion),
 		StoreProductID:             pkg.StoreProductID,
+		StoreUpdateID:              pkg.StoreUpdateID,
 		Applicability:              pkg.Applicability,
 		ExactActionTargetAvailable: pkg.ExactActionTargetAvailable,
 	}
@@ -444,13 +445,15 @@ func conciseStoreHealthReason(reasons []string) string {
 }
 
 func newStoreAPIScanGeneration(userSID string, now time.Time) StoreScanGeneration {
+	systemContext := currentStoreScanSystemContext()
 	return StoreScanGeneration{
 		ScanID:           fmt.Sprintf("store-api-%d", now.UnixNano()),
 		UserSID:          userSID,
 		StartedAt:        now,
 		CompletedAt:      now,
-		WindowsVersion:   runtime.GOOS,
-		Architecture:     runtime.GOARCH,
+		WindowsVersion:   systemContext.WindowsVersion,
+		WindowsBuild:     systemContext.WindowsBuild,
+		Architecture:     systemContext.Architecture,
 		ProviderVersions: map[string]string{"store-api-assessment": "1"},
 		ProviderHealth:   map[string]StoreProviderHealth{"store-api-assessment": StoreProviderIncomplete},
 		CompletionStatus: StoreScanIncomplete,

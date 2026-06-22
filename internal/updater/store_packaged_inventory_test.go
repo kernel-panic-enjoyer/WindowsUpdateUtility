@@ -3,6 +3,8 @@ package updater
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -118,6 +120,45 @@ func TestNativeStorePackagesSkipFrameworkResourceAndOptionalOnlyFamilies(t *test
 	}
 }
 
+func TestNativeStorePackagesUseFriendlyPresentationNames(t *testing.T) {
+	userSID := "S-1-5-21-test-1001"
+	inventory := StorePackagedAppInventory{
+		Records: []StorePackagedAppRecord{
+			testNativeRecord(userSID, "19568ShareX.ShareX_egrzcvs15399j", "19568ShareX.ShareX_20.2.0.0_x64__egrzcvs15399j", "", StorePackageVersion{Major: 20, Minor: 2}, storePackageClassMain),
+			testNativeRecord(userSID, "1527c705-839a-4832-9118-54d4bd6a0c89_cw5n1h2txyewy", "1527c705-839a-4832-9118-54d4bd6a0c89_1.0.0.0_x64__cw5n1h2txyewy", "", StorePackageVersion{Major: 1}, storePackageClassMain),
+		},
+	}
+	inventory.Families = groupStorePackagedAppFamilies(inventory.Records)
+	packages := packagesFromNativeStorePackagedInventory(defaultState(), inventory)
+	if len(packages) != 2 {
+		t.Fatalf("packages = %d, want 2: %#v", len(packages), packages)
+	}
+	byID := map[string]Package{}
+	for _, pkg := range packages {
+		byID[pkg.ID] = pkg
+	}
+	if got := byID["19568ShareX.ShareX_egrzcvs15399j"].Name; got != "ShareX" {
+		t.Fatalf("ShareX presentation name = %q, want ShareX", got)
+	}
+	if got := byID["1527c705-839a-4832-9118-54d4bd6a0c89_cw5n1h2txyewy"].Name; got != "Store app" {
+		t.Fatalf("opaque Store identity presentation name = %q, want Store app", got)
+	}
+}
+
+func TestNewStorePackagedAppScanRecordsSystemContext(t *testing.T) {
+	restoreContext := replaceStoreScanSystemContext(storeScanSystemContext{
+		WindowsVersion: "Windows 11 24H2",
+		WindowsBuild:   "10.0.26200.8655",
+		Architecture:   "x64",
+	})
+	defer restoreContext()
+
+	scan := newStorePackagedAppScan("S-1-5-21-native-context")
+	if scan.WindowsVersion != "Windows 11 24H2" || scan.WindowsBuild != "10.0.26200.8655" || scan.Architecture != "x64" {
+		t.Fatalf("native inventory scan context was not recorded: %#v", scan)
+	}
+}
+
 func TestCompareStorePackagedInventoryDiagnostics(t *testing.T) {
 	userSID := "S-1-5-21-test-1001"
 	native := StorePackagedAppInventory{
@@ -176,6 +217,59 @@ func TestBrokerStorePackagedAppInventoryProviderParsesSuccessfulResponse(t *test
 	inventory, result := provider.Inventory(context.Background(), scan)
 	if !result.OK || len(inventory.Records) != 1 {
 		t.Fatalf("expected successful parse, inventory=%#v result=%#v", inventory, result)
+	}
+}
+
+func TestParseStorePackagedInventoryKeepsBrokerErrorProtocolFields(t *testing.T) {
+	scan := testNativeInventoryScan("wrong-user-scan", "S-1-5-21-wrong")
+	data := `{"protocol_version":1,"scan_id":"wrong-user-scan","user_sid":"S-1-5-21-wrong","started_at":"2026-06-21T10:00:00Z","completed_at":"2026-06-21T10:00:01Z","complete":false,"partial":true,"error":"Broker user SID does not match request user SID.","records":[]}`
+	inventory, err := parseStorePackagedInventoryResponse([]byte(data), scan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inventory.Scan.ScanID != scan.ScanID || inventory.Scan.UserSID != scan.UserSID || !inventory.Partial || len(inventory.Errors) != 1 {
+		t.Fatalf("broker error protocol fields not preserved: %#v", inventory)
+	}
+}
+
+func TestEnsureEmbeddedStoreInventoryBrokerExtractsSidecar(t *testing.T) {
+	binaryDir := filepath.Join(workspaceRootForTest(t), ".tmp-bin", "embedded-broker-test-"+time.Now().UTC().Format("20060102150405.000000000"))
+	t.Cleanup(func() { _ = os.RemoveAll(binaryDir) })
+	t.Setenv("UPDATER_BINARY_DIR", binaryDir)
+	path, err := ensureEmbeddedStoreInventoryBroker()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(path, binaryDir) {
+		t.Fatalf("broker path %q is outside binary dir %q", path, binaryDir)
+	}
+	if filepath.Base(path) != "WindowsUpdater.StoreInventoryBroker.exe" {
+		t.Fatalf("unexpected broker path %q", path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(data[:2]), "MZ") {
+		t.Fatalf("extracted broker does not look like a Windows executable")
+	}
+}
+
+func workspaceRootForTest(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("could not locate repository root from %s", dir)
+		}
+		dir = parent
 	}
 }
 

@@ -4,22 +4,40 @@ Scope: manual validation for the current-user packaged-application inventory pro
 
 ## Build Broker
 
-Requires a Windows SDK/.NET machine:
+Requires a Windows SDK/.NET Framework machine. Build the broker directly into
+the repo-embedded asset path so temporary and final binaries stay under the
+workspace:
 
 ```powershell
-dotnet publish .\native\store-inventory-broker\WindowsUpdater.StoreInventoryBroker.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
+New-Item -ItemType Directory -Force .\internal\updater\assets\broker | Out-Null
+. .\dev\scripts\Set-WorkspaceBinaryPaths.ps1 | Out-Null
+& 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe' /nologo /target:exe `
+  /out:'.\internal\updater\assets\broker\WindowsUpdater.StoreInventoryBroker.exe' `
+  /reference:'C:\Windows\System32\WinMetadata\Windows.ApplicationModel.winmd' `
+  /reference:'C:\Windows\System32\WinMetadata\Windows.Management.winmd' `
+  /reference:'C:\Windows\System32\WinMetadata\Windows.System.winmd' `
+  /reference:'C:\Windows\System32\WinMetadata\Windows.Storage.winmd' `
+  /reference:'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\System.Runtime.WindowsRuntime.dll' `
+  /reference:'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\System.Runtime.dll' `
+  .\native\store-inventory-broker\Program.cs
 ```
 
-Copy or build the result beside `WindowsUpdaterWebUI.exe` as:
+Build the app with repo-local Go cache and temporary directories:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1
+```
+
+The app embeds the checked-in broker asset and extracts it at runtime to:
 
 ```text
-WindowsUpdater.StoreInventoryBroker.exe
+dist\bin\WindowsUpdater.StoreInventoryBroker.exe
 ```
 
-Alternatively set:
+Alternatively, for diagnostics only, set an explicit repo-local broker path:
 
 ```powershell
-$env:UPDATER_STORE_INVENTORY_BROKER='C:\path\to\WindowsUpdater.StoreInventoryBroker.exe'
+$env:UPDATER_STORE_INVENTORY_BROKER="$PWD\internal\updater\assets\broker\WindowsUpdater.StoreInventoryBroker.exe"
 ```
 
 ## Diagnostic Dual Run

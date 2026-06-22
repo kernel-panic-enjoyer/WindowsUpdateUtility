@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	storeScanSchemaVersion     = 1
+	storeScanSchemaVersion     = 2
 	storeScanRetentionRunsUser = 50
 )
 
@@ -114,7 +114,16 @@ func (store *StoreScanStore) migrate(ctx context.Context) error {
 		if err := applyStoreScanMigration1(ctx, tx); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?)`, storeScanSchemaVersion, formatStoreScanTime(time.Now().UTC())); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?)`, 1, formatStoreScanTime(time.Now().UTC())); err != nil {
+			return err
+		}
+		version = 1
+	}
+	if version < 2 {
+		if err := applyStoreScanMigration2(ctx, tx); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?)`, 2, formatStoreScanTime(time.Now().UTC())); err != nil {
 			return err
 		}
 	}
@@ -231,6 +240,14 @@ func applyStoreScanMigration1(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
+func applyStoreScanMigration2(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, `ALTER TABLE provider_runs ADD COLUMN provider_version TEXT`)
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return nil
+	}
+	return err
+}
+
 func migrateJSONStoreAssessmentCache(ctx context.Context, tx *sql.Tx, state State) error {
 	if len(state.StoreUpdateAssessmentCache) == 0 {
 		return nil
@@ -328,8 +345,8 @@ func (store *StoreScanStore) persistScanTx(ctx context.Context, tx *sql.Tx, inpu
 		if !run.CompletedAt.IsZero() {
 			completed = formatStoreScanTime(run.CompletedAt)
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO provider_runs(scan_id, provider_id, provider_name, backend, started_at, completed_at, health, error) VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
-			input.Scan.ScanID, run.Provider.Key(), run.Provider.Name, run.Provider.Backend, formatStoreScanTime(run.StartedAt), completed, string(run.Health), sanitizeProviderDiagnostic(run.Error)); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO provider_runs(scan_id, provider_id, provider_name, backend, provider_version, started_at, completed_at, health, error) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			input.Scan.ScanID, run.Provider.Key(), run.Provider.Name, run.Provider.Backend, strings.TrimSpace(run.Version), formatStoreScanTime(run.StartedAt), completed, string(run.Health), sanitizeProviderDiagnostic(run.Error)); err != nil {
 			return err
 		}
 		for _, mapping := range run.Mappings {
@@ -449,7 +466,7 @@ func (store *StoreScanStore) LatestPublishedProviderSummaries(ctx context.Contex
 	if err != nil || !ok {
 		return nil, err
 	}
-	rows, err := store.db.QueryContext(ctx, `SELECT COALESCE(provider_name, provider_id), health, COALESCE(completed_at, started_at), COALESCE(error, '') FROM provider_runs WHERE scan_id = ? ORDER BY provider_id`, scan.ScanID)
+	rows, err := store.db.QueryContext(ctx, `SELECT COALESCE(provider_name, provider_id), COALESCE(provider_version, ''), health, COALESCE(completed_at, started_at), COALESCE(error, '') FROM provider_runs WHERE scan_id = ? ORDER BY provider_id`, scan.ScanID)
 	if err != nil {
 		return nil, err
 	}
@@ -457,7 +474,7 @@ func (store *StoreScanStore) LatestPublishedProviderSummaries(ctx context.Contex
 	var summaries []StorePackageProviderSummary
 	for rows.Next() {
 		var summary StorePackageProviderSummary
-		if err := rows.Scan(&summary.Name, &summary.Health, &summary.ObservedAt, &summary.Error); err != nil {
+		if err := rows.Scan(&summary.Name, &summary.Version, &summary.Health, &summary.ObservedAt, &summary.Error); err != nil {
 			return nil, err
 		}
 		summary.Kind = providerRunSummaryKind(StoreProviderHealth(summary.Health))

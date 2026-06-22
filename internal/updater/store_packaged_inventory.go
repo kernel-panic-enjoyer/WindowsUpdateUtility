@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -146,11 +145,52 @@ func storeInventoryBrokerPath() string {
 	if override := os.Getenv("UPDATER_STORE_INVENTORY_BROKER"); override != "" {
 		return override
 	}
+	if path, err := ensureEmbeddedStoreInventoryBroker(); err == nil {
+		return path
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		return "WindowsUpdater.StoreInventoryBroker.exe"
 	}
 	return filepath.Join(filepath.Dir(exe), "WindowsUpdater.StoreInventoryBroker.exe")
+}
+
+func ensureEmbeddedStoreInventoryBroker() (string, error) {
+	dir, err := binaryExtractionDir()
+	if err != nil {
+		return "", err
+	}
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		return "", err
+	}
+	path := filepath.Join(binDir, "WindowsUpdater.StoreInventoryBroker.exe")
+	if existing, err := os.ReadFile(path); err == nil && bytes.Equal(existing, embeddedStoreInventoryBroker) {
+		return path, nil
+	}
+	tmp := filepath.Join(binDir, fmt.Sprintf("WindowsUpdater.StoreInventoryBroker-%d.tmp", time.Now().UnixNano()))
+	if err := os.WriteFile(tmp, embeddedStoreInventoryBroker, 0o755); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(path)
+		if retryErr := os.Rename(tmp, path); retryErr != nil {
+			_ = os.Remove(tmp)
+			return "", err
+		}
+	}
+	return path, nil
+}
+
+func binaryExtractionDir() (string, error) {
+	if override := strings.TrimSpace(os.Getenv("UPDATER_BINARY_DIR")); override != "" {
+		return override, nil
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Dir(exe), nil
 }
 
 func (provider brokerStorePackagedAppInventoryProvider) Inventory(ctx context.Context, scan StoreScanGeneration) (StorePackagedAppInventory, CommandResult) {
@@ -331,7 +371,7 @@ func groupStorePackagedAppFamilies(records []StorePackagedAppRecord) []StorePack
 			Identity:    identity,
 			Primary:     primary,
 			Instances:   instances,
-			DisplayName: firstNonEmpty(primary.DisplayName, primary.IdentityName),
+			DisplayName: friendlyStorePackagedAppName(primary),
 			ProductLike: familyProductLike(instances),
 		})
 	}
@@ -391,6 +431,10 @@ func productLikeFamilyCount(families []StorePackagedAppFamily) int {
 	return count
 }
 
+func friendlyStorePackagedAppName(record StorePackagedAppRecord) string {
+	return friendlyAppxName(record.IdentityName, record.DisplayName)
+}
+
 func packagesFromNativeStorePackagedInventory(state State, inventory StorePackagedAppInventory) []Package {
 	var packages []Package
 	for _, family := range inventory.Families {
@@ -428,12 +472,14 @@ func firstNonEmpty(values ...string) string {
 
 func newStorePackagedAppScan(userSID string) StoreScanGeneration {
 	now := time.Now().UTC()
+	systemContext := currentStoreScanSystemContext()
 	return StoreScanGeneration{
 		ScanID:           fmt.Sprintf("store-native-%d", now.UnixNano()),
 		UserSID:          userSID,
 		StartedAt:        now,
-		WindowsVersion:   runtime.GOOS,
-		Architecture:     runtime.GOARCH,
+		WindowsVersion:   systemContext.WindowsVersion,
+		WindowsBuild:     systemContext.WindowsBuild,
+		Architecture:     systemContext.Architecture,
 		ProviderVersions: map[string]string{"store-native-inventory": "1"},
 		ProviderHealth:   map[string]StoreProviderHealth{"store-native-inventory": StoreProviderHealthy},
 		CompletionStatus: StoreScanRunning,

@@ -5,8 +5,8 @@ Disposable read-only probe for validating Windows Runtime Store/AppX identity be
 Run from PowerShell:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\spikes\store-identity-probe\Probe-StoreIdentity.ps1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\spikes\store-identity-probe\Probe-StoreIdentity.ps1 -PackageFamilyName Microsoft.WindowsStore_8wekyb3d8bbwe
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\dev\tools\spikes\store-identity-probe\Probe-StoreIdentity.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\dev\tools\spikes\store-identity-probe\Probe-StoreIdentity.ps1 -PackageFamilyName Microsoft.WindowsStore_8wekyb3d8bbwe
 ```
 
 The script validates whether the current process can call:

@@ -13,11 +13,13 @@ func wingetInstalled() ([]Package, CommandResult) {
 	var exportResult CommandResult
 	var exported []Package
 	exportPath := ""
-	if tmp, err := os.CreateTemp("", "windows-updater-winget-*.json"); err == nil {
-		exportPath = tmp.Name()
-		_ = tmp.Close()
-		_ = os.Remove(exportPath)
-		defer os.Remove(exportPath)
+	if tempDir, err := appTempDir(); err == nil {
+		if tmp, err := os.CreateTemp(tempDir, "windows-updater-winget-*.json"); err == nil {
+			exportPath = tmp.Name()
+			_ = tmp.Close()
+			_ = os.Remove(exportPath)
+			defer os.Remove(exportPath)
+		}
 	}
 
 	var wg sync.WaitGroup

@@ -27,6 +27,165 @@ func TestStoreExactUpdateVerifiesVersionChange(t *testing.T) {
 	}
 }
 
+func TestStoreExactUpdatePrefersProductIDWhenProviderUpdateIDPresent(t *testing.T) {
+	targets := []string{}
+	executor := testStoreExactExecutor(
+		fakeStoreExactRunner{targets: &targets, result: CommandResult{OK: true, Command: "store update 9NCODEX", Stdout: "accepted"}},
+		&fakeStoreExactInventory{snapshots: []StoreExactPackageSnapshot{
+			testStoreExactSnapshot("1.0.0", "OpenAI.Codex_1.0.0_x64__abc123", true),
+			testStoreExactSnapshot("1.1.0", "OpenAI.Codex_1.1.0_x64__abc123", true),
+		}},
+		fakeStoreExactCatalog{},
+		fakeStoreEvents{},
+	)
+	pkg := testExactStorePackage()
+	pkg.StoreUpdateID = pkg.InstalledPackageFamilyName
+	result := executeStoreExactUpdateForTest(t, executor, pkg)
+	if !result.OK {
+		t.Fatalf("expected verified exact update, got %#v", result)
+	}
+	if strings.Join(targets, "|") != pkg.StoreProductID {
+		t.Fatalf("expected Product ID target first, got %#v", targets)
+	}
+}
+
+func TestStoreCLIExactUpdateRunnerFallsBackToVerifiedUpdateID(t *testing.T) {
+	var targets []string
+	restore := replacePackageActionHooks(
+		func(ctx context.Context, timeout time.Duration, args ...string) CommandResult {
+			target := packageActionTargetFromArgs(args)
+			targets = append(targets, target)
+			if target == "OpenAI.Codex_abc123" {
+				return CommandResult{OK: true, Command: strings.Join(args, " "), Stdout: "accepted"}
+			}
+			return CommandResult{OK: true, Command: strings.Join(args, " "), Stdout: "Checking updates...\nError: Could not find installed product metadata."}
+		},
+		func(manager string) bool { return manager == managerStore },
+	)
+	defer restore()
+
+	request := testExactStoreRequest()
+	request.UpdateID = "OpenAI.Codex_abc123"
+	result := storeCLIExactUpdateRunner{}.RunStoreUpdate(context.Background(), request)
+	if !result.OK {
+		t.Fatalf("expected verified update ID fallback to succeed, got %#v", result)
+	}
+	if strings.Join(targets, "|") != "9NCODEX|OpenAI.Codex_abc123" {
+		t.Fatalf("expected Product ID then exact update ID, got %#v", targets)
+	}
+}
+
+func TestStoreProductIDFirstExactUpdateRunnerUsesWingetProductID(t *testing.T) {
+	var commands []string
+	var targets []string
+	restore := replacePackageActionHooks(
+		func(ctx context.Context, timeout time.Duration, args ...string) CommandResult {
+			commands = append(commands, strings.Join(args, " "))
+			targets = append(targets, packageActionTargetFromArgs(args))
+			if !isWingetCommand(args) {
+				t.Fatalf("expected Product ID attempt through winget only, got %v", args)
+			}
+			return CommandResult{OK: true, Command: strings.Join(args, " "), Stdout: "accepted"}
+		},
+		func(manager string) bool { return manager == managerWinget || manager == managerStore },
+	)
+	defer restore()
+
+	result := storeProductIDFirstExactUpdateRunner{}.RunStoreUpdate(context.Background(), testExactStoreRequest())
+	if !result.OK {
+		t.Fatalf("expected winget Product ID action to be accepted, got %#v", result)
+	}
+	if strings.Join(targets, "|") != "9NCODEX" {
+		t.Fatalf("expected exact Product ID target only, targets=%#v commands=%#v", targets, commands)
+	}
+	if !strings.Contains(commands[0], "--id 9NCODEX --exact") || !strings.Contains(commands[0], "--source msstore") {
+		t.Fatalf("expected winget msstore exact Product ID command, got %q", commands[0])
+	}
+}
+
+func TestStoreProductIDFirstExactUpdateRunnerFallsBackToStoreCLIExactTargets(t *testing.T) {
+	var managers []string
+	var targets []string
+	restore := replacePackageActionHooks(
+		func(ctx context.Context, timeout time.Duration, args ...string) CommandResult {
+			target := packageActionTargetFromArgs(args)
+			targets = append(targets, target)
+			if isWingetCommand(args) {
+				managers = append(managers, managerWinget)
+				return CommandResult{Code: 1, Command: strings.Join(args, " "), Stdout: "No applicable upgrade found."}
+			}
+			managers = append(managers, managerStore)
+			if target == "OpenAI.Codex_abc123" {
+				return CommandResult{OK: true, Command: strings.Join(args, " "), Stdout: "accepted"}
+			}
+			return CommandResult{OK: true, Command: strings.Join(args, " "), Stdout: "Checking updates...\nError: Could not find installed product metadata."}
+		},
+		func(manager string) bool { return manager == managerWinget || manager == managerStore },
+	)
+	defer restore()
+
+	request := testExactStoreRequest()
+	request.UpdateID = "OpenAI.Codex_abc123"
+	result := storeProductIDFirstExactUpdateRunner{}.RunStoreUpdate(context.Background(), request)
+	if !result.OK {
+		t.Fatalf("expected Store CLI exact update ID fallback to succeed, got %#v", result)
+	}
+	if strings.Join(managers, "|") != "winget|store|store" {
+		t.Fatalf("expected winget Product ID then Store CLI targets, managers=%#v targets=%#v", managers, targets)
+	}
+	if strings.Join(targets, "|") != "9NCODEX|9NCODEX|OpenAI.Codex_abc123" {
+		t.Fatalf("unexpected exact target sequence: %#v", targets)
+	}
+}
+
+func TestStoreExactUpdateValidationAllowsWingetOnlyProductIDTarget(t *testing.T) {
+	executor := testStoreExactExecutor(
+		fakeStoreExactRunner{result: CommandResult{OK: true, Command: "winget upgrade --id 9NCODEX", Stdout: "accepted"}},
+		&fakeStoreExactInventory{snapshots: []StoreExactPackageSnapshot{
+			testStoreExactSnapshot("1.0.0", "OpenAI.Codex_1.0.0_x64__abc123", true),
+			testStoreExactSnapshot("1.1.0", "OpenAI.Codex_1.1.0_x64__abc123", true),
+		}},
+		fakeStoreExactCatalog{},
+		fakeStoreEvents{},
+	)
+	restoreSID := replaceStoreScanSID("S-1-5-21-exec")
+	defer restoreSID()
+	pkg := testExactStorePackage()
+	preparePublishedExactStoreAssessment(t, pkg)
+	oldAvailable := packageActionManagerAvailable
+	packageActionManagerAvailable = func(manager string) bool { return manager == managerWinget }
+	defer func() { packageActionManagerAvailable = oldAvailable }()
+
+	var provider StoreProviderIdentity
+	result := executor.ExecuteWithCallbacks(context.Background(), pkg, StoreExactUpdateCallbacks{
+		Starting: func(request StoreExactUpdateRequest) {
+			provider = request.Provider
+		},
+	})
+	if !result.OK {
+		t.Fatalf("expected winget-only exact Product ID update path to validate, got %#v", result)
+	}
+	if provider.ID != managerWinget || provider.Backend != backendWingetMSStoreFallback {
+		t.Fatalf("expected winget msstore exact provider, got %#v", provider)
+	}
+}
+
+func TestStoreExactUpdateValidationRejectsWhenNoExactExecutorAvailable(t *testing.T) {
+	executor := testStoreExactExecutor(fakeStoreExactRunner{}, &fakeStoreExactInventory{}, fakeStoreExactCatalog{}, fakeStoreEvents{})
+	restoreSID := replaceStoreScanSID("S-1-5-21-exec")
+	defer restoreSID()
+	pkg := testExactStorePackage()
+	preparePublishedExactStoreAssessment(t, pkg)
+	oldAvailable := packageActionManagerAvailable
+	packageActionManagerAvailable = func(string) bool { return false }
+	defer func() { packageActionManagerAvailable = oldAvailable }()
+
+	result := executor.Execute(context.Background(), pkg)
+	if result.OK || !strings.Contains(result.Stderr, "no exact Store update executor") {
+		t.Fatalf("expected missing exact executor validation failure, got %#v", result)
+	}
+}
+
 func TestStoreExactUpdateCallbacksExposeExecutionPhases(t *testing.T) {
 	executor := testStoreExactExecutor(
 		fakeStoreExactRunner{result: CommandResult{OK: true, Command: "store update 9NCODEX", Stdout: "accepted"}},
@@ -89,6 +248,42 @@ func TestStoreExactUpdateAcceptedButTargetedRescanFails(t *testing.T) {
 	}
 }
 
+func TestStoreExactUpdateNilCatalogUsesProductionProductIDFirstQuery(t *testing.T) {
+	catalogCalls := 0
+	oldDefaultCatalogProvider := defaultStoreExactCatalogProvider
+	defaultStoreExactCatalogProvider = func() StoreExactCatalogProvider {
+		return storeExactCatalogFunc(func(context.Context, StoreExactUpdateRequest) (StoreExactCatalogResult, CommandResult) {
+			catalogCalls++
+			return StoreExactCatalogResult{Authoritative: true, OfferAvailable: false, InstalledHealthy: true}, CommandResult{OK: true, Command: "production default Product ID catalog query", Stdout: "no offer"}
+		})
+	}
+	defer func() { defaultStoreExactCatalogProvider = oldDefaultCatalogProvider }()
+	restoreSID := replaceStoreScanSID("S-1-5-21-exec")
+	defer restoreSID()
+	pkg := testExactStorePackage()
+	preparePublishedExactStoreAssessment(t, pkg)
+	oldAvailable := packageActionManagerAvailable
+	packageActionManagerAvailable = func(manager string) bool { return manager == managerWinget || manager == managerStore }
+	defer func() { packageActionManagerAvailable = oldAvailable }()
+	executor := StoreExactUpdateExecutor{
+		Runner: fakeStoreExactRunner{result: CommandResult{OK: true, Command: "store update 9NCODEX", Stdout: "accepted"}},
+		Inventory: &fakeStoreExactInventory{snapshots: []StoreExactPackageSnapshot{
+			testStoreExactSnapshot("1.0.0", "OpenAI.Codex_1.0.0_x64__abc123", true),
+			testStoreExactSnapshot("1.0.0", "OpenAI.Codex_1.0.0_x64__abc123", true),
+		}},
+		Events:    fakeStoreEvents{},
+		Timeout:   25 * time.Millisecond,
+		PollEvery: time.Millisecond,
+	}
+	result := executor.Execute(context.Background(), pkg)
+	if !result.OK || !strings.Contains(result.Stdout, "exact offer disappeared") {
+		t.Fatalf("expected nil catalog to use production Product ID query for verification, result=%#v calls=%d", result, catalogCalls)
+	}
+	if catalogCalls == 0 || !strings.Contains(result.Command, "production default Product ID catalog query") {
+		t.Fatalf("expected production catalog query provider to run, calls=%d command=%q", catalogCalls, result.Command)
+	}
+}
+
 func TestStoreExactUpdatePollingVerifiesWhenEventIsLost(t *testing.T) {
 	executor := testStoreExactExecutor(
 		fakeStoreExactRunner{result: CommandResult{OK: true, Command: "store update 9NCODEX", Stdout: "accepted"}},
@@ -119,6 +314,34 @@ func TestStoreExactUpdateSameVisibleVersionWithOfferRemoved(t *testing.T) {
 	result := executeStoreExactUpdateForTest(t, executor, testExactStorePackage())
 	if !result.OK || !strings.Contains(result.Stdout, "exact offer disappeared") {
 		t.Fatalf("expected offer removal to verify same-version update, got %#v", result)
+	}
+}
+
+func TestStoreProductIDFirstExactCatalogQueryProviderUsesWingetProductID(t *testing.T) {
+	restore := replacePackageActionManagerAvailable(func(manager string) bool { return manager == managerWinget || manager == managerStore })
+	defer restore()
+	request := testExactStoreRequest()
+	query := storeProductIDFirstExactCatalogQueryProvider{
+		Winget: fakeStoreExactCatalog{result: StoreExactCatalogResult{Authoritative: true, OfferAvailable: false, InstalledHealthy: true}, command: CommandResult{OK: true, Command: "winget list --upgrade-available --id 9NCODEX", Stdout: "no offer"}},
+		Store:  fakeStoreExactCatalog{result: StoreExactCatalogResult{Authoritative: true, OfferAvailable: true, InstalledHealthy: true}, command: CommandResult{OK: true, Command: "store update OpenAI.Codex_abc123", Stdout: "should not run"}},
+	}
+	got, result := query.QueryExact(context.Background(), request)
+	if !got.Authoritative || got.OfferAvailable || result.Command != "winget list --upgrade-available --id 9NCODEX" {
+		t.Fatalf("expected authoritative winget Product ID query without Store CLI fallback: catalog=%#v result=%#v", got, result)
+	}
+}
+
+func TestStoreProductIDFirstExactCatalogQueryProviderFallsBackToStoreCLI(t *testing.T) {
+	restore := replacePackageActionManagerAvailable(func(manager string) bool { return manager == managerWinget || manager == managerStore })
+	defer restore()
+	request := testExactStoreRequest()
+	query := storeProductIDFirstExactCatalogQueryProvider{
+		Winget: fakeStoreExactCatalog{result: StoreExactCatalogResult{Authoritative: false, Diagnostics: "winget not authoritative"}, command: CommandResult{Command: "winget list --upgrade-available --id 9NCODEX", Code: 1, Stderr: "not authoritative"}},
+		Store:  fakeStoreExactCatalog{result: StoreExactCatalogResult{Authoritative: true, OfferAvailable: false, InstalledHealthy: true}, command: CommandResult{OK: true, Command: "store update OpenAI.Codex_abc123", Stdout: "already up to date"}},
+	}
+	got, result := query.QueryExact(context.Background(), request)
+	if !got.Authoritative || got.OfferAvailable || !strings.Contains(result.Command, "Store CLI exact catalog fallback") {
+		t.Fatalf("expected Store CLI exact catalog fallback: catalog=%#v result=%#v", got, result)
 	}
 }
 
@@ -257,6 +480,7 @@ func preparePublishedExactStoreAssessment(t *testing.T, pkg Package) {
 				Identity:   identity,
 				Provider:   StoreProviderIdentity{ID: managerStore, Name: "Store CLI", Backend: backendStoreCLI},
 				ProductID:  pkg.StoreProductID,
+				UpdateID:   pkg.StoreUpdateID,
 				Verified:   true,
 				VerifiedBy: "test",
 				VerifiedAt: now,
@@ -264,6 +488,7 @@ func preparePublishedExactStoreAssessment(t *testing.T, pkg Package) {
 		},
 		ObservedAt:                 now,
 		StoreProductID:             pkg.StoreProductID,
+		UpdateID:                   pkg.StoreUpdateID,
 		ExactActionTargetAvailable: pkg.ExactActionTargetAvailable,
 		Applicability:              pkg.Applicability,
 	}
@@ -398,6 +623,12 @@ func (catalog fakeStoreExactCatalog) QueryExact(context.Context, StoreExactUpdat
 		command = CommandResult{Command: "fake catalog", Code: 1, Stderr: "not implemented"}
 	}
 	return catalog.result, command
+}
+
+type storeExactCatalogFunc func(context.Context, StoreExactUpdateRequest) (StoreExactCatalogResult, CommandResult)
+
+func (fn storeExactCatalogFunc) QueryExact(ctx context.Context, request StoreExactUpdateRequest) (StoreExactCatalogResult, CommandResult) {
+	return fn(ctx, request)
 }
 
 type fakeStoreEvents struct {

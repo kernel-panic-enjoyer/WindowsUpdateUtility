@@ -122,6 +122,20 @@ func TestStoreAssessmentAPISerializesStates(t *testing.T) {
 	}
 }
 
+func TestNewStoreAPIScanGenerationRecordsSystemContext(t *testing.T) {
+	restoreContext := replaceStoreScanSystemContext(storeScanSystemContext{
+		WindowsVersion: "Windows 10 22H2",
+		WindowsBuild:   "10.0.19045.4529",
+		Architecture:   "x64",
+	})
+	defer restoreContext()
+
+	scan := newStoreAPIScanGeneration("S-1-5-21-api-context", time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC))
+	if scan.WindowsVersion != "Windows 10 22H2" || scan.WindowsBuild != "10.0.19045.4529" || scan.Architecture != "x64" {
+		t.Fatalf("API scan context was not recorded: %#v", scan)
+	}
+}
+
 func TestStoreAssessmentUnresolvedIdentityIsUnknown(t *testing.T) {
 	fixedStoreAssessmentClock(t)
 	restoreSID := replaceStoreAssessmentSID("S-1-5-21-test")

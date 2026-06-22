@@ -6,11 +6,18 @@ import (
 )
 
 func storeUpdateCommand(target string, apply bool) []string {
-	args := []string{"update", target}
-	if apply {
-		args = append(args, "--apply", "true")
+	return managerCommand(managerStore, "update", target, "--apply", boolStoreCLIValue(apply))
+}
+
+func storeUpdateLegacyNoApplyCommand(target string) []string {
+	return managerCommand(managerStore, "update", target)
+}
+
+func boolStoreCLIValue(value bool) string {
+	if value {
+		return "true"
 	}
-	return managerCommand(managerStore, args...)
+	return "false"
 }
 
 func storeActionUnavailableResult(action string) CommandResult {
@@ -41,6 +48,9 @@ func runStoreUpdatePackageWithFallbackContext(ctx context.Context, pkg Package) 
 	if packageActionManagerAvailable(managerStore) {
 		result := runNativeStoreUpdate(ctx, pkg)
 		if result.OK || ctx.Err() != nil {
+			return result
+		}
+		if pkg.UpdateState != "" {
 			return result
 		}
 		if !packageActionManagerAvailable(managerWinget) {
@@ -96,12 +106,37 @@ func runStoreSearchUpdateFallback(ctx context.Context, pkg Package, attempted []
 
 func runStoreUpdateCommandWithApplyFallback(ctx context.Context, target string) CommandResult {
 	result := runPackageActionCommand(ctx, managerStore, packageActionTimeout, storeUpdateCommand(target, true)...)
+	result = normalizeStoreUpdateCommandResult(result)
 	if result.OK || ctx.Err() != nil || !shouldRetryStoreUpdateWithoutApply(result) {
 		return result
 	}
 	appLog("Store update command rejected --apply; retrying without that option.")
-	retry := runPackageActionCommand(ctx, managerStore, packageActionTimeout, storeUpdateCommand(target, false)...)
+	retry := runPackageActionCommand(ctx, managerStore, packageActionTimeout, storeUpdateLegacyNoApplyCommand(target)...)
+	retry = normalizeStoreUpdateCommandResult(retry)
 	return mergeCommandResults(result, retry, "store update without apply flag")
+}
+
+func normalizeStoreUpdateCommandResult(result CommandResult) CommandResult {
+	if result.Code == commandCancelledCode || result.Code == 124 {
+		return result
+	}
+	output := normalizedCommandOutput(result)
+	if !storeUpdateOutputIndicatesFailure(output) {
+		return result
+	}
+	result.OK = false
+	if result.Code == 0 {
+		result.Code = 1
+	}
+	return appendCommandStderr(result, "Store CLI reported an update failure despite the process exit code.")
+}
+
+func storeUpdateOutputIndicatesFailure(output string) bool {
+	return outputContainsAny(output, []string{
+		"error:",
+		"could not find installed product metadata",
+		"failed to read input in non-interactive mode",
+	})
 }
 
 func updateTargetAlreadyAttempted(target string, attempted []string) bool {

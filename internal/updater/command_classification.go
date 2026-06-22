@@ -57,12 +57,25 @@ func isPackageManagerMutationCommand(args []string) bool {
 	case "winget":
 		return verb == "install" || verb == "upgrade" || verb == "uninstall" || verb == "import" || verb == "configure"
 	case "store":
+		if (verb == "update" || verb == "updates") && commandHasApplyFalse(args) {
+			return false
+		}
 		return verb == "install" || verb == "update" || verb == "updates" || verb == "uninstall"
 	case "choco":
 		return verb == "install" || verb == "upgrade" || verb == "uninstall" || verb == "pin"
 	default:
 		return false
 	}
+}
+
+func commandHasApplyFalse(args []string) bool {
+	for index, arg := range args {
+		if !strings.EqualFold(arg, "--apply") {
+			continue
+		}
+		return index+1 < len(args) && strings.EqualFold(args[index+1], "false")
+	}
+	return false
 }
 
 func lockMutexContext(ctx context.Context, mu *sync.Mutex) bool {

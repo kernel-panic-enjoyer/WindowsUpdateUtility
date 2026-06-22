@@ -17,11 +17,32 @@ func markStoreInventoryAvailable(managers map[string]ManagerStatus) {
 
 func sortInventoryPackages(packages []Package) {
 	sort.Slice(packages, func(i, j int) bool {
+		leftGroup := inventoryPackageSortGroup(packages[i])
+		rightGroup := inventoryPackageSortGroup(packages[j])
+		if leftGroup != rightGroup {
+			return leftGroup < rightGroup
+		}
 		if strings.EqualFold(packages[i].Name, packages[j].Name) {
 			return packages[i].Manager < packages[j].Manager
 		}
 		return strings.ToLower(packages[i].Name) < strings.ToLower(packages[j].Name)
 	})
+}
+
+func inventoryPackageSortGroup(pkg Package) int {
+	if pkg.Manager != managerStore {
+		return 0
+	}
+	if pkg.UpdateAvailable || pkg.UpdateState == string(StoreUpdateAvailable) {
+		return 0
+	}
+	if pkg.ActionBackend == backendAppXInventory && strings.EqualFold(pkg.UpdateState, string(StoreUpdateUnknown)) {
+		return 2
+	}
+	if pkg.ActionBackend == backendAppXInventory && pkg.UpdateState == "" {
+		return 2
+	}
+	return 1
 }
 
 func inventoryScanSummary(state State, sourceCounts map[string]int) InventoryScanSummary {

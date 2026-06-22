@@ -95,11 +95,48 @@ func TestAssessedStoreUpdateUsesOnlyExactVerifiedTarget(t *testing.T) {
 		Match:                      "Package.Family_abc123",
 		UpdateState:                string(StoreUpdateAvailable),
 		StoreProductID:             "9NVERIFIED",
+		StoreUpdateID:              "Package.Family_abc123",
 		ExactActionTargetAvailable: true,
 	}
 	got := storeUpdateTargetCandidates(pkg)
-	if strings.Join(got, "|") != "9NVERIFIED" {
+	if strings.Join(got, "|") != "9NVERIFIED|Package.Family_abc123" {
 		t.Fatalf("assessed Store package must use only exact verified target, got %#v", got)
+	}
+}
+
+func TestAssessedStoreUpdateDoesNotFallBackToWingetMSStore(t *testing.T) {
+	var commands []string
+	var targets []string
+	restore := replacePackageActionHooks(
+		func(ctx context.Context, timeout time.Duration, args ...string) CommandResult {
+			commands = append(commands, strings.Join(args, " "))
+			targets = append(targets, packageActionTargetFromArgs(args))
+			return CommandResult{Code: 1, Command: strings.Join(args, " "), Stderr: "Could not find installed product metadata"}
+		},
+		func(manager string) bool { return manager == managerStore || manager == managerWinget },
+	)
+	defer restore()
+
+	pkg := Package{
+		Manager:                    managerStore,
+		ID:                         "9NVERIFIED",
+		Name:                       "Display Name Must Not Be Used",
+		UpdateState:                string(StoreUpdateAvailable),
+		StoreProductID:             "9NVERIFIED",
+		StoreUpdateID:              "Package.Family_abc123",
+		ExactActionTargetAvailable: true,
+	}
+	result := runStoreUpdatePackageWithFallbackContext(context.Background(), pkg)
+	if result.OK {
+		t.Fatalf("expected exact Store update target failure, got %#v", result)
+	}
+	for _, command := range commands {
+		if strings.Contains(command, "winget") {
+			t.Fatalf("assessed Store update must not fall back to winget msstore, commands=%#v result=%#v", commands, result)
+		}
+	}
+	if strings.Join(targets, "|") != "9NVERIFIED|Package.Family_abc123" {
+		t.Fatalf("expected only exact Store targets, targets=%#v commands=%#v result=%#v", targets, commands, result)
 	}
 }
 
@@ -688,6 +725,15 @@ func TestPackageCommandBuilders(t *testing.T) {
 			t.Fatalf("winget exact-name command missing %q: %s", expected, wingetExactNameUpgrade)
 		}
 	}
+	wingetStoreCatalogQuery := strings.Join(wingetMSStoreProductIDUpgradeAvailableCommand("9N4D0MSMP0PT"), " ")
+	if !strings.Contains(wingetStoreCatalogQuery, "list --upgrade-available --id 9N4D0MSMP0PT --exact --source msstore") {
+		t.Fatalf("expected read-only exact Product ID list command, got %s", wingetStoreCatalogQuery)
+	}
+	for _, forbidden := range []string{" upgrade ", " install ", "--silent", "--accept-package-agreements"} {
+		if strings.Contains(wingetStoreCatalogQuery, forbidden) {
+			t.Fatalf("Store catalog query command must not contain %q: %s", forbidden, wingetStoreCatalogQuery)
+		}
+	}
 
 	chocoUpgrade := strings.Join(chocoPackageCommand("upgrade", "git"), " ")
 	for _, expected := range []string{"upgrade git", "-y", "--no-progress", "--no-color"} {
@@ -703,8 +749,10 @@ func TestPackageCommandBuilders(t *testing.T) {
 		}
 	}
 	storeUpdateNoApply := strings.Join(storeUpdateCommand("Codex", false), " ")
-	if strings.Contains(storeUpdateNoApply, "--apply") {
-		t.Fatalf("store update command without apply should not include apply flag: %s", storeUpdateNoApply)
+	for _, expected := range []string{"store", "update Codex", "--apply false"} {
+		if !strings.Contains(storeUpdateNoApply, expected) {
+			t.Fatalf("store update command without apply missing %q: %s", expected, storeUpdateNoApply)
+		}
 	}
 }
 

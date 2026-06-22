@@ -27,6 +27,7 @@ type StoreUpdateAssessmentCacheEntry struct {
 	InstalledVersion           string `json:"installed_version,omitempty"`
 	OfferedVersion             string `json:"offered_version,omitempty"`
 	StoreProductID             string `json:"store_product_id,omitempty"`
+	StoreUpdateID              string `json:"store_update_id,omitempty"`
 	Applicability              string `json:"applicability,omitempty"`
 	ExactActionTargetAvailable bool   `json:"exact_action_target_available"`
 }

@@ -1,7 +1,9 @@
 # Windows Updater WebUI
 
-A single-binary Go Windows updater with a browser UI for winget, Chocolatey,
-and Microsoft Store apps.
+A single distributed Go Windows updater with a browser UI for winget,
+Chocolatey, and Microsoft Store apps. The executable embeds the current-user
+Store inventory broker and extracts it under the application directory at
+runtime.
 
 ## Features
 
@@ -9,8 +11,13 @@ and Microsoft Store apps.
 - Runs the WebUI in the interactive user session and uses elevation only for actions that require it.
 - Detects winget, Chocolatey, and the native Store CLI.
 - Lists installed winget, Chocolatey, and current-user Store packaged apps in one table.
-- Uses the new Microsoft Store assessment model by default. Store status is `Unknown` unless the app has a fresh, complete, exact, current-user scan.
-- Detects available updates and enables update buttons only for packages with updates and exact action targets.
+- Uses the exact Microsoft Store assessment model by default. Store status is
+  `Unknown` unless the app has a fresh, complete, exact, current-user scan; it
+  must not guess Store update state from display names or fuzzy matches.
+- Detects available updates and enables update buttons only for packages with
+  updates and exact action targets. Store execution attempts verified Product
+  ID first through WinGet msstore when available, with verified Store CLI exact
+  targets used only as fallback.
 - Searches for installable packages and filters out truncated winget IDs.
 - Installs packages from winget, Chocolatey, or Store after an explicit button click.
 - Updates individual packages, selected packages, or all packages.
@@ -23,27 +30,41 @@ and Microsoft Store apps.
 ## Project Layout
 
 - `main.go`: thin executable entrypoint.
+- `app.manifest` / `app.syso`: Windows icon and explicit `asInvoker` manifest so the WebUI starts without startup elevation.
 - `internal/updater`: application backend, WebUI, package-manager integrations, tests, and embedded assets.
 - `internal/updater/assets`: app icon and favicon source assets.
-- `tools/icongen`: icon generation utility.
+- `internal/updater/assets/broker`: embedded current-user Store inventory broker executable.
+- `dev/scripts`: developer build, environment, and distribution smoke helpers.
+- `dev/tools/icongen`: icon generation utility.
+- `dev/tools/spikes`: disposable Store/API validation probes, excluded from the production binary.
 - `dist`: local build output.
 
 ## Build
 
 Use Go 1.22+ on Windows:
 
-```cmd
-set GOCACHE=%CD%\.gocache
-go test ./...
-go build -ldflags="-H=windowsgui" -o dist\WindowsUpdaterWebUI.exe .
+```powershell
+powershell -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1
 ```
 
-If your Windows folder policy blocks writing `.exe` files into this directory,
-build to another folder:
+`dev\scripts\Build-Workspace.ps1` sets Go, .NET, NuGet, process temp, updater temp,
+and updater binary paths to repo-local folders before running tests, vet, the
+WebUI JavaScript syntax check, and the Windows GUI build.
 
-```cmd
-go build -ldflags="-H=windowsgui" -o "%TEMP%\WindowsUpdaterWebUI.exe" .
-```
+The checked-in broker binary is embedded by `go build`; no manual C# sidecar
+copy is needed for the normal build. If `native/store-inventory-broker/Program.cs`
+changes, rebuild `internal/updater/assets/broker/WindowsUpdater.StoreInventoryBroker.exe`
+from that source before running the Go build.
+
+Keep generated executables and temporary build output inside the repository
+when local antivirus policy excludes this folder from scanning.
+`dev\scripts\Set-WorkspaceBinaryPaths.ps1` points `GOBIN`, `GOCACHE`,
+`GOMODCACHE`, `GOPATH`, `GOTMPDIR`, `TEMP`, `TMP`, `DOTNET_CLI_HOME`, and
+NuGet cache/scratch paths at workspace-local folders. The app extracts the
+embedded Store broker to `bin\WindowsUpdater.StoreInventoryBroker.exe` beside
+the running executable unless `UPDATER_BINARY_DIR` points to another explicit
+binary directory. Runtime scratch files such as winget JSON exports use
+`UPDATER_TEMP_DIR`, or `.tmp` under the application directory when unset.
 
 ## Run
 
@@ -55,9 +76,16 @@ runtime, VBS launcher, or C# launcher is required.
 
 For development without UAC:
 
-```cmd
-set GOCACHE=%CD%\.gocache
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+. .\dev\scripts\Set-WorkspaceBinaryPaths.ps1 | Out-Null
 go run . --no-elevate
+```
+
+For automated distribution smoke tests, use:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\dev\scripts\Smoke-Distribution.ps1 -Exe .\dist\WindowsUpdaterWebUI.exe
 ```
 
 ## Notes

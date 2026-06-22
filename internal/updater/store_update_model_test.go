@@ -58,7 +58,20 @@ func TestReconcileStoreUpdate(t *testing.T) {
 			wantState: StoreUpdateUnknown,
 		},
 		{
-			name: "incomplete scan is unknown even with positive evidence",
+			name: "required provider failure does not erase fresh exact positive",
+			input: StoreReconciliationInput{
+				Identity:          identity,
+				Scan:              scan,
+				RequiredProviders: []StoreProviderIdentity{storeProvider},
+				Observations: []StoreProviderObservation{
+					storeObservation(identity, scan, storeProvider, StoreProviderFailed, StoreObservationProviderFailure, "", "", nil),
+					storeObservation(identity, scan, wingetProvider, StoreProviderHealthy, StoreObservationPositiveUpdateOffer, "1.0.0", "1.1.0", exactStoreTarget(identity, wingetProvider)),
+				},
+			},
+			wantState: StoreUpdateAvailable,
+		},
+		{
+			name: "incomplete scan keeps fresh exact positive evidence available",
 			input: StoreReconciliationInput{
 				Identity: identity,
 				Scan: StoreScanGeneration{
@@ -70,6 +83,23 @@ func TestReconcileStoreUpdate(t *testing.T) {
 				RequiredProviders: []StoreProviderIdentity{storeProvider},
 				Observations: []StoreProviderObservation{
 					storeObservation(identity, scan, storeProvider, StoreProviderHealthy, StoreObservationPositiveUpdateOffer, "1.0.0", "1.1.0", target),
+				},
+			},
+			wantState: StoreUpdateAvailable,
+		},
+		{
+			name: "incomplete scan cannot become current from negative evidence",
+			input: StoreReconciliationInput{
+				Identity: identity,
+				Scan: StoreScanGeneration{
+					ScanID:           "scan-1",
+					UserSID:          identity.UserSID,
+					StartedAt:        time.Date(2026, 6, 21, 10, 0, 0, 0, time.UTC),
+					CompletionStatus: StoreScanIncomplete,
+				},
+				RequiredProviders: []StoreProviderIdentity{storeProvider},
+				Observations: []StoreProviderObservation{
+					storeObservation(identity, scan, storeProvider, StoreProviderHealthy, StoreObservationAuthoritativeNegative, "1.0.0", "", nil),
 				},
 			},
 			wantState: StoreUpdateUnknown,

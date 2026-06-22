@@ -41,11 +41,15 @@ type StoreScanGeneration struct {
 }
 
 func (scan StoreScanGeneration) CompleteFor(identity StoreInstalledIdentity) bool {
+	return scan.UsableFor(identity) &&
+		scan.CompletionStatus == StoreScanCompleted &&
+		!scan.CompletedAt.IsZero()
+}
+
+func (scan StoreScanGeneration) UsableFor(identity StoreInstalledIdentity) bool {
 	return scan.ScanID != "" &&
 		scan.UserSID == identity.UserSID &&
-		scan.CompletionStatus == StoreScanCompleted &&
-		!scan.StartedAt.IsZero() &&
-		!scan.CompletedAt.IsZero()
+		!scan.StartedAt.IsZero()
 }
 
 type StoreProviderIdentity struct {
@@ -192,10 +196,11 @@ func ReconcileStoreUpdate(input StoreReconciliationInput) StoreUpdateAssessment 
 		assessment.Reason = "scan user does not match installed identity"
 		return assessment
 	}
-	if !input.Scan.CompleteFor(input.Identity) {
-		assessment.Reason = "scan generation is incomplete"
+	if !input.Scan.UsableFor(input.Identity) {
+		assessment.Reason = "scan generation context is incomplete"
 		return assessment
 	}
+	scanComplete := input.Scan.CompleteFor(input.Identity)
 
 	required := requiredProviderSet(input.RequiredProviders)
 	requiredSeen := map[string]bool{}
@@ -254,16 +259,6 @@ func ReconcileStoreUpdate(input StoreReconciliationInput) StoreUpdateAssessment 
 		}
 	}
 
-	for provider := range required {
-		if !requiredSeen[provider] {
-			assessment.Reason = "required provider did not return evidence: " + provider
-			return assessment
-		}
-	}
-	if requiredBlocked != "" {
-		assessment.Reason = "required provider did not complete successfully: " + requiredBlocked
-		return assessment
-	}
 	if len(assessment.Evidence) == 0 {
 		assessment.Reason = "no evidence for identity in scan generation"
 		return assessment
@@ -278,14 +273,28 @@ func ReconcileStoreUpdate(input StoreReconciliationInput) StoreUpdateAssessment 
 	if len(positivesWithoutTarget) > 0 {
 		return storeAssessmentFromObservation(StoreUpdateUnknown, input, positivesWithoutTarget[0], "positive update evidence has no exact verified target")
 	}
+	for provider := range required {
+		if !requiredSeen[provider] {
+			assessment.Reason = "required provider did not return evidence: " + provider
+			return assessment
+		}
+	}
+	if requiredBlocked != "" {
+		assessment.Reason = "required provider incomplete or failed: " + requiredBlocked
+		return assessment
+	}
 	if blockedProvider != "" {
-		return storeAssessmentFromObservation(StoreUpdateUnknown, input, blockedObservation, "provider did not complete successfully: "+blockedProvider)
+		return storeAssessmentFromObservation(StoreUpdateUnknown, input, blockedObservation, "provider incomplete or failed: "+blockedProvider)
 	}
 	if len(pending) > 0 {
 		return storeAssessmentFromObservation(StoreUpdatePending, input, pending[0], "update is pending verification")
 	}
 	if len(inapplicable) > 0 {
 		return storeAssessmentFromObservation(StoreUpdateInapplicable, input, inapplicable[0], "newer catalog version has no applicable installer")
+	}
+	if !scanComplete {
+		assessment.Reason = "scan generation is incomplete"
+		return assessment
 	}
 	if allRequiredProvidersNegative(required, negatives) {
 		return storeAssessmentFromObservation(StoreUpdateCurrent, input, negatives[0], "all required providers returned authoritative negatives")

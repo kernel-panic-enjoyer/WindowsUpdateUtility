@@ -45,6 +45,7 @@ func TestStoreDiagnosticsExportSanitizesUserSIDAndIncludesEvidence(t *testing.T)
 		}}},
 		ProviderRuns: []StoreCatalogProviderRun{{
 			Provider:     provider,
+			Version:      "v1.2.3",
 			StartedAt:    now,
 			CompletedAt:  now.Add(time.Second),
 			Health:       StoreProviderHealthy,
@@ -87,5 +88,8 @@ func TestStoreDiagnosticsExportSanitizesUserSIDAndIncludesEvidence(t *testing.T)
 	}
 	if export.UserScopeHash == "" {
 		t.Fatalf("diagnostics export should include a user scope hash: %#v", export)
+	}
+	if len(export.Providers) != 1 || export.Providers[0].Version != "v1.2.3" {
+		t.Fatalf("diagnostics export missing provider version: %#v", export.Providers)
 	}
 }

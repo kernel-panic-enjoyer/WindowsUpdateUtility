@@ -142,6 +142,7 @@ func applyPublishedStoreAssessmentToPackage(pkg Package, assessment StorePublish
 	pkg.ExactActionTargetAvailable = assessment.ExactActionTargetAvailable
 	pkg.InstalledPackageFamilyName = assessment.Identity.PackageFamilyName
 	pkg.StoreProductID = assessment.StoreProductID
+	pkg.StoreUpdateID = assessment.UpdateID
 	pkg.InstalledVersion = firstNonEmpty(assessment.InstalledVersion, pkg.Version)
 	pkg.OfferedVersion = assessment.AvailableVersion
 	pkg.Applicability = assessment.Applicability
@@ -153,7 +154,7 @@ func applyPublishedStoreAssessmentToPackage(pkg Package, assessment StorePublish
 	} else if pkg.UpdateAvailable {
 		pkg.UpdateSupported = true
 	}
-	if assessment.StoreProductID != "" && assessment.ExactActionTargetAvailable {
+	if (assessment.StoreProductID != "" || assessment.UpdateID != "") && assessment.ExactActionTargetAvailable {
 		pkg.ActionBackend = backendStoreCLI
 	}
 	pkg.Key = storePackagePublicKey(pkg)
