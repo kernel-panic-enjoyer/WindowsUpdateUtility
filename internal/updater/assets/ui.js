@@ -46,6 +46,10 @@
   var toastSeq = 0;
   var toasts = [];
   var toastAnimationFrame = 0;
+  var spinnerAnimationFrame = 0;
+  var spinnerPeriodMs = 900;
+  var spinnerObserver = null;
+  var reducedMotionQuery = window.matchMedia ? window.matchMedia("(prefers-reduced-motion: reduce)") : null;
   function $(id){ return document.getElementById(id); }
   function api(path, params){
     var url = new URL(path, window.location.origin);
@@ -60,6 +64,42 @@
   function attr(value){ return html(value); }
   function spinner(){
     return '<span class="spinner" aria-hidden="true"></span>';
+  }
+  function spinnerMotionReduced(){
+    return !!(reducedMotionQuery && reducedMotionQuery.matches);
+  }
+  function hasActiveSpinners(){
+    return !!document.querySelector(".spinner");
+  }
+  function updateSpinnerPhase(){
+    if(spinnerMotionReduced()){
+      document.documentElement.style.setProperty("--spinner-angle", "0deg");
+      return;
+    }
+    var angle = ((Date.now() % spinnerPeriodMs) / spinnerPeriodMs) * 360;
+    document.documentElement.style.setProperty("--spinner-angle", angle.toFixed(2) + "deg");
+  }
+  function startSpinnerLoop(){
+    if(spinnerAnimationFrame || document.hidden || spinnerMotionReduced() || !hasActiveSpinners()){ return; }
+    function tick(){
+      spinnerAnimationFrame = 0;
+      updateSpinnerPhase();
+      if(!document.hidden && hasActiveSpinners()){
+        spinnerAnimationFrame = window.requestAnimationFrame(tick);
+      }
+    }
+    spinnerAnimationFrame = window.requestAnimationFrame(tick);
+  }
+  function stopSpinnerLoop(){
+    if(spinnerAnimationFrame){
+      window.cancelAnimationFrame(spinnerAnimationFrame);
+      spinnerAnimationFrame = 0;
+    }
+  }
+  function observeSpinnerPresence(){
+    if(spinnerObserver || !window.MutationObserver || !document.body){ return; }
+    spinnerObserver = new MutationObserver(function(){ startSpinnerLoop(); });
+    spinnerObserver.observe(document.body, {childList:true, subtree:true});
   }
   function loadingText(message){
     return '<span class="loading-text">' + spinner() + '<span class="loading-message">' + html(message) + '</span></span>';
@@ -796,6 +836,21 @@
     var health = storeScanHealth();
     return !health.active || health.healthy;
   }
+  function openStoreStatusModal(){
+    var modal = $("store-status-modal");
+    if(!modal){ return; }
+    renderStoreScanHealth();
+    modal.classList.remove("hidden");
+    document.body.classList.add("modal-open");
+    var closeButton = $("store-status-close");
+    if(closeButton){ closeButton.focus(); }
+  }
+  function closeStoreStatusModal(){
+    var modal = $("store-status-modal");
+    if(!modal){ return; }
+    modal.classList.add("hidden");
+    document.body.classList.remove("modal-open");
+  }
   function renderStoreScanHealth(){
     var target = $("store-scan-health-body");
     var summary = $("store-scan-health-summary");
@@ -898,10 +953,11 @@
         if(!manager.available && manager.action_backend === "winget-msstore-fallback"){
           details.push('<span class="muted">Store installs and updates can fall back to winget for compatible Store IDs.</span>');
         }
-        return details.join("");
+        details.push('<button class="ghost manager-details-button" type="button" data-store-status-open>Details</button>');
+        return '<div class="manager-extra">' + details.join("") + '</div>';
       }
       if(manager.inventory_available){ details.push('<span class="badge ok">Inventory available</span>'); }
-      return details.join("");
+      return details.length ? '<div class="manager-extra">' + details.join("") + '</div>' : "";
     }
     var markup = names.map(function(name){
       var manager = managers[name] || {};
@@ -2023,6 +2079,16 @@
 
 
   document.addEventListener("click", function(event){
+    var openStoreStatus = event.target.closest("[data-store-status-open]");
+    if(openStoreStatus){
+      openStoreStatusModal();
+      return;
+    }
+    var closeStoreStatus = event.target.closest("[data-store-status-close]");
+    if(closeStoreStatus){
+      closeStoreStatusModal();
+      return;
+    }
     var toastClose = event.target.closest(".toast-close");
     if(toastClose){
       var toast = toastClose.closest(".toast");
@@ -2040,6 +2106,11 @@
     }
   });
   document.addEventListener("keydown", function(event){
+    var modal = $("store-status-modal");
+    if(event.key === "Escape" && modal && !modal.classList.contains("hidden")){
+      closeStoreStatusModal();
+      return;
+    }
     var tab = event.target.closest(".log-tab");
     if(!tab){ return; }
     switch(event.key){
@@ -2141,8 +2212,10 @@
   });
   document.addEventListener("visibilitychange", function(){
     if(document.hidden){
+      stopSpinnerLoop();
       pauseToastTimers();
     }else{
+      startSpinnerLoop();
       resumeToastTimers();
       if(!eventStream){ startEventStream(); }
       if(latestStatus && latestStatus.loading){ loadStatus(false); }
@@ -2261,6 +2334,21 @@
 
 
   setTheme(currentTheme());
+  updateSpinnerPhase();
+  observeSpinnerPresence();
+  startSpinnerLoop();
+  if(reducedMotionQuery){
+    var onReducedMotionChange = function(){
+      stopSpinnerLoop();
+      updateSpinnerPhase();
+      startSpinnerLoop();
+    };
+    if(reducedMotionQuery.addEventListener){
+      reducedMotionQuery.addEventListener("change", onReducedMotionChange);
+    }else if(reducedMotionQuery.addListener){
+      reducedMotionQuery.addListener(onReducedMotionChange);
+    }
+  }
   loadStatus(false);
   startEventStream();
   loadPackages(false).then(function(){ checkActiveUpdateJob(); });

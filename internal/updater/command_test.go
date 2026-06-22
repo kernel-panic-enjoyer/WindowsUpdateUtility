@@ -131,7 +131,12 @@ func TestPackageManagerMutationCommandDetection(t *testing.T) {
 		{[]string{"store", "install", "OpenAI.Codex"}, true},
 		{[]string{"cmd.exe", "/d", "/c", "store", "updates"}, true},
 		{[]string{"winget", "list"}, false},
+		{[]string{"winget", "upgrade", "--accept-source-agreements", "--disable-interactivity"}, false},
+		{[]string{"winget", "upgrade", "--source", "msstore", "--accept-source-agreements", "--disable-interactivity"}, false},
 		{[]string{"winget", "upgrade", "--all"}, true},
+		{[]string{"winget", "upgrade", "--id", "Proton.ProtonMail", "--exact"}, true},
+		{[]string{"winget", "upgrade", "--name", "Proton Mail", "--exact"}, true},
+		{[]string{"winget", "upgrade", "Proton.ProtonMail"}, true},
 		{[]string{"cmd.exe", "/d", "/c", "winget", "search", "git"}, false},
 		{[]string{"choco", "outdated"}, false},
 		{[]string{"choco", "upgrade", "all"}, true},
@@ -140,6 +145,15 @@ func TestPackageManagerMutationCommandDetection(t *testing.T) {
 		if got := isPackageManagerMutationCommand(tc.args); got != tc.want {
 			t.Fatalf("isPackageManagerMutationCommand(%#v) = %t, want %t", tc.args, got, tc.want)
 		}
+	}
+}
+
+func TestWingetCommandLockOnlyForMutations(t *testing.T) {
+	if shouldAcquireWingetCommandLock([]string{"winget", "upgrade", "--accept-source-agreements", "--disable-interactivity"}) {
+		t.Fatal("read-only winget upgrade inventory checks must not block user-triggered update mutations")
+	}
+	if !shouldAcquireWingetCommandLock([]string{"winget", "upgrade", "--id", "Proton.ProtonMail", "--exact"}) {
+		t.Fatal("targeted winget upgrade must still use the winget mutation lock")
 	}
 }
 
@@ -231,6 +245,74 @@ func TestLogEntryCategoryMetadata(t *testing.T) {
 			for _, category := range tc.want {
 				if !logEntryInCategory(entry, category) {
 					t.Fatalf("expected %q in category %q: %#v", tc.name, category, tc.categories)
+				}
+			}
+		})
+	}
+}
+
+func TestLogCategoryMetadataRecognizesResolvedExecutablePaths(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "resolved winget",
+			args: []string{`C:\Users\User\AppData\Local\Microsoft\WindowsApps\winget.exe`, "search", "visual studio"},
+			want: []string{logCategoryWinget, logCategorySearches},
+		},
+		{
+			name: "resolved choco",
+			args: []string{`C:\ProgramData\chocolatey\bin\choco.exe`, "upgrade", "git"},
+			want: []string{logCategoryChocolatey, logCategoryUpdates},
+		},
+		{
+			name: "cmd winget wrapper",
+			args: []string{"cmd.exe", "/d", "/c", "winget", "upgrade", "--id", "Git.Git"},
+			want: []string{logCategoryWinget, logCategoryUpdates},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			entry := LogEntry{Stream: "command", Categories: logCategoriesForCommand(tc.args)}
+			for _, category := range tc.want {
+				if !logEntryInCategory(entry, category) {
+					t.Fatalf("expected %q in category %q: %#v", tc.name, category, entry.Categories)
+				}
+			}
+		})
+	}
+}
+
+func TestLogCategoryMetadataRecognizesWorkerCommandLines(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+		want    []string
+	}{
+		{
+			name:    "worker winget path",
+			command: `C:\Users\User\AppData\Local\Microsoft\WindowsApps\winget.exe search gh`,
+			want:    []string{logCategoryWinget, logCategorySearches},
+		},
+		{
+			name:    "worker choco path",
+			command: `C:\ProgramData\chocolatey\bin\choco.exe upgrade git`,
+			want:    []string{logCategoryChocolatey, logCategoryUpdates},
+		},
+		{
+			name:    "worker choco path with spaces",
+			command: `C:\Program Files\Chocolatey\bin\choco.exe upgrade git`,
+			want:    []string{logCategoryChocolatey, logCategoryUpdates},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			entry := LogEntry{Stream: "command", Categories: logCategoriesForCommandLine(tc.command)}
+			for _, category := range tc.want {
+				if !logEntryInCategory(entry, category) {
+					t.Fatalf("expected %q in category %q: %#v", tc.name, category, entry.Categories)
 				}
 			}
 		})
@@ -374,5 +456,32 @@ func TestRunCommandContextTimeoutWhileWaitingForMutationLock(t *testing.T) {
 	}
 	if !strings.Contains(result.Command, "choco.exe upgrade example-package") {
 		t.Fatalf("unexpected command text: %q", result.Command)
+	}
+}
+
+func TestRunCommandContextLogsWhileWaitingForMutationLock(t *testing.T) {
+	oldLogs := sessionLogs
+	sessionLogs = &LogBuffer{}
+	defer func() { sessionLogs = oldLogs }()
+
+	packageManagerMutationMu.Lock()
+	defer packageManagerMutationMu.Unlock()
+
+	result := runCommandContext(context.Background(), 50*time.Millisecond, "choco.exe", "upgrade", "example-package")
+	if result.Code != 124 {
+		t.Fatalf("expected timeout while waiting for mutation lock, got %#v", result)
+	}
+	entries := sessionLogs.Since(0)
+	var sawCommand, sawWait bool
+	for _, entry := range entries {
+		if entry.Stream == "command" && strings.Contains(entry.Message, "choco.exe upgrade example-package") {
+			sawCommand = true
+		}
+		if entry.Stream == "app" && strings.Contains(entry.Message, "Waiting for another package-manager mutation") {
+			sawWait = true
+		}
+	}
+	if !sawCommand || !sawWait {
+		t.Fatalf("expected command and lock-wait logs, sawCommand=%t sawWait=%t entries=%#v", sawCommand, sawWait, entries)
 	}
 }

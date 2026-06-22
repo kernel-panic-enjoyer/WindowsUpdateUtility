@@ -1,12 +1,16 @@
 package updater
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSearchQueryVariantsNormalizePunctuation(t *testing.T) {
 	cases := map[string][]string{
-		"github-cli": {"github-cli", "github cli"},
-		"GitHub.cli": {"GitHub.cli", "GitHub cli"},
-		"gh":         {"gh"},
+		"github-cli":  {"github-cli", "github cli", "githubcli"},
+		"build tools": {"build tools", "buildtools"},
+		"GitHub.cli":  {"GitHub.cli", "GitHub cli", "GitHubcli"},
+		"gh":          {"gh"},
 	}
 	for query, want := range cases {
 		got := searchQueryVariants(query)
@@ -18,6 +22,22 @@ func TestSearchQueryVariantsNormalizePunctuation(t *testing.T) {
 				t.Fatalf("searchQueryVariants(%q) = %#v, want %#v", query, got, want)
 			}
 		}
+	}
+}
+
+func TestCombineWingetSearchResultsKeepsVariantOutput(t *testing.T) {
+	result := combineWingetSearchResults([]CommandResult{
+		{OK: true, Command: "winget search build tools", Stdout: "Microsoft Build Tools 2015"},
+		{OK: true, Command: "winget search buildtools", Stdout: "Visual Studio BuildTools 2022"},
+	})
+	if !result.OK || result.Code != 0 {
+		t.Fatalf("combined successful variant searches should be successful: %#v", result)
+	}
+	if !strings.Contains(result.Command, "build tools") || !strings.Contains(result.Command, "buildtools") {
+		t.Fatalf("combined command should preserve variant commands: %#v", result)
+	}
+	if !strings.Contains(result.Stdout, "Microsoft Build Tools 2015") || !strings.Contains(result.Stdout, "Visual Studio BuildTools 2022") {
+		t.Fatalf("combined stdout should preserve variant output: %#v", result)
 	}
 }
 

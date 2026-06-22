@@ -110,6 +110,107 @@ Failed to read input in non-interactive mode.`,
 	}
 }
 
+func TestParseStoreCLIUpdateCheckResultCommandFailures(t *testing.T) {
+	tests := []struct {
+		name    string
+		output  string
+		result  CommandResult
+		ctxErr  bool
+		want    StoreObservationKind
+		wantErr bool
+	}{
+		{
+			name:   "positive plus allowed prompt failure",
+			output: "Update available for 'VP9-Videoerweiterungen'\nFailed to read input in non-interactive mode.",
+			result: CommandResult{OK: true},
+			want:   StoreObservationPositiveUpdateOffer,
+		},
+		{
+			name:    "positive plus access denied",
+			output:  "Update available for 'VP9-Videoerweiterungen'\nError: access denied",
+			result:  CommandResult{OK: true},
+			want:    StoreObservationIncompleteResult,
+			wantErr: true,
+		},
+		{
+			name:    "positive plus generic error",
+			output:  "Update available for 'VP9-Videoerweiterungen'\nError: another Store product could not be inspected",
+			result:  CommandResult{OK: true},
+			want:    StoreObservationIncompleteResult,
+			wantErr: true,
+		},
+		{
+			name:    "positive plus timeout code",
+			output:  "Update available for 'VP9-Videoerweiterungen'",
+			result:  CommandResult{Code: 124},
+			want:    StoreObservationIncompleteResult,
+			wantErr: true,
+		},
+		{
+			name:    "positive plus cancellation code",
+			output:  "Update available for 'VP9-Videoerweiterungen'",
+			result:  CommandResult{Code: commandCancelledCode},
+			want:    StoreObservationIncompleteResult,
+			wantErr: true,
+		},
+		{
+			name:    "positive before context deadline",
+			output:  "Update available for 'VP9-Videoerweiterungen'",
+			result:  CommandResult{OK: true},
+			ctxErr:  true,
+			want:    StoreObservationIncompleteResult,
+			wantErr: true,
+		},
+		{
+			name:    "negative plus prompt failure",
+			output:  "No updates found.\nFailed to read input in non-interactive mode.",
+			result:  CommandResult{OK: true},
+			want:    StoreObservationIncompleteResult,
+			wantErr: true,
+		},
+		{
+			name:    "inapplicable plus fatal failure",
+			output:  "A newer version exists, but no applicable installer is available.\nError: catalog unavailable",
+			result:  CommandResult{OK: true},
+			want:    StoreObservationIncompleteResult,
+			wantErr: true,
+		},
+		{
+			name:   "clean negative",
+			output: "'VP9-Videoerweiterungen' is already up to date",
+			result: CommandResult{OK: true},
+			want:   StoreObservationAuthoritativeNegative,
+		},
+		{
+			name:   "clean inapplicable",
+			output: "A newer version exists, but no applicable installer is available.",
+			result: CommandResult{OK: true},
+			want:   StoreObservationNewerCatalogNoApplicableInstaller,
+		},
+		{
+			name:    "nonzero unrecognized",
+			output:  "Checking updates...",
+			result:  CommandResult{Code: 1, Stderr: "exit status 1"},
+			want:    StoreObservationIncompleteResult,
+			wantErr: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			if tc.ctxErr {
+				cancelled, cancel := context.WithCancel(ctx)
+				cancel()
+				ctx = cancelled
+			}
+			got, err := parseStoreCLIUpdateCheckResult(ctx, tc.output, tc.result)
+			if got != tc.want || (err != nil) != tc.wantErr {
+				t.Fatalf("got=%s err=%v, want=%s err=%v", got, err, tc.want, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestParseStoreCLIUpdatesOutput(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -183,6 +284,110 @@ Available Version : 1.2.20.0`,
 	}
 }
 
+func TestParseStoreCLIUpdatesOutputFieldOrderAndMalformedRecords(t *testing.T) {
+	tests := []struct {
+		name      string
+		output    string
+		wantIDs   []string
+		wantPFNs  []string
+		wantErr   bool
+		wantClean bool
+	}{
+		{
+			name:     "product id then pfn",
+			output:   "Product ID : 9N4D0MSMP0PT\nPFN : Microsoft.VP9VideoExtensions_8wekyb3d8bbwe\nAvailable Version : 1.2.20.0",
+			wantIDs:  []string{"9N4D0MSMP0PT"},
+			wantPFNs: []string{"Microsoft.VP9VideoExtensions_8wekyb3d8bbwe"},
+		},
+		{
+			name:     "pfn then product id",
+			output:   "PFN : Microsoft.VP9VideoExtensions_8wekyb3d8bbwe\nProduct ID : 9N4D0MSMP0PT\nAvailable Version : 1.2.20.0",
+			wantIDs:  []string{"9N4D0MSMP0PT"},
+			wantPFNs: []string{"Microsoft.VP9VideoExtensions_8wekyb3d8bbwe"},
+		},
+		{
+			name:     "version before identity",
+			output:   "Available Version : 1.2.20.0\nPFN : Microsoft.VP9VideoExtensions_8wekyb3d8bbwe\nProduct ID : 9N4D0MSMP0PT",
+			wantIDs:  []string{"9N4D0MSMP0PT"},
+			wantPFNs: []string{"Microsoft.VP9VideoExtensions_8wekyb3d8bbwe"},
+		},
+		{
+			name: "adjacent exact records",
+			output: `Product ID : 9N4D0MSMP0PT
+PFN : Microsoft.VP9VideoExtensions_8wekyb3d8bbwe
+Product ID : 9NCALC
+PFN : Microsoft.WindowsCalculator_8wekyb3d8bbwe`,
+			wantIDs:  []string{"9N4D0MSMP0PT", "9NCALC"},
+			wantPFNs: []string{"Microsoft.VP9VideoExtensions_8wekyb3d8bbwe", "Microsoft.WindowsCalculator_8wekyb3d8bbwe"},
+		},
+		{
+			name: "duplicate identical identity fields",
+			output: `Product ID : 9N4D0MSMP0PT
+Product ID : 9N4D0MSMP0PT
+PFN : Microsoft.VP9VideoExtensions_8wekyb3d8bbwe
+PFN : Microsoft.VP9VideoExtensions_8wekyb3d8bbwe`,
+			wantIDs:  []string{"9N4D0MSMP0PT"},
+			wantPFNs: []string{"Microsoft.VP9VideoExtensions_8wekyb3d8bbwe"},
+		},
+		{
+			name: "duplicate conflicting pfn",
+			output: `Product ID : 9N4D0MSMP0PT
+PFN : Microsoft.VP9VideoExtensions_8wekyb3d8bbwe
+PFN : Other.App_8wekyb3d8bbwe`,
+			wantErr: true,
+		},
+		{
+			name: "duplicate conflicting product id",
+			output: `Product ID : 9N4D0MSMP0PT
+Product ID : 9NWRONG
+PFN : Microsoft.VP9VideoExtensions_8wekyb3d8bbwe`,
+			wantErr: true,
+		},
+		{
+			name: "partial first then valid second",
+			output: `Product ID : 9NPARTIAL
+
+Product ID : 9N4D0MSMP0PT
+PFN : Microsoft.VP9VideoExtensions_8wekyb3d8bbwe`,
+			wantIDs:  []string{"9N4D0MSMP0PT"},
+			wantPFNs: []string{"Microsoft.VP9VideoExtensions_8wekyb3d8bbwe"},
+			wantErr:  true,
+		},
+		{
+			name: "valid first then malformed second",
+			output: `Product ID : 9N4D0MSMP0PT
+PFN : Microsoft.VP9VideoExtensions_8wekyb3d8bbwe
+
+Product ID : 9NMALFORMED`,
+			wantIDs:  []string{"9N4D0MSMP0PT"},
+			wantPFNs: []string{"Microsoft.VP9VideoExtensions_8wekyb3d8bbwe"},
+			wantErr:  true,
+		},
+		{
+			name:     "mixed line endings and noise",
+			output:   "Checking for updates...\r\n\r\nUpdate available\r\nPFN : Microsoft.VP9VideoExtensions_8wekyb3d8bbwe\r\nProduct ID : 9N4D0MSMP0PT\r\n",
+			wantIDs:  []string{"9N4D0MSMP0PT"},
+			wantPFNs: []string{"Microsoft.VP9VideoExtensions_8wekyb3d8bbwe"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseStoreCLIUpdatesOutput(tc.output)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err=%v, wantErr=%v result=%#v", err, tc.wantErr, got)
+			}
+			if len(got.Offers) != len(tc.wantIDs) {
+				t.Fatalf("offers=%#v, want IDs %#v", got.Offers, tc.wantIDs)
+			}
+			for i := range tc.wantIDs {
+				if got.Offers[i].ProductID != tc.wantIDs[i] || got.Offers[i].PFN != tc.wantPFNs[i] {
+					t.Fatalf("offer[%d]=%#v, want id=%s pfn=%s", i, got.Offers[i], tc.wantIDs[i], tc.wantPFNs[i])
+				}
+			}
+		})
+	}
+}
+
 func TestParseStoreCLIUpdatesOutputInapplicableExactOffer(t *testing.T) {
 	got, err := parseStoreCLIUpdatesOutput(`Update available
 Product ID : 9N4D0MSMP0PT
@@ -194,6 +399,150 @@ Applicability : No applicable installer`)
 	}
 	if len(got.Offers) != 1 || !got.Offers[0].Inapplicable {
 		t.Fatalf("expected exact inapplicable offer, got %#v", got)
+	}
+}
+
+func TestStoreCLIExactProviderPreservesCompletedPositiveOnTimeout(t *testing.T) {
+	restore := replacePackageActionManagerAvailable(func(manager string) bool { return manager == managerStore })
+	defer restore()
+	scan := StoreScanGeneration{
+		ScanID:           "scan-exact-timeout",
+		UserSID:          "S-1-5-21-timeout",
+		StartedAt:        time.Date(2026, 6, 22, 10, 0, 0, 0, time.UTC),
+		CompletedAt:      time.Date(2026, 6, 22, 10, 0, 1, 0, time.UTC),
+		CompletionStatus: StoreScanIncomplete,
+	}
+	vp9 := "Microsoft.VP9VideoExtensions_8wekyb3d8bbwe"
+	blocked := "Vendor.Broken_abc123"
+	inventory := testStoreInventory(scan, vp9, "1.2.13.0")
+	brokenInventory := testStoreInventory(scan, blocked, "1.0.0")
+	inventory.Records = append(inventory.Records, brokenInventory.Records...)
+	inventory.Families = groupStorePackagedAppFamilies(inventory.Records)
+
+	provider := storeCLIExactCatalogProvider{
+		Concurrency: 1,
+		Now:         fixedPipelineTimes(scan.StartedAt, scan.StartedAt.Add(time.Second), scan.StartedAt.Add(2*time.Second), scan.StartedAt.Add(3*time.Second), scan.StartedAt.Add(4*time.Second)),
+		Run: func(ctx context.Context, timeout time.Duration, args ...string) CommandResult {
+			command := strings.Join(args, " ")
+			switch {
+			case strings.Contains(command, " show "+vp9):
+				return CommandResult{OK: true, Command: command, Stdout: "Product ID : 9N4D0MSMP0PT\nPFN : " + vp9}
+			case strings.Contains(command, " update "+vp9):
+				return CommandResult{OK: true, Command: command, Stdout: "Update available for 'VP9-Videoerweiterungen'\nFailed to read input in non-interactive mode."}
+			case strings.Contains(command, " show "+blocked):
+				<-ctx.Done()
+				return CommandResult{Command: command, Code: 124, Stderr: ctx.Err().Error()}
+			default:
+				return CommandResult{Command: command, Code: 1, Stderr: "unexpected command"}
+			}
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	done := make(chan StoreCatalogProviderRun, 1)
+	go func() {
+		done <- provider.Observe(ctx, scan, inventory.Families)
+	}()
+	var run StoreCatalogProviderRun
+	select {
+	case run = <-done:
+	case <-time.After(time.Second):
+		t.Fatal("exact provider deadlocked after context deadline")
+	}
+	if run.Health != StoreProviderIncomplete || len(run.Mappings) != 1 {
+		t.Fatalf("run=%#v", run)
+	}
+	byPFN := map[string]StoreProviderObservation{}
+	for _, observation := range run.Observations {
+		if _, exists := byPFN[observation.Identity.PackageFamilyName]; exists {
+			t.Fatalf("duplicate observation for PFN %s: %#v", observation.Identity.PackageFamilyName, run.Observations)
+		}
+		byPFN[observation.Identity.PackageFamilyName] = observation
+	}
+	if got := byPFN[vp9]; got.Kind != StoreObservationPositiveUpdateOffer || got.Target == nil || got.Target.ProductID != "9N4D0MSMP0PT" {
+		t.Fatalf("completed VP9 positive was not preserved: %#v", got)
+	}
+	if got := byPFN[blocked]; got.Kind != StoreObservationIncompleteResult || got.Health != StoreProviderIncomplete {
+		t.Fatalf("blocked PFN should be incomplete: %#v", got)
+	}
+	available := ReconcileStoreUpdate(StoreReconciliationInput{
+		Identity:          StoreInstalledIdentity{UserSID: scan.UserSID, PackageFamilyName: vp9},
+		Scan:              scan,
+		RequiredProviders: []StoreProviderIdentity{run.Provider},
+		Observations:      run.Observations,
+	})
+	if available.State != StoreUpdateAvailable {
+		t.Fatalf("VP9 should reconcile to available, got %#v", available)
+	}
+	unknown := ReconcileStoreUpdate(StoreReconciliationInput{
+		Identity:          StoreInstalledIdentity{UserSID: scan.UserSID, PackageFamilyName: blocked},
+		Scan:              scan,
+		RequiredProviders: []StoreProviderIdentity{run.Provider},
+		Observations:      run.Observations,
+	})
+	if unknown.State != StoreUpdateUnknown {
+		t.Fatalf("blocked package should reconcile to unknown, got %#v", unknown)
+	}
+}
+
+func TestStoreCLIExactProviderCancellationBeforeAnyPackageCompletes(t *testing.T) {
+	restore := replacePackageActionManagerAvailable(func(manager string) bool { return manager == managerStore })
+	defer restore()
+	scan := StoreScanGeneration{ScanID: "scan-cancel-before", UserSID: "S-1-5-21-cancel", StartedAt: time.Now().UTC(), CompletedAt: time.Now().UTC(), CompletionStatus: StoreScanIncomplete}
+	inventory := testStoreInventory(scan, "Microsoft.VP9VideoExtensions_8wekyb3d8bbwe", "1.2.13.0")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	provider := storeCLIExactCatalogProvider{Concurrency: 1, Run: func(ctx context.Context, timeout time.Duration, args ...string) CommandResult {
+		t.Fatal("no Store CLI command should run after pre-cancelled context")
+		return CommandResult{}
+	}}
+	run := provider.Observe(ctx, scan, inventory.Families)
+	if run.Health != StoreProviderIncomplete || len(run.Observations) != 1 || run.Observations[0].Kind != StoreObservationIncompleteResult {
+		t.Fatalf("run=%#v", run)
+	}
+}
+
+func TestStoreCLIExactProviderCancellationAfterAllPackagesComplete(t *testing.T) {
+	restore := replacePackageActionManagerAvailable(func(manager string) bool { return manager == managerStore })
+	defer restore()
+	scan := StoreScanGeneration{ScanID: "scan-cancel-after", UserSID: "S-1-5-21-cancel", StartedAt: time.Now().UTC(), CompletedAt: time.Now().UTC(), CompletionStatus: StoreScanIncomplete}
+	vp9 := "Microsoft.VP9VideoExtensions_8wekyb3d8bbwe"
+	calc := "Microsoft.WindowsCalculator_8wekyb3d8bbwe"
+	inventory := testStoreInventory(scan, vp9, "1.2.20.0")
+	calcInventory := testStoreInventory(scan, calc, "11.0.0.0")
+	inventory.Records = append(inventory.Records, calcInventory.Records...)
+	inventory.Families = groupStorePackagedAppFamilies(inventory.Records)
+	ctx, cancel := context.WithCancel(context.Background())
+	updateChecks := 0
+	provider := storeCLIExactCatalogProvider{
+		Concurrency: 1,
+		Run: func(ctx context.Context, timeout time.Duration, args ...string) CommandResult {
+			command := strings.Join(args, " ")
+			switch {
+			case strings.Contains(command, " show "+vp9):
+				return CommandResult{OK: true, Command: command, Stdout: "Product ID : 9N4D0MSMP0PT\nPFN : " + vp9}
+			case strings.Contains(command, " update "+vp9):
+				updateChecks++
+				return CommandResult{OK: true, Command: command, Stdout: "'VP9-Videoerweiterungen' is already up to date"}
+			case strings.Contains(command, " show "+calc):
+				return CommandResult{OK: true, Command: command, Stdout: "Product ID : 9NCALC\nPFN : " + calc}
+			case strings.Contains(command, " update "+calc):
+				updateChecks++
+				return CommandResult{OK: true, Command: command, Stdout: "'Calculator' is already up to date"}
+			default:
+				return CommandResult{Command: command, Code: 1, Stderr: "unexpected command"}
+			}
+		},
+	}
+	run := provider.Observe(ctx, scan, inventory.Families)
+	cancel()
+	if updateChecks != 2 || len(run.Observations) != 2 || len(run.Mappings) != 2 {
+		t.Fatalf("completed results not preserved after late cancellation: checks=%d run=%#v", updateChecks, run)
+	}
+	for _, observation := range run.Observations {
+		if observation.Kind != StoreObservationAuthoritativeNegative {
+			t.Fatalf("all packages completed before cancellation; observation=%#v run=%#v", observation, run)
+		}
 	}
 }
 
@@ -442,6 +791,38 @@ Available Version : 2.0.0`}
 	}
 }
 
+func TestStoreCLIUpdatesProviderExactOfferWithFatalErrorKeepsPositiveWithoutNegatives(t *testing.T) {
+	run := runStoreCLIUpdatesProviderTwoPFNs(t, CommandResult{OK: true, Stdout: `Update available
+Product ID : 9N4D0MSMP0PT
+PFN : Microsoft.VP9VideoExtensions_8wekyb3d8bbwe
+Available Version : 1.2.20.0
+Error: another Store product could not be inspected`})
+	assertAggregatePositiveIncompleteNoNegatives(t, run)
+}
+
+func TestStoreCLIUpdatesProviderExactOfferWithTimeoutKeepsPositiveWithoutNegatives(t *testing.T) {
+	run := runStoreCLIUpdatesProviderTwoPFNs(t, CommandResult{Code: 124, Stdout: `Update available
+Product ID : 9N4D0MSMP0PT
+PFN : Microsoft.VP9VideoExtensions_8wekyb3d8bbwe
+Available Version : 1.2.20.0`, Stderr: "timeout"})
+	assertAggregatePositiveIncompleteNoNegatives(t, run)
+}
+
+func TestStoreCLIUpdatesProviderExactOfferWithCancellationKeepsPositiveWithoutNegatives(t *testing.T) {
+	run := runStoreCLIUpdatesProviderTwoPFNs(t, CommandResult{Code: commandCancelledCode, Stdout: `Update available
+Product ID : 9N4D0MSMP0PT
+PFN : Microsoft.VP9VideoExtensions_8wekyb3d8bbwe
+Available Version : 1.2.20.0`, Stderr: "cancelled"})
+	assertAggregatePositiveIncompleteNoNegatives(t, run)
+}
+
+func TestStoreCLIUpdatesProviderNoUpdatesWithFatalDiagnosticProducesNoNegatives(t *testing.T) {
+	run := runStoreCLIUpdatesProviderTwoPFNs(t, CommandResult{OK: true, Stdout: "No updates found.\nError: Store catalog failed"})
+	if run.Health != StoreProviderIncomplete || len(run.Observations) != 0 {
+		t.Fatalf("failure-tainted no-updates output must not produce negatives: %#v", run)
+	}
+}
+
 func TestStoreCLIUpdatesProviderPartialPromptCountKeepsMatchedPositiveIncomplete(t *testing.T) {
 	restore := replacePackageActionManagerAvailable(func(manager string) bool { return manager == managerStore })
 	defer restore()
@@ -477,6 +858,44 @@ Available Version : 1.2.20.0`}
 	}
 	if !strings.Contains(run.Error, "mentioned 2 update(s) but only 1 exact") {
 		t.Fatalf("run error did not explain partial exact coverage: %#v", run)
+	}
+}
+
+func runStoreCLIUpdatesProviderTwoPFNs(t *testing.T, result CommandResult) StoreCatalogProviderRun {
+	t.Helper()
+	restore := replacePackageActionManagerAvailable(func(manager string) bool { return manager == managerStore })
+	defer restore()
+	scan := StoreScanGeneration{
+		ScanID:           "scan-store-updates-two-pfns",
+		UserSID:          "S-1-5-21-store-updates",
+		StartedAt:        time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC),
+		CompletedAt:      time.Date(2026, 6, 21, 12, 0, 1, 0, time.UTC),
+		CompletionStatus: StoreScanCompleted,
+	}
+	updatePFN := "Microsoft.VP9VideoExtensions_8wekyb3d8bbwe"
+	currentPFN := "Microsoft.WindowsCalculator_8wekyb3d8bbwe"
+	inventory := testStoreInventory(scan, updatePFN, "1.2.13.0")
+	current := testStoreInventory(scan, currentPFN, "11.0.0.0")
+	inventory.Records = append(inventory.Records, current.Records...)
+	inventory.Families = groupStorePackagedAppFamilies(inventory.Records)
+	provider := storeCLIUpdatesCatalogProvider{
+		Now: fixedPipelineTimes(scan.StartedAt, scan.StartedAt.Add(time.Second), scan.StartedAt.Add(2*time.Second)),
+		Run: func(ctx context.Context, timeout time.Duration, args ...string) CommandResult {
+			result.Command = strings.Join(args, " ")
+			return result
+		},
+	}
+	return provider.Observe(context.Background(), scan, inventory.Families)
+}
+
+func assertAggregatePositiveIncompleteNoNegatives(t *testing.T, run StoreCatalogProviderRun) {
+	t.Helper()
+	if run.Health != StoreProviderIncomplete || len(run.Observations) != 1 || len(run.Mappings) != 1 {
+		t.Fatalf("run=%#v", run)
+	}
+	got := run.Observations[0]
+	if got.Identity.PackageFamilyName != "Microsoft.VP9VideoExtensions_8wekyb3d8bbwe" || got.Kind != StoreObservationPositiveUpdateOffer || got.Target == nil {
+		t.Fatalf("expected only retained exact VP9 positive, got %#v", got)
 	}
 }
 

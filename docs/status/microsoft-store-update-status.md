@@ -118,6 +118,26 @@ https://learn.microsoft.com/en-us/uwp/api/windows.management.deployment.packagem
 If the Store command is accepted but inventory/catalog verification cannot prove
 completion, the job reports `accepted_not_verified` rather than success.
 
+## Scan-Scope Measurement
+
+Measured during local distribution smoke on `2026-06-22` with Store CLI
+`v22605.1401.12.0` and WinGet `v1.28.240`:
+
+- Product-like current-user Store package families: `112`.
+- Native current-user inventory provider duration: about `2s`.
+- Store CLI exact provider duration: about `21s`.
+- Store CLI aggregate provider duration: about `4s`.
+- WinGet msstore exact provider duration: about `1s`.
+- Store CLI exact provider package-level results: `46` authoritative negatives
+  and `66` incomplete results.
+- Verified PFN/Product-ID mappings persisted in that scan: `50`.
+- Persisted mapping reuse in the current scan path: `0`; mappings are freshly
+  verified from provider output in the active scan before use.
+
+No caching optimization was added in this hardening pass. Reusing persisted
+mappings safely needs explicit expiry, conflict, same-user/same-PFN validation,
+and separate rules ensuring cached mappings cannot manufacture `Current`.
+
 ## VP9 Live Acceptance Evidence
 
 The VP9 Video Extensions acceptance fixture was validated on Windows

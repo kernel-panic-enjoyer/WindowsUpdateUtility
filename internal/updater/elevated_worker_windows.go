@@ -395,7 +395,7 @@ func executeElevatedWorkerOperation(ctx context.Context, operation string, paylo
 }
 
 func appendWorkerResultLogs(result CommandResult) {
-	categories := logCategoriesForCommand(strings.Fields(result.Command))
+	categories := logCategoriesForCommandLine(result.Command)
 	if result.Command != "" {
 		sessionLogs.AppendCategorized("command", result.Command, categories)
 	}

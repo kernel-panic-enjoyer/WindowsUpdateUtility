@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -44,9 +45,16 @@ type storeCLIUpdatesParsedOffer struct {
 }
 
 type storeCLIUpdatesParseResult struct {
-	NoUpdates          bool
-	Offers             []storeCLIUpdatesParsedOffer
-	ExpectedOfferCount int
+	NoUpdates            bool
+	ExplicitNoUpdates    bool
+	Offers               []storeCLIUpdatesParsedOffer
+	ExpectedOfferCount   int
+	FailureDiagnostics   []string
+	Contradictory        bool
+	CompleteCoverage     bool
+	UnrecognizedLines    []string
+	MalformedRecords     []string
+	IncompleteReasonText string
 }
 
 func (provider storeCLIExactCatalogProvider) Identity() StoreProviderIdentity {
@@ -93,7 +101,8 @@ func (provider storeCLIUpdatesCatalogProvider) Observe(ctx context.Context, scan
 		run.Error = sanitizeProviderDiagnostic(firstNonEmpty(showErrString(parseErr), result.Stderr, result.Stdout))
 		return run
 	}
-	if parsed.NoUpdates && parseErr == nil {
+	coverageComplete := result.OK && parsed.CompleteCoverage && parseErr == nil && ctx.Err() == nil
+	if parsed.NoUpdates && coverageComplete {
 		if !result.OK {
 			run.Health = StoreProviderIncomplete
 			run.Error = sanitizeProviderDiagnostic(firstNonEmpty(result.Stderr, result.Stdout, "Store CLI aggregate update check failed"))
@@ -166,14 +175,9 @@ func (provider storeCLIUpdatesCatalogProvider) Observe(ctx context.Context, scan
 		run.Error = fmt.Sprintf("ignored %d Store CLI aggregate update row(s) without matching installed PFN", len(unmatched))
 		return run
 	}
-	if !result.OK {
+	if !coverageComplete {
 		run.Health = StoreProviderIncomplete
-		run.Error = sanitizeProviderDiagnostic(firstNonEmpty(result.Stderr, result.Stdout, "Store CLI aggregate update check failed"))
-		return run
-	}
-	if parseErr != nil {
-		run.Health = StoreProviderIncomplete
-		run.Error = sanitizeProviderDiagnostic(parseErr.Error())
+		run.Error = sanitizeProviderDiagnostic(firstNonEmpty(showErrString(parseErr), parsed.IncompleteReasonText, result.Stderr, result.Stdout, "Store CLI aggregate update coverage was incomplete"))
 		return run
 	}
 	observedAt := provider.now()
@@ -216,6 +220,9 @@ func (provider storeCLIExactCatalogProvider) Observe(ctx context.Context, scan S
 			productFamilies = append(productFamilies, family)
 		}
 	}
+	sort.Slice(productFamilies, func(i, j int) bool {
+		return strings.ToLower(productFamilies[i].Identity.PackageFamilyName) < strings.ToLower(productFamilies[j].Identity.PackageFamilyName)
+	})
 	if len(productFamilies) == 0 {
 		run.CompletedAt = provider.now()
 		return run
@@ -230,6 +237,8 @@ func (provider storeCLIExactCatalogProvider) Observe(ctx context.Context, scan S
 	}
 	jobs := make(chan StorePackagedAppFamily)
 	results := make(chan storeCLIExactFamilyResult, len(productFamilies))
+	scheduled := map[string]StorePackagedAppFamily{}
+	completed := map[string]bool{}
 	var wg sync.WaitGroup
 	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
@@ -240,19 +249,17 @@ func (provider storeCLIExactCatalogProvider) Observe(ctx context.Context, scan S
 			}
 		}()
 	}
+	cancelled := false
 	for _, family := range productFamilies {
 		select {
 		case <-ctx.Done():
-			run.Health = StoreProviderIncomplete
-			run.Error = ctx.Err().Error()
-			close(jobs)
-			wg.Wait()
-			close(results)
-			run.CompletedAt = provider.now()
-			return run
+			cancelled = true
+			goto closeJobs
 		case jobs <- family:
+			scheduled[strings.ToLower(family.Identity.PackageFamilyName)] = family
 		}
 	}
+closeJobs:
 	close(jobs)
 	wg.Wait()
 	close(results)
@@ -260,6 +267,9 @@ func (provider storeCLIExactCatalogProvider) Observe(ctx context.Context, scan S
 	seen := 0
 	for result := range results {
 		seen++
+		if result.PFN != "" {
+			completed[strings.ToLower(result.PFN)] = true
+		}
 		if result.Observation.Identity.Resolved() {
 			run.Observations = append(run.Observations, result.Observation)
 		}
@@ -271,6 +281,30 @@ func (provider storeCLIExactCatalogProvider) Observe(ctx context.Context, scan S
 		run.Health = StoreProviderIncomplete
 		run.Error = "Store CLI exact provider did not return evidence for every product-like package family"
 	}
+	if cancelled || ctx.Err() != nil {
+		run.Health = StoreProviderIncomplete
+	}
+	var unresolved []string
+	for _, family := range productFamilies {
+		pfn := family.Identity.PackageFamilyName
+		key := strings.ToLower(pfn)
+		if completed[key] {
+			continue
+		}
+		unresolved = append(unresolved, pfn)
+		diagnostics := "Store CLI exact provider did not inspect this PFN before cancellation or timeout"
+		if _, ok := scheduled[key]; ok {
+			diagnostics = "Store CLI exact provider scheduled this PFN but did not complete before cancellation or timeout"
+		}
+		run.Observations = append(run.Observations, provider.incompleteObservation(scan, identity, family, diagnostics))
+	}
+	if run.Health != StoreProviderHealthy && run.Error == "" {
+		run.Error = fmt.Sprintf("Store CLI exact provider completed %d/%d PFN(s); %d unresolved", len(completed), len(productFamilies), len(unresolved))
+		if ctx.Err() != nil {
+			run.Error += ": " + ctx.Err().Error()
+		}
+	}
+	sortStoreCatalogRunEvidence(run.Observations, run.Mappings)
 	run.CompletedAt = provider.now()
 	return run
 }
@@ -278,6 +312,43 @@ func (provider storeCLIExactCatalogProvider) Observe(ctx context.Context, scan S
 type storeCLIExactFamilyResult struct {
 	Observation StoreProviderObservation
 	Mapping     *VerifiedStoreIdentityMapping
+	PFN         string
+}
+
+func (provider storeCLIExactCatalogProvider) incompleteObservation(scan StoreScanGeneration, providerID StoreProviderIdentity, family StorePackagedAppFamily, diagnostics string) StoreProviderObservation {
+	observedAt := provider.now()
+	if observedAt.IsZero() {
+		observedAt = scan.CompletedAt
+	}
+	return StoreProviderObservation{
+		Provider:         providerID,
+		Health:           StoreProviderIncomplete,
+		Kind:             StoreObservationIncompleteResult,
+		Identity:         family.Identity,
+		ScanID:           scan.ScanID,
+		ObservedAt:       observedAt,
+		InstalledVersion: family.Primary.Version.String(),
+		Diagnostics:      diagnostics,
+	}
+}
+
+func sortStoreCatalogRunEvidence(observations []StoreProviderObservation, mappings []VerifiedStoreIdentityMapping) {
+	sort.SliceStable(observations, func(i, j int) bool {
+		left := strings.ToLower(observations[i].Identity.PackageFamilyName)
+		right := strings.ToLower(observations[j].Identity.PackageFamilyName)
+		if left != right {
+			return left < right
+		}
+		return observations[i].Kind < observations[j].Kind
+	})
+	sort.SliceStable(mappings, func(i, j int) bool {
+		left := strings.ToLower(mappings[i].InstalledIdentity.PackageFamilyName)
+		right := strings.ToLower(mappings[j].InstalledIdentity.PackageFamilyName)
+		if left != right {
+			return left < right
+		}
+		return strings.ToLower(mappings[i].ProductID) < strings.ToLower(mappings[j].ProductID)
+	})
 }
 
 func (provider storeCLIExactCatalogProvider) observeFamily(ctx context.Context, scan StoreScanGeneration, providerID StoreProviderIdentity, family StorePackagedAppFamily) storeCLIExactFamilyResult {
@@ -295,7 +366,7 @@ func (provider storeCLIExactCatalogProvider) observeFamily(ctx context.Context, 
 		base.Health = StoreProviderFailed
 		base.Kind = StoreObservationProviderFailure
 		base.Diagnostics = "Store CLI exact provider received unresolved or wrong-user package identity"
-		return storeCLIExactFamilyResult{Observation: base}
+		return storeCLIExactFamilyResult{Observation: base, PFN: identity.PackageFamilyName}
 	}
 
 	show := provider.run(ctx, storeCLIExactProviderTimeout, managerCommand(managerStore, "show", identity.PackageFamilyName)...)
@@ -304,13 +375,13 @@ func (provider storeCLIExactCatalogProvider) observeFamily(ctx context.Context, 
 		base.Health = StoreProviderIncomplete
 		base.Kind = StoreObservationIncompleteResult
 		base.Diagnostics = firstNonEmpty(showErrString(showErr), show.Stderr, show.Stdout)
-		return storeCLIExactFamilyResult{Observation: base}
+		return storeCLIExactFamilyResult{Observation: base, PFN: identity.PackageFamilyName}
 	}
 	if !strings.EqualFold(metadata.PFN, identity.PackageFamilyName) || metadata.ProductID == "" {
 		base.Health = StoreProviderIncomplete
 		base.Kind = StoreObservationIncompleteResult
 		base.Diagnostics = fmt.Sprintf("Store CLI show did not return an exact PFN/Product ID mapping for %s", identity.PackageFamilyName)
-		return storeCLIExactFamilyResult{Observation: base}
+		return storeCLIExactFamilyResult{Observation: base, PFN: identity.PackageFamilyName}
 	}
 
 	mapping := VerifiedStoreIdentityMapping{
@@ -322,7 +393,7 @@ func (provider storeCLIExactCatalogProvider) observeFamily(ctx context.Context, 
 		Evidence:          "store show <package-family-name> returned matching PFN and Product ID",
 	}
 	update := provider.run(ctx, storeCLIExactProviderTimeout, storeUpdateCommand(identity.PackageFamilyName, false)...)
-	state, updateErr := parseStoreCLIUpdateCheck(update.Stdout + "\n" + update.Stderr)
+	state, updateErr := parseStoreCLIUpdateCheckResult(ctx, update.Stdout+"\n"+update.Stderr, update)
 	base.Mapping = &mapping
 	base.Diagnostics = sanitizeProviderDiagnostic(firstNonEmpty(update.Stderr, update.Stdout))
 	switch {
@@ -351,7 +422,7 @@ func (provider storeCLIExactCatalogProvider) observeFamily(ctx context.Context, 
 		base.Kind = StoreObservationIncompleteResult
 		base.Diagnostics = "Store CLI update check returned no authoritative update state"
 	}
-	return storeCLIExactFamilyResult{Observation: base, Mapping: &mapping}
+	return storeCLIExactFamilyResult{Observation: base, Mapping: &mapping, PFN: identity.PackageFamilyName}
 }
 
 func (provider storeCLIExactCatalogProvider) run(ctx context.Context, timeout time.Duration, args ...string) CommandResult {
@@ -414,11 +485,16 @@ func parseStoreCLIShowMetadata(output string) (storeCLIProductMetadata, error) {
 }
 
 func parseStoreCLIUpdateCheck(output string) (StoreObservationKind, error) {
+	return parseStoreCLIUpdateCheckResult(context.Background(), output, CommandResult{OK: true, Stdout: output})
+}
+
+func parseStoreCLIUpdateCheckResult(ctx context.Context, output string, command CommandResult) (StoreObservationKind, error) {
 	meaningful := false
 	positive := false
 	inapplicable := false
 	negative := false
-	failureLine := ""
+	expectedPromptFailure := ""
+	failureLines := []string{}
 	for _, raw := range strings.Split(output, "\n") {
 		line := strings.TrimSpace(raw)
 		if line == "" {
@@ -445,7 +521,11 @@ func parseStoreCLIUpdateCheck(output string) (StoreObservationKind, error) {
 			negative = true
 			continue
 		case storeCLIOutputFailureLine(lower):
-			failureLine = line
+			if storeCLIExpectedNoninteractivePromptFailureLine(lower) {
+				expectedPromptFailure = line
+			} else {
+				failureLines = append(failureLines, line)
+			}
 			continue
 		}
 		if isStoreOutputNoiseLine(line) {
@@ -453,25 +533,51 @@ func parseStoreCLIUpdateCheck(output string) (StoreObservationKind, error) {
 		}
 		meaningful = true
 	}
+	if ctx.Err() != nil {
+		return StoreObservationIncompleteResult, ctx.Err()
+	}
+	if command.Code == 124 {
+		return StoreObservationIncompleteResult, errors.New("Store CLI update check timed out")
+	}
+	if command.Code == commandCancelledCode {
+		return StoreObservationIncompleteResult, errors.New("Store CLI update check was cancelled")
+	}
+	if len(failureLines) > 0 {
+		diagnostic := strings.Join(failureLines, "; ")
+		if positive || negative || inapplicable {
+			return StoreObservationIncompleteResult, errors.New(diagnostic)
+		}
+		return StoreObservationIncompleteResult, errors.New(diagnostic)
+	}
 	if positive {
 		return StoreObservationPositiveUpdateOffer, nil
 	}
 	if inapplicable {
+		if expectedPromptFailure != "" {
+			return StoreObservationIncompleteResult, errors.New(expectedPromptFailure)
+		}
 		return StoreObservationNewerCatalogNoApplicableInstaller, nil
 	}
 	if negative {
-		if failureLine != "" {
-			return StoreObservationIncompleteResult, errors.New(failureLine)
+		if expectedPromptFailure != "" {
+			return StoreObservationIncompleteResult, errors.New(expectedPromptFailure)
 		}
 		return StoreObservationAuthoritativeNegative, nil
 	}
-	if failureLine != "" {
-		return StoreObservationIncompleteResult, errors.New(failureLine)
+	if expectedPromptFailure != "" {
+		return StoreObservationIncompleteResult, errors.New(expectedPromptFailure)
+	}
+	if !command.OK {
+		return StoreObservationIncompleteResult, errors.New(firstNonEmpty(command.Stderr, command.Stdout, "Store CLI update check failed"))
 	}
 	if !meaningful {
 		return StoreObservationEmptyResult, errors.New("Store CLI update check returned empty or non-authoritative output")
 	}
 	return StoreObservationIncompleteResult, errors.New("Store CLI update check returned unrecognized output")
+}
+
+func storeCLIExpectedNoninteractivePromptFailureLine(lower string) bool {
+	return strings.Contains(lower, "failed to read input in non-interactive mode")
 }
 
 func storeCLIUpdatePromptIndicatesOffer(lower string) bool {
@@ -492,94 +598,183 @@ func storeCLIUpdatePromptIndicatesOffer(lower string) bool {
 
 func parseStoreCLIUpdatesOutput(output string) (storeCLIUpdatesParseResult, error) {
 	var result storeCLIUpdatesParseResult
-	var current storeCLIUpdatesParsedOffer
 	meaningful := false
 	positiveHint := false
-	failureHint := false
-	flush := func() {
-		if current.PFN != "" && current.ProductID != "" {
-			result.Offers = append(result.Offers, current)
+	var current storeCLIUpdatesRecordBuilder
+	flush := func(reason string) {
+		offer, complete, problems := current.finish()
+		if complete {
+			result.Offers = append(result.Offers, offer)
+		} else if current.hasAny() || len(problems) > 0 {
+			if len(problems) == 0 {
+				problems = append(problems, "partial Store CLI aggregate record")
+			}
+			if reason != "" {
+				problems[0] = problems[0] + " before " + reason
+			}
+			result.MalformedRecords = append(result.MalformedRecords, problems...)
 		}
-		current = storeCLIUpdatesParsedOffer{}
+		current = storeCLIUpdatesRecordBuilder{}
 	}
 	for _, raw := range strings.Split(output, "\n") {
 		line := strings.TrimSpace(raw)
 		if line == "" {
+			flush("blank line")
 			continue
 		}
 		lower := strings.ToLower(line)
 		switch {
 		case strings.Contains(lower, "no updates found"):
 			result.NoUpdates = true
+			result.ExplicitNoUpdates = true
 			continue
 		case strings.Contains(lower, "update available") ||
 			strings.Contains(lower, "updates available") ||
 			strings.Contains(lower, "update(s)"):
+			if current.hasAny() {
+				flush("new update record")
+			}
 			positiveHint = true
 			if count := storeCLIUpdatePromptOfferCount(lower); count > result.ExpectedOfferCount {
 				result.ExpectedOfferCount = count
 			}
+			continue
 		case storeCLIOutputFailureLine(lower):
-			failureHint = true
+			result.FailureDiagnostics = append(result.FailureDiagnostics, line)
 			meaningful = true
+			continue
 		}
 		if isStoreOutputNoiseLine(line) {
 			continue
 		}
 		if key, value, ok := storeCLIKeyValue(line); ok {
+			var problems []string
 			switch strings.ToLower(key) {
 			case "product id":
-				if current.PFN != "" || current.ProductID != "" {
-					flush()
+				if current.complete() && current.ProductID != "" && !strings.EqualFold(current.ProductID, value) {
+					flush("next Product ID")
 				}
-				current.ProductID = value
+				problems = current.setProductID(value)
 			case "pfn", "package family name":
-				current.PFN = value
+				problems = current.setPFN(value)
 			case "update id":
 				if packageFamilyNameFromWingetValue(value) != "" {
-					current.PFN = packageFamilyNameFromWingetValue(value)
+					problems = current.setPFN(packageFamilyNameFromWingetValue(value))
 				}
 			case "available version", "new version":
-				current.AvailableVersion = value
+				problems = current.setAvailableVersion(value)
 			case "applicability", "installer applicability", "status":
 				if storeCLIInapplicableLine(value) {
 					current.Inapplicable = true
 				}
 			}
+			result.MalformedRecords = append(result.MalformedRecords, problems...)
 			continue
 		}
 		if storeCLIInapplicableLine(line) && (current.PFN != "" || current.ProductID != "") {
 			current.Inapplicable = true
 			continue
 		}
+		result.UnrecognizedLines = append(result.UnrecognizedLines, line)
 		meaningful = true
 	}
-	flush()
-	if result.NoUpdates {
-		if len(result.Offers) > 0 {
-			return result, errors.New("Store CLI aggregate update output reported no updates and exact update offers in the same result")
-		}
-		if positiveHint {
-			return result, errors.New("Store CLI aggregate update output reported no updates and update hints in the same result")
-		}
-		if failureHint {
-			return result, errors.New("Store CLI aggregate update output reported no updates and failure diagnostics in the same result")
-		}
-		return result, nil
+	flush("end of output")
+
+	if result.NoUpdates && (len(result.Offers) > 0 || positiveHint) {
+		result.Contradictory = true
+	}
+	problems := []string{}
+	if result.Contradictory {
+		problems = append(problems, "Store CLI aggregate update output reported no updates and exact update offers or update hints in the same result")
+	}
+	if len(result.FailureDiagnostics) > 0 {
+		problems = append(problems, "Store CLI aggregate update output contained failure diagnostics: "+strings.Join(result.FailureDiagnostics, "; "))
 	}
 	if result.ExpectedOfferCount > 0 && len(result.Offers) < result.ExpectedOfferCount {
-		return result, fmt.Errorf("Store CLI aggregate update output mentioned %d update(s) but only %d exact PFN/Product ID association(s) were parsed", result.ExpectedOfferCount, len(result.Offers))
+		problems = append(problems, fmt.Sprintf("Store CLI aggregate update output mentioned %d update(s) but only %d exact PFN/Product ID association(s) were parsed", result.ExpectedOfferCount, len(result.Offers)))
+	}
+	if len(result.MalformedRecords) > 0 {
+		problems = append(problems, strings.Join(result.MalformedRecords, "; "))
+	}
+	if len(result.UnrecognizedLines) > 0 {
+		problems = append(problems, "Store CLI aggregate update output contained unrecognized line(s): "+strings.Join(result.UnrecognizedLines, "; "))
+	}
+	if len(problems) == 0 {
+		switch {
+		case result.NoUpdates:
+			result.CompleteCoverage = true
+			return result, nil
+		case len(result.Offers) > 0:
+			result.CompleteCoverage = true
+			return result, nil
+		case !meaningful && !positiveHint:
+			result.IncompleteReasonText = "Store CLI aggregate update check returned empty or non-authoritative output"
+			return result, errors.New(result.IncompleteReasonText)
+		case positiveHint:
+			result.IncompleteReasonText = "Store CLI aggregate update output mentioned updates without exact PFN/Product ID associations"
+			return result, errors.New(result.IncompleteReasonText)
+		default:
+			result.IncompleteReasonText = "Store CLI aggregate update output was not recognized as authoritative"
+			return result, errors.New(result.IncompleteReasonText)
+		}
 	}
 	if len(result.Offers) > 0 {
-		return result, nil
+		result.IncompleteReasonText = strings.Join(problems, "; ")
+		return result, errors.New(result.IncompleteReasonText)
 	}
-	if !meaningful && !positiveHint {
-		return result, errors.New("Store CLI aggregate update check returned empty or non-authoritative output")
+	result.IncompleteReasonText = strings.Join(problems, "; ")
+	return result, errors.New(result.IncompleteReasonText)
+}
+
+type storeCLIUpdatesRecordBuilder struct {
+	storeCLIUpdatesParsedOffer
+	problems []string
+}
+
+func (builder storeCLIUpdatesRecordBuilder) hasAny() bool {
+	return builder.ProductID != "" || builder.PFN != "" || builder.AvailableVersion != "" || builder.Inapplicable || len(builder.problems) > 0
+}
+
+func (builder storeCLIUpdatesRecordBuilder) complete() bool {
+	return builder.ProductID != "" && builder.PFN != ""
+}
+
+func (builder *storeCLIUpdatesRecordBuilder) setProductID(value string) []string {
+	return builder.setField("Product ID", &builder.ProductID, value)
+}
+
+func (builder *storeCLIUpdatesRecordBuilder) setPFN(value string) []string {
+	return builder.setField("PFN", &builder.PFN, value)
+}
+
+func (builder *storeCLIUpdatesRecordBuilder) setAvailableVersion(value string) []string {
+	return builder.setField("Available Version", &builder.AvailableVersion, value)
+}
+
+func (builder *storeCLIUpdatesRecordBuilder) setField(label string, target *string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
 	}
-	if positiveHint {
-		return result, errors.New("Store CLI aggregate update output mentioned updates without exact PFN/Product ID associations")
+	if *target != "" && !strings.EqualFold(*target, value) {
+		problem := fmt.Sprintf("conflicting %s values %q and %q", label, *target, value)
+		builder.problems = append(builder.problems, problem)
+		return []string{problem}
 	}
-	return result, errors.New("Store CLI aggregate update output was not recognized as authoritative")
+	*target = value
+	return nil
+}
+
+func (builder storeCLIUpdatesRecordBuilder) finish() (storeCLIUpdatesParsedOffer, bool, []string) {
+	problems := append([]string(nil), builder.problems...)
+	if !builder.hasAny() {
+		return storeCLIUpdatesParsedOffer{}, false, problems
+	}
+	if builder.ProductID == "" || builder.PFN == "" {
+		problems = append(problems, "partial Store CLI aggregate record missing exact Product ID or PFN")
+		return storeCLIUpdatesParsedOffer{}, false, problems
+	}
+	return builder.storeCLIUpdatesParsedOffer, len(problems) == 0, problems
 }
 
 func storeCLIOutputFailureLine(lower string) bool {
@@ -679,7 +874,7 @@ func (provider storeCLIExactCatalogQueryProvider) QueryExact(ctx context.Context
 	}
 
 	update := runner.run(ctx, storeCLIExactProviderTimeout, storeUpdateCommand(request.Identity.PackageFamilyName, false)...)
-	state, err := parseStoreCLIUpdateCheck(update.Stdout + "\n" + update.Stderr)
+	state, err := parseStoreCLIUpdateCheckResult(ctx, update.Stdout+"\n"+update.Stderr, update)
 	update = mergeCommandResults(show, update, "Store CLI exact catalog state check")
 	if err != nil {
 		update.OK = false

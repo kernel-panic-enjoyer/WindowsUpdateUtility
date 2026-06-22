@@ -9,6 +9,8 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 & (Join-Path $PSScriptRoot 'Set-WorkspaceBinaryPaths.ps1') -Root $root | Out-Null
 Set-Location $root
 
+& (Join-Path $PSScriptRoot 'Build-StoreInventoryBroker.ps1') -Root $root | Out-Null
+
 function Assert-NativeSuccess {
     param(
         [string]$Label

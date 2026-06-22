@@ -8,6 +8,7 @@ using Windows.Management.Deployment;
 public static class Program
 {
     private const int ProtocolVersion = 1;
+    private const string BrokerBuildVersion = "store-inventory-broker/2026.06.22.1";
 
     public static int Main(string[] args)
     {
@@ -42,6 +43,7 @@ public static class Program
 
             InventoryResponse response = new InventoryResponse();
             response.ProtocolVersion = ProtocolVersion;
+            response.BrokerVersion = BrokerBuildVersion;
             response.ScanId = request.ScanId;
             response.UserSid = currentSid;
             response.StartedAt = started;
@@ -56,6 +58,7 @@ public static class Program
         {
             InventoryResponse response = new InventoryResponse();
             response.ProtocolVersion = ProtocolVersion;
+            response.BrokerVersion = BrokerBuildVersion;
             response.ScanId = request.ScanId;
             response.UserSid = request.UserSid.Length == 0 ? currentSid : request.UserSid;
             response.StartedAt = started;
@@ -95,6 +98,7 @@ public sealed class InventoryRequest
 public sealed class InventoryResponse
 {
     public int ProtocolVersion;
+    public string BrokerVersion = String.Empty;
     public string ScanId = String.Empty;
     public string UserSid = String.Empty;
     public DateTimeOffset StartedAt;
@@ -109,6 +113,7 @@ public sealed class InventoryResponse
         StringBuilder builder = new StringBuilder();
         builder.Append("{");
         JsonHelpers.AppendNumber(builder, "protocol_version", ProtocolVersion, false);
+        JsonHelpers.AppendString(builder, "broker_version", BrokerVersion, true);
         JsonHelpers.AppendString(builder, "scan_id", ScanId, true);
         JsonHelpers.AppendString(builder, "user_sid", UserSid, true);
         JsonHelpers.AppendString(builder, "started_at", StartedAt.ToString("O"), true);

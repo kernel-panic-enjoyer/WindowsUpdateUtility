@@ -61,6 +61,27 @@ func logCategoriesForCommand(args []string) []string {
 	return logCategoriesForManagerVerb(manager, verb)
 }
 
+func logCategoriesForCommandLine(command string) []string {
+	manager, verb := packageManagerVerbFromCommandLine(command)
+	return logCategoriesForManagerVerb(manager, verb)
+}
+
+func packageManagerVerbFromCommandLine(command string) (string, string) {
+	fields := strings.Fields(command)
+	for index, field := range fields {
+		manager := strings.TrimSuffix(packageManagerNameFromArg(field), ".exe")
+		switch manager {
+		case managerWinget, managerStore, managerChoco:
+			verb := ""
+			if index+1 < len(fields) {
+				verb = strings.ToLower(strings.Trim(fields[index+1], `"'`))
+			}
+			return manager, verb
+		}
+	}
+	return "", ""
+}
+
 func logCategoriesForManagerVerb(manager, verb string) []string {
 	categories := []string{logCategoryAll}
 	switch strings.TrimSuffix(strings.ToLower(manager), ".exe") {

@@ -33,11 +33,12 @@ type StorePackagedAppInventoryProvider interface {
 }
 
 type StorePackagedAppInventory struct {
-	Scan     StoreScanGeneration      `json:"scan"`
-	Records  []StorePackagedAppRecord `json:"records"`
-	Families []StorePackagedAppFamily `json:"families"`
-	Partial  bool                     `json:"partial,omitempty"`
-	Errors   []string                 `json:"errors,omitempty"`
+	Scan          StoreScanGeneration      `json:"scan"`
+	Records       []StorePackagedAppRecord `json:"records"`
+	Families      []StorePackagedAppFamily `json:"families"`
+	Partial       bool                     `json:"partial,omitempty"`
+	Errors        []string                 `json:"errors,omitempty"`
+	BrokerVersion string                   `json:"broker_version,omitempty"`
 }
 
 type StorePackagedAppRecord struct {
@@ -107,6 +108,7 @@ type storePackagedInventoryRequest struct {
 
 type storePackagedInventoryResponse struct {
 	ProtocolVersion int                      `json:"protocol_version"`
+	BrokerVersion   string                   `json:"broker_version,omitempty"`
 	ScanID          string                   `json:"scan_id"`
 	UserSID         string                   `json:"user_sid"`
 	StartedAt       string                   `json:"started_at,omitempty"`
@@ -219,23 +221,21 @@ func (provider brokerStorePackagedAppInventoryProvider) Inventory(ctx context.Co
 	if len(stderr) > 0 {
 		result.Stderr = string(stderr)
 	}
-	if err != nil {
-		result.Code = 1
-		result.Stderr = strings.TrimSpace(result.Stderr + "\n" + err.Error())
-		return StorePackagedAppInventory{Scan: scan, Partial: true, Errors: []string{result.Stderr}}, result
-	}
 	inventory, parseErr := parseStorePackagedInventoryResponse(stdout, scan)
 	if parseErr != nil {
 		result.Code = 2
-		result.Stderr = parseErr.Error()
+		result.Stderr = strings.TrimSpace(strings.Join(nonEmptyStrings(result.Stderr, parseErr.Error(), showErrString(err)), "\n"))
 		return StorePackagedAppInventory{Scan: scan, Partial: true, Errors: []string{parseErr.Error()}}, result
 	}
-	result.OK = inventory.Scan.CompletionStatus == StoreScanCompleted
+	result.OK = inventory.Scan.CompletionStatus == StoreScanCompleted && err == nil
 	if !result.OK {
 		result.Code = 1
-		result.Stderr = strings.Join(inventory.Errors, "\n")
+		result.Stderr = strings.TrimSpace(strings.Join(nonEmptyStrings(result.Stderr, strings.Join(inventory.Errors, "\n"), showErrString(err)), "\n"))
 	}
 	result.Stdout = fmt.Sprintf("Native Store inventory returned %d package record(s), %d product-like family group(s).", len(inventory.Records), productLikeFamilyCount(inventory.Families))
+	if inventory.BrokerVersion != "" {
+		result.Stdout += " Broker version: " + inventory.BrokerVersion + "."
+	}
 	return inventory, result
 }
 
@@ -290,10 +290,11 @@ func parseStorePackagedInventoryResponse(data []byte, expectedScan StoreScanGene
 		records = append(records, normalized)
 	}
 	inventory := StorePackagedAppInventory{
-		Scan:     scan,
-		Records:  records,
-		Families: groupStorePackagedAppFamilies(records),
-		Partial:  response.Partial || response.Error != "",
+		Scan:          scan,
+		Records:       records,
+		Families:      groupStorePackagedAppFamilies(records),
+		Partial:       response.Partial || response.Error != "",
+		BrokerVersion: strings.TrimSpace(response.BrokerVersion),
 	}
 	if response.Error != "" {
 		inventory.Errors = append(inventory.Errors, response.Error)

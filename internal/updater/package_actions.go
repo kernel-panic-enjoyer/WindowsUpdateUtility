@@ -85,10 +85,11 @@ func installPackageContext(ctx context.Context, manager, id string) CommandResul
 	if err := validateManagerAndID(manager, id); err != nil {
 		return validationCommandResult("install", err)
 	}
+	appLog("Install started for %s:%s.", manager, id)
 	if result := runPrivilegedPackageInstall(ctx, manager, id); result.Command != "" || result.Code != 0 || result.OK {
+		appLog("Install finished for %s:%s with code %d.", manager, id, result.Code)
 		return result
 	}
-	appLog("Install started for %s:%s.", manager, id)
 	defer invalidateManagerDetectionCache()
 	var result CommandResult
 	switch manager {
@@ -109,10 +110,11 @@ func updatePackageWithMetadataContext(ctx context.Context, pkg Package) CommandR
 	if err := validateManagerAndID(manager, id); err != nil {
 		return validationCommandResult("update", err)
 	}
+	appLog("Update started for %s:%s.", manager, id)
 	if result := runPrivilegedPackageUpdate(ctx, pkg); result.Command != "" || result.Code != 0 || result.OK {
+		appLog("Update finished for %s:%s with code %d.", manager, id, result.Code)
 		return result
 	}
-	appLog("Update started for %s:%s.", manager, id)
 	defer invalidateManagerDetectionCache()
 	var result CommandResult
 	switch manager {

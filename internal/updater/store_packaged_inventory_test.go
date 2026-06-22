@@ -1,6 +1,7 @@
 package updater
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -14,6 +15,7 @@ func TestParseStorePackagedInventoryResponse(t *testing.T) {
 	scan := testNativeInventoryScan("scan-1", "S-1-5-21-test-1001")
 	data := `{
 		"protocol_version":1,
+		"broker_version":"store-inventory-broker/test",
 		"scan_id":"scan-1",
 		"user_sid":"S-1-5-21-test-1001",
 		"started_at":"2026-06-21T10:00:00Z",
@@ -50,6 +52,9 @@ func TestParseStorePackagedInventoryResponse(t *testing.T) {
 	}
 	if len(inventory.Families) != 1 || !inventory.Families[0].ProductLike {
 		t.Fatalf("unexpected families: %#v", inventory.Families)
+	}
+	if inventory.BrokerVersion != "store-inventory-broker/test" {
+		t.Fatalf("broker version = %q", inventory.BrokerVersion)
 	}
 }
 
@@ -220,6 +225,99 @@ func TestBrokerStorePackagedAppInventoryProviderParsesSuccessfulResponse(t *test
 	}
 }
 
+func TestBrokerStorePackagedAppInventoryProviderParsesStructuredErrorOnNonzeroExit(t *testing.T) {
+	scan := testNativeInventoryScan("scan-error", "S-1-5-21-test-1001")
+	provider := brokerStorePackagedAppInventoryProvider{
+		Path: "broker.exe",
+		Runner: func(ctx context.Context, path string, input []byte) ([]byte, []byte, error) {
+			return []byte(`{"protocol_version":1,"broker_version":"store-inventory-broker/test","scan_id":"scan-error","user_sid":"S-1-5-21-test-1001","complete":false,"partial":true,"error":"WinRT inventory failed","records":[]}`), []byte("native stderr"), errors.New("exit status 1")
+		},
+	}
+	inventory, result := provider.Inventory(context.Background(), scan)
+	if result.OK || result.Code != 1 || !inventory.Partial {
+		t.Fatalf("expected structured incomplete broker result, inventory=%#v result=%#v", inventory, result)
+	}
+	if len(inventory.Errors) != 1 || inventory.Errors[0] != "WinRT inventory failed" {
+		t.Fatalf("broker error not preserved: %#v", inventory)
+	}
+	if !strings.Contains(result.Stderr, "WinRT inventory failed") || !strings.Contains(result.Stderr, "exit status 1") || !strings.Contains(result.Stderr, "native stderr") {
+		t.Fatalf("stderr did not preserve structured/process diagnostics: %q", result.Stderr)
+	}
+	if inventory.BrokerVersion != "store-inventory-broker/test" {
+		t.Fatalf("broker version not parsed from structured error: %#v", inventory)
+	}
+}
+
+func TestBrokerStorePackagedAppInventoryProviderNonzeroMalformedOutputReportsBothErrors(t *testing.T) {
+	scan := testNativeInventoryScan("scan-malformed", "S-1-5-21-test-1001")
+	provider := brokerStorePackagedAppInventoryProvider{
+		Path: "broker.exe",
+		Runner: func(ctx context.Context, path string, input []byte) ([]byte, []byte, error) {
+			return []byte(`{"protocol_version":`), nil, errors.New("exit status 1")
+		},
+	}
+	inventory, result := provider.Inventory(context.Background(), scan)
+	if result.OK || !inventory.Partial || !strings.Contains(result.Stderr, "exit status 1") {
+		t.Fatalf("expected malformed output plus process error, inventory=%#v result=%#v", inventory, result)
+	}
+}
+
+func TestBrokerStorePackagedAppInventoryProviderNonzeroWrongIdentityRejected(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+	}{
+		{"wrong scan", `{"protocol_version":1,"scan_id":"other-scan","user_sid":"S-1-5-21-test-1001","complete":false,"partial":true,"error":"wrong scan","records":[]}`},
+		{"wrong user", `{"protocol_version":1,"scan_id":"scan-identity","user_sid":"S-1-5-21-other","complete":false,"partial":true,"error":"wrong user","records":[]}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			scan := testNativeInventoryScan("scan-identity", "S-1-5-21-test-1001")
+			provider := brokerStorePackagedAppInventoryProvider{
+				Path: "broker.exe",
+				Runner: func(ctx context.Context, path string, input []byte) ([]byte, []byte, error) {
+					return []byte(tc.json), nil, errors.New("exit status 1")
+				},
+			}
+			inventory, result := provider.Inventory(context.Background(), scan)
+			if result.OK || !inventory.Partial || len(inventory.Errors) == 0 {
+				t.Fatalf("expected rejected structured identity error, inventory=%#v result=%#v", inventory, result)
+			}
+			if strings.Contains(strings.Join(inventory.Errors, "\n"), "wrong user") || strings.Contains(strings.Join(inventory.Errors, "\n"), "wrong scan") {
+				t.Fatalf("wrong identity response error should not be accepted as broker truth: %#v", inventory.Errors)
+			}
+		})
+	}
+}
+
+func TestBrokerStorePackagedAppInventoryProviderZeroExitIncompleteResponse(t *testing.T) {
+	scan := testNativeInventoryScan("scan-incomplete", "S-1-5-21-test-1001")
+	provider := brokerStorePackagedAppInventoryProvider{
+		Path: "broker.exe",
+		Runner: func(ctx context.Context, path string, input []byte) ([]byte, []byte, error) {
+			return []byte(`{"protocol_version":1,"scan_id":"scan-incomplete","user_sid":"S-1-5-21-test-1001","complete":false,"partial":true,"error":"WinRT partial enumeration","records":[]}`), nil, nil
+		},
+	}
+	inventory, result := provider.Inventory(context.Background(), scan)
+	if result.OK || result.Code != 1 || !inventory.Partial || !strings.Contains(result.Stderr, "WinRT partial enumeration") {
+		t.Fatalf("zero-exit incomplete response must remain incomplete: inventory=%#v result=%#v", inventory, result)
+	}
+}
+
+func TestBrokerStorePackagedAppInventoryProviderEmptyStdoutProcessError(t *testing.T) {
+	scan := testNativeInventoryScan("scan-empty", "S-1-5-21-test-1001")
+	provider := brokerStorePackagedAppInventoryProvider{
+		Path: "broker.exe",
+		Runner: func(ctx context.Context, path string, input []byte) ([]byte, []byte, error) {
+			return nil, nil, errors.New("exit status 1")
+		},
+	}
+	inventory, result := provider.Inventory(context.Background(), scan)
+	if result.OK || !inventory.Partial || !strings.Contains(result.Stderr, "exit status 1") {
+		t.Fatalf("expected process error for empty stdout, inventory=%#v result=%#v", inventory, result)
+	}
+}
+
 func TestParseStorePackagedInventoryKeepsBrokerErrorProtocolFields(t *testing.T) {
 	scan := testNativeInventoryScan("wrong-user-scan", "S-1-5-21-wrong")
 	data := `{"protocol_version":1,"scan_id":"wrong-user-scan","user_sid":"S-1-5-21-wrong","started_at":"2026-06-21T10:00:00Z","completed_at":"2026-06-21T10:00:01Z","complete":false,"partial":true,"error":"Broker user SID does not match request user SID.","records":[]}`
@@ -252,6 +350,18 @@ func TestEnsureEmbeddedStoreInventoryBrokerExtractsSidecar(t *testing.T) {
 	}
 	if !strings.HasPrefix(string(data[:2]), "MZ") {
 		t.Fatalf("extracted broker does not look like a Windows executable")
+	}
+}
+
+func TestEmbeddedStoreInventoryBrokerAssetPresent(t *testing.T) {
+	if len(embeddedStoreInventoryBroker) == 0 {
+		t.Fatal("embedded Store inventory broker asset is empty")
+	}
+	if len(embeddedStoreInventoryBroker) < 2 || string(embeddedStoreInventoryBroker[:2]) != "MZ" {
+		t.Fatal("embedded Store inventory broker asset is not a Windows executable")
+	}
+	if !bytes.Contains(embeddedStoreInventoryBroker, utf16LEForTest("store-inventory-broker/2026.06.22.1")) {
+		t.Fatal("embedded Store inventory broker asset does not contain the expected broker build version")
 	}
 }
 
@@ -315,4 +425,12 @@ func storeInventoryContainsString(values []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func utf16LEForTest(value string) []byte {
+	out := make([]byte, 0, len(value)*2)
+	for _, r := range value {
+		out = append(out, byte(r), byte(r>>8))
+	}
+	return out
 }

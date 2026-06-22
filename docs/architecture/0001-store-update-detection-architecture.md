@@ -40,7 +40,10 @@ Store scan state is persisted transactionally. Published scan generations are im
 
 ## Distribution
 
-The normal build embeds `internal/updater/assets/broker/WindowsUpdater.StoreInventoryBroker.exe`. Runtime extraction writes the broker beside the app or under `UPDATER_BINARY_DIR`.
+The normal build first compiles `native/store-inventory-broker/Program.cs` with
+`dev/scripts/Build-StoreInventoryBroker.ps1`, then embeds
+`internal/updater/assets/broker/WindowsUpdater.StoreInventoryBroker.exe`.
+Runtime extraction writes the broker beside the app or under `UPDATER_BINARY_DIR`.
 
 ## Known Gaps
 

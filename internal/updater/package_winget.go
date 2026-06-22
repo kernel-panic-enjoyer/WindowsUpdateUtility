@@ -47,6 +47,7 @@ func wingetMatchValue(value string) string {
 func parseWingetTable(output string) []Package {
 	lines := strings.Split(output, "\n")
 	headerSeen := false
+	var columnStarts []int
 	var packages []Package
 	for _, raw := range lines {
 		line := strings.TrimSpace(raw)
@@ -57,6 +58,7 @@ func parseWingetTable(output string) []Package {
 		if !headerSeen {
 			if strings.Contains(lower, "name") && strings.Contains(lower, "id") && strings.Contains(lower, "version") {
 				headerSeen = true
+				columnStarts = packageTableColumnStarts(raw)
 			}
 			continue
 		}
@@ -64,6 +66,9 @@ func parseWingetTable(output string) []Package {
 			continue
 		}
 		cols := splitPackageTableColumns(line)
+		if len(cols) < 3 || wingetTableColumnsNeedHeaderFallback(cols) {
+			cols = splitPackageTableColumnsAtStarts(raw, columnStarts)
+		}
 		if len(cols) < 3 {
 			continue
 		}
@@ -99,6 +104,37 @@ func parseWingetTable(output string) []Package {
 		packages = append(packages, pkg)
 	}
 	return packages
+}
+
+func wingetTableColumnsNeedHeaderFallback(cols []string) bool {
+	if len(cols) < 3 {
+		return true
+	}
+	if isSourceToken(cols[2]) || isWingetMatchColumn(cols[2]) || isWingetPinnedColumn(cols[2]) {
+		return true
+	}
+	if isLikelyVersionToken(cols[1]) {
+		return true
+	}
+	return false
+}
+
+func isLikelyVersionToken(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || isUnknownPackageVersion(value) {
+		return false
+	}
+	hasDigit := false
+	for _, r := range value {
+		switch {
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		case r == '.' || r == '-' || r == '_' || r == '+':
+		default:
+			return false
+		}
+	}
+	return hasDigit
 }
 
 func isUnknownPackageVersion(version string) bool {

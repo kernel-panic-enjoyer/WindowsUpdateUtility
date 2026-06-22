@@ -5,21 +5,11 @@ Scope: manual validation for the current-user packaged-application inventory pro
 ## Build Broker
 
 Requires a Windows SDK/.NET Framework machine. Build the broker directly into
-the repo-embedded asset path so temporary and final binaries stay under the
-workspace:
+the repo-embedded asset path with the workspace script so temporary and final
+binaries stay under the workspace:
 
 ```powershell
-New-Item -ItemType Directory -Force .\internal\updater\assets\broker | Out-Null
-. .\dev\scripts\Set-WorkspaceBinaryPaths.ps1 | Out-Null
-& 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe' /nologo /target:exe `
-  /out:'.\internal\updater\assets\broker\WindowsUpdater.StoreInventoryBroker.exe' `
-  /reference:'C:\Windows\System32\WinMetadata\Windows.ApplicationModel.winmd' `
-  /reference:'C:\Windows\System32\WinMetadata\Windows.Management.winmd' `
-  /reference:'C:\Windows\System32\WinMetadata\Windows.System.winmd' `
-  /reference:'C:\Windows\System32\WinMetadata\Windows.Storage.winmd' `
-  /reference:'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\System.Runtime.WindowsRuntime.dll' `
-  /reference:'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\System.Runtime.dll' `
-  .\native\store-inventory-broker\Program.cs
+powershell -ExecutionPolicy Bypass -File .\dev\scripts\Build-StoreInventoryBroker.ps1
 ```
 
 Build the app with repo-local Go cache and temporary directories:
@@ -28,7 +18,7 @@ Build the app with repo-local Go cache and temporary directories:
 powershell -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1
 ```
 
-The app embeds the checked-in broker asset and extracts it at runtime to:
+The app embeds the script-built broker asset and extracts it at runtime to:
 
 ```text
 dist\bin\WindowsUpdater.StoreInventoryBroker.exe

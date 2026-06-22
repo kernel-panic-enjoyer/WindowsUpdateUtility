@@ -35,7 +35,6 @@ When a request depends on recency (e.g., "latest", "current", "today", "as of no
 
 ### Editing files
 
-- Make the smallest safe change that solves the issue.
 - Preserve existing style and conventions.
 - After making changes, run the project's standard checks when feasible (format/lint, unit tests, build/typecheck).
 - For this repository, keep generated binaries and temporary build artifacts inside `C:\Users\User\Documents\Updater\`: set `GOBIN=.gobin`, `GOCACHE=.gocache`, `GOMODCACHE=.gomodcache`, `GOPATH=.gopath`, `GOTMPDIR=.gotmp`, `TEMP=.tmp`, `TMP=.tmp`, `UPDATER_TEMP_DIR=.tmp`, `UPDATER_BINARY_DIR=.tmp-bin`, `DOTNET_CLI_HOME=.dotnet`, and NuGet paths under `.nuget\`; build final executables under `dist\`.
