@@ -174,3 +174,4 @@
 - 2026-06-22T19:14:46+02:00 [TEST] dev\scripts\Build-Workspace.ps1 passed from the new location and rebuilt canonical dist\WindowsUpdaterWebUI.exe.
 - 2026-06-22T19:25:36+02:00 [CODE] Installed Packages presentation was tightened again: persisted Store assessment fallback names now use friendly AppX display cleanup, AppX inventory-only rows sort after managed/resolved rows, and the Installed table no longer duplicates Store state in both Available and Status columns.
 - 2026-06-22T19:25:36+02:00 [TEST] Focused inventory/UI tests passed, dev\scripts\Build-Workspace.ps1 passed and rebuilt canonical dist\WindowsUpdaterWebUI.exe after stopping two running updater processes that locked it, and go vet ./... passed.
+- 2026-06-22T19:28:38+02:00 [CODE] Documentation Markdown files were reorganized into purpose-based folders: docs/status, docs/testing, and docs/troubleshooting; root/native/dev README-style files remain conventional in-place names.

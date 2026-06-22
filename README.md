@@ -37,6 +37,10 @@ runtime.
 - `dev/scripts`: developer build, environment, and distribution smoke helpers.
 - `dev/tools/icongen`: icon generation utility.
 - `dev/tools/spikes`: disposable Store/API validation probes, excluded from the production binary.
+- `docs/architecture`: architecture decision records.
+- `docs/status`: current implementation status and release-gate notes.
+- `docs/testing`: manual Windows smoke-test procedures.
+- `docs/troubleshooting`: user-facing troubleshooting notes.
 - `dist`: local build output.
 
 ## Build
