@@ -798,18 +798,26 @@
   }
   function renderStoreScanHealth(){
     var target = $("store-scan-health-body");
+    var summary = $("store-scan-health-summary");
     if(!target){ return; }
+    function setStoreHealthSummary(markup){
+      if(summary){ summary.innerHTML = markup; }
+    }
     if(latestPackagesLoading){
+      setStoreHealthSummary(loadingText("Checking Store status..."));
       target.innerHTML = loadingText("Checking Store coverage...");
       return;
     }
     var health = storeScanHealth();
     if(!health.active){
+      setStoreHealthSummary('<span class="badge state-unknown">Legacy</span><span>Detailed Store status unavailable</span>');
       target.innerHTML = '<div class="health-summary"><span class="badge state-unknown">Legacy Store detector</span><span class="muted">New Store assessment fields are disabled.</span></div>';
       return;
     }
     var title = health.healthy ? "Store scan is complete enough to report Current." : "Store update status needs attention.";
     var badge = health.healthy ? '<span class="badge state-current">Healthy</span>' : '<span class="badge state-unknown">Not authoritative</span>';
+    var summaryText = health.healthy ? "Coverage OK" : "Needs review";
+    setStoreHealthSummary(badge + '<span>' + html(summaryText) + '</span>');
     var metrics = ["available","current","unknown","conflict","inapplicable","pending","stale"].map(function(key){
       return '<span class="badge state-' + attr(key) + '">' + html(stateLabel(key)) + ': ' + html(health.counts[key] || 0) + '</span>';
     }).join("");

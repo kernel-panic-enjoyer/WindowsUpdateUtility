@@ -101,6 +101,16 @@ main{width:min(1500px,100%);margin:0 auto;padding:22px 28px 28px}
 .section-heading h2{margin:0;font-size:21px;line-height:1.2;letter-spacing:0}
 .muted{color:var(--muted)}
 .store-health-panel{border-left:4px solid var(--blue)}
+.store-health-compact{padding:0;border-left:0;background:color-mix(in srgb,var(--surface) 88%,var(--bg));box-shadow:none}
+.store-health-compact summary{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:11px 14px;cursor:pointer;list-style:none}
+.store-health-compact summary::-webkit-details-marker{display:none}
+.store-health-summary-main{display:flex;align-items:center;gap:10px;min-width:0}
+.store-health-title{font-weight:800;color:var(--text);white-space:nowrap}
+.store-health-summary-text{display:flex;align-items:center;gap:8px;min-width:0;color:var(--muted);font-size:14px}
+.store-health-summary-action{color:var(--muted);font-weight:800;font-size:13px}
+.store-health-expanded{border-top:1px solid var(--line);padding:12px 14px 14px}
+.store-health-actions{justify-content:flex-end;margin-bottom:10px}
+.store-health-actions button{min-height:34px;padding:7px 10px}
 .store-health-body{display:grid;gap:10px}
 .health-summary{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .health-summary strong{font-size:16px}

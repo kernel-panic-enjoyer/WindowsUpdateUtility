@@ -60,10 +60,13 @@ var pageTemplate = template.Must(template.New("page").Funcs(template.FuncMap{
       <article class="summary-card"><span class="summary-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 6v6l4 2"/><circle cx="12" cy="12" r="9"/></svg></span><div><p>Automation</p><strong id="summary-automation">-</strong><span id="summary-automation-detail" class="muted"><span class="loading-text"><span class="spinner" aria-hidden="true"></span><span>Loading tasks</span></span></span></div></article>
     </section>
 
-    <section id="store-scan-health" class="panel store-health-panel" aria-live="polite">
-      <div class="section-heading"><div><span class="panel-kicker">Store scan health</span><h2>Microsoft Store Update Status</h2></div><div class="button-row"><button id="store-diagnostics-export-button" class="ghost" type="button"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></span><span>Export Store Diagnostics</span></button><button id="store-rescan-button" class="ghost" type="button"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 1-15.5 6.2"/><path d="M3 12a9 9 0 0 1 15.5-6.2"/><path d="M3 18v-6h6"/><path d="M21 6v6h-6"/></svg></span><span>Rescan Store Status</span></button></div></div>
-      <div id="store-scan-health-body" class="store-health-body"><span class="loading-text"><span class="spinner" aria-hidden="true"></span><span>Checking Store coverage...</span></span></div>
-    </section>
+    <details id="store-scan-health" class="panel store-health-panel store-health-compact">
+      <summary><span class="store-health-summary-main"><span class="store-health-title">Microsoft Store status</span><span id="store-scan-health-summary" class="store-health-summary-text"><span class="loading-text"><span class="spinner" aria-hidden="true"></span><span>Checking Store status...</span></span></span></span><span class="store-health-summary-action">Details</span></summary>
+      <div class="store-health-expanded">
+        <div class="button-row store-health-actions"><button id="store-diagnostics-export-button" class="ghost" type="button"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></span><span>Export Store Diagnostics</span></button><button id="store-rescan-button" class="ghost" type="button"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 1-15.5 6.2"/><path d="M3 12a9 9 0 0 1 15.5-6.2"/><path d="M3 18v-6h6"/><path d="M21 6v6h-6"/></svg></span><span>Rescan Store Status</span></button></div>
+        <div id="store-scan-health-body" class="store-health-body" aria-live="polite"><span class="loading-text"><span class="spinner" aria-hidden="true"></span><span>Checking Store coverage...</span></span></div>
+      </div>
+    </details>
 
     <section class="control-grid">
       <div class="panel manager-panel"><div class="section-heading"><h2>Package Managers</h2><span class="panel-kicker">Availability</span></div><div id="manager-list"><p class="muted"><span class="loading-text"><span class="spinner" aria-hidden="true"></span><span>Checking package managers...</span></span></p></div></div>

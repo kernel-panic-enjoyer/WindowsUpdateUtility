@@ -25,6 +25,8 @@ func TestRenderedHTMLContainsAsyncUpdateHooks(t *testing.T) {
 		`defer`,
 		`id="dashboard-summary"`,
 		`id="store-scan-health"`,
+		`store-health-compact`,
+		`id="store-scan-health-summary"`,
 		`id="store-scan-health-body"`,
 		`id="store-rescan-button"`,
 		`id="store-diagnostics-export-button"`,
