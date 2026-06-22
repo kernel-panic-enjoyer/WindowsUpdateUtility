@@ -177,3 +177,5 @@
 - 2026-06-22T19:28:38+02:00 [CODE] Documentation Markdown files were reorganized into purpose-based folders: docs/status, docs/testing, and docs/troubleshooting; root/native/dev README-style files remain conventional in-place names.
 - 2026-06-22T19:33:03+02:00 [CODE] Store scan health UI was demoted from a prominent dashboard panel to a compact collapsed Microsoft Store status row; diagnostics export and rescan controls remain available inside Details.
 - 2026-06-22T19:33:03+02:00 [TEST] Focused UI smoke test passed and dev\scripts\Build-Workspace.ps1 rebuilt dist\WindowsUpdaterWebUI.exe successfully.
+- 2026-06-22T20:28:57+02:00 [CODE] Winget package install/update actions no longer use the elevated worker by default; they run in the current user context so commands/output stream into the WebUI log and user-scoped packages are updated in the correct session. Chocolatey remains elevated.
+- 2026-06-22T20:28:57+02:00 [TEST] Added privileged-package-action policy regression; focused tests passed and dev\scripts\Build-Workspace.ps1 rebuilt dist\WindowsUpdaterWebUI.exe after stopping the running updater processes that held the binary.

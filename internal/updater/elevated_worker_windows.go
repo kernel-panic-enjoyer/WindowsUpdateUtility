@@ -432,7 +432,7 @@ func parseUint32(value string) (uint32, error) {
 }
 
 func privilegedPackageActionRequired(manager string) bool {
-	return manager == managerWinget || manager == managerChoco
+	return manager == managerChoco
 }
 
 func runPrivilegedPackageInstall(ctx context.Context, manager, id string) CommandResult {

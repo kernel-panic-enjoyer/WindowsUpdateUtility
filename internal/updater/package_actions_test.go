@@ -756,6 +756,18 @@ func TestPackageCommandBuilders(t *testing.T) {
 	}
 }
 
+func TestPrivilegedPackageActionRequiredOnlyForChocolatey(t *testing.T) {
+	if privilegedPackageActionRequired(managerWinget) {
+		t.Fatal("winget package actions should run in the current user context by default so output streams to the WebUI log")
+	}
+	if privilegedPackageActionRequired(managerStore) {
+		t.Fatal("Store package actions must stay in the current user context")
+	}
+	if !privilegedPackageActionRequired(managerChoco) {
+		t.Fatal("Chocolatey package actions should still use the elevated worker")
+	}
+}
+
 func TestWingetNoApplicableUpgradeUsesFallbackDetection(t *testing.T) {
 	english := CommandResult{Code: 1, Stdout: "No applicable upgrade found."}
 	if !shouldForceInstallAfterWingetUpgrade(english) {
