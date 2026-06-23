@@ -488,50 +488,19 @@ func parseStoreCLIUpdateCheck(output string) (StoreObservationKind, error) {
 	return parseStoreCLIUpdateCheckResult(context.Background(), output, CommandResult{OK: true, Stdout: output})
 }
 
+type storeCLIUpdateCheckClassification struct {
+	meaningful            bool
+	positive              bool
+	inapplicable          bool
+	negative              bool
+	expectedPromptFailure string
+	failureLines          []string
+}
+
 func parseStoreCLIUpdateCheckResult(ctx context.Context, output string, command CommandResult) (StoreObservationKind, error) {
-	meaningful := false
-	positive := false
-	inapplicable := false
-	negative := false
-	expectedPromptFailure := ""
-	failureLines := []string{}
-	for _, raw := range strings.Split(output, "\n") {
-		line := strings.TrimSpace(raw)
-		if line == "" {
-			continue
-		}
-		lower := strings.ToLower(line)
-		switch {
-		case strings.Contains(lower, "update available"):
-			positive = true
-			continue
-		case storeCLIUpdatePromptIndicatesOffer(lower):
-			if count := storeCLIUpdatePromptOfferCount(lower); count > 1 {
-				return StoreObservationIncompleteResult, fmt.Errorf("Store CLI update check mentioned %d update(s) without exact target-specific evidence", count)
-			}
-			positive = true
-			continue
-		case strings.Contains(lower, "no applicable installer") ||
-			strings.Contains(lower, "not applicable"):
-			inapplicable = true
-			continue
-		case strings.Contains(lower, "already up to date") ||
-			strings.Contains(lower, "no update available") ||
-			strings.Contains(lower, "no updates found"):
-			negative = true
-			continue
-		case storeCLIOutputFailureLine(lower):
-			if storeCLIExpectedNoninteractivePromptFailureLine(lower) {
-				expectedPromptFailure = line
-			} else {
-				failureLines = append(failureLines, line)
-			}
-			continue
-		}
-		if isStoreOutputNoiseLine(line) {
-			continue
-		}
-		meaningful = true
+	classified, classifyErr := classifyStoreCLIUpdateCheckOutput(output)
+	if classifyErr != nil {
+		return StoreObservationIncompleteResult, classifyErr
 	}
 	if ctx.Err() != nil {
 		return StoreObservationIncompleteResult, ctx.Err()
@@ -542,42 +511,128 @@ func parseStoreCLIUpdateCheckResult(ctx context.Context, output string, command 
 	if command.Code == commandCancelledCode {
 		return StoreObservationIncompleteResult, errors.New("Store CLI update check was cancelled")
 	}
-	if len(failureLines) > 0 {
-		diagnostic := strings.Join(failureLines, "; ")
-		if positive || negative || inapplicable {
-			return StoreObservationIncompleteResult, errors.New(diagnostic)
-		}
-		return StoreObservationIncompleteResult, errors.New(diagnostic)
+	if len(classified.failureLines) > 0 {
+		return StoreObservationIncompleteResult, errors.New(strings.Join(classified.failureLines, "; "))
 	}
-	if positive {
+	if !storeCLICommandResultSuccessful(command) {
+		if storeCLIAllowsNoninteractivePromptPositive(command, classified) {
+			return StoreObservationPositiveUpdateOffer, nil
+		}
+		return StoreObservationIncompleteResult, errors.New(firstNonEmpty(command.Stderr, command.Stdout, classified.expectedPromptFailure, "Store CLI update check failed"))
+	}
+	if classified.positive {
 		return StoreObservationPositiveUpdateOffer, nil
 	}
-	if inapplicable {
-		if expectedPromptFailure != "" {
-			return StoreObservationIncompleteResult, errors.New(expectedPromptFailure)
+	if classified.inapplicable {
+		if classified.expectedPromptFailure != "" {
+			return StoreObservationIncompleteResult, errors.New(classified.expectedPromptFailure)
 		}
 		return StoreObservationNewerCatalogNoApplicableInstaller, nil
 	}
-	if negative {
-		if expectedPromptFailure != "" {
-			return StoreObservationIncompleteResult, errors.New(expectedPromptFailure)
+	if classified.negative {
+		if classified.expectedPromptFailure != "" {
+			return StoreObservationIncompleteResult, errors.New(classified.expectedPromptFailure)
 		}
 		return StoreObservationAuthoritativeNegative, nil
 	}
-	if expectedPromptFailure != "" {
-		return StoreObservationIncompleteResult, errors.New(expectedPromptFailure)
+	if classified.expectedPromptFailure != "" {
+		return StoreObservationIncompleteResult, errors.New(classified.expectedPromptFailure)
 	}
-	if !command.OK {
-		return StoreObservationIncompleteResult, errors.New(firstNonEmpty(command.Stderr, command.Stdout, "Store CLI update check failed"))
-	}
-	if !meaningful {
+	if !classified.meaningful {
 		return StoreObservationEmptyResult, errors.New("Store CLI update check returned empty or non-authoritative output")
 	}
 	return StoreObservationIncompleteResult, errors.New("Store CLI update check returned unrecognized output")
 }
 
+func classifyStoreCLIUpdateCheckOutput(output string) (storeCLIUpdateCheckClassification, error) {
+	var classified storeCLIUpdateCheckClassification
+	for _, raw := range strings.Split(output, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		lower := strings.ToLower(line)
+		switch {
+		case storeCLIExpectedNoninteractivePromptFailureLine(lower):
+			classified.expectedPromptFailure = line
+			continue
+		case storeCLIOutputFailureLine(lower):
+			classified.failureLines = append(classified.failureLines, line)
+			continue
+		case storeCLIInapplicableLine(line) || storeCLINoApplicableUpdateLine(lower):
+			classified.inapplicable = true
+			continue
+		case storeCLIUpdateNegativeLine(lower):
+			classified.negative = true
+			continue
+		case storeCLIUpdatePromptIndicatesOffer(lower):
+			if count := storeCLIUpdatePromptOfferCount(lower); count > 1 {
+				return classified, fmt.Errorf("Store CLI update check mentioned %d update(s) without exact target-specific evidence", count)
+			}
+			classified.positive = true
+			continue
+		case storeCLIUpdatePositiveLine(lower):
+			classified.positive = true
+			continue
+		}
+		if isStoreOutputNoiseLine(line) {
+			continue
+		}
+		classified.meaningful = true
+	}
+	return classified, nil
+}
+
 func storeCLIExpectedNoninteractivePromptFailureLine(lower string) bool {
 	return strings.Contains(lower, "failed to read input in non-interactive mode")
+}
+
+func storeCLICommandResultSuccessful(command CommandResult) bool {
+	return command.OK && command.Code == 0
+}
+
+func storeCLIAllowsNoninteractivePromptPositive(command CommandResult, classified storeCLIUpdateCheckClassification) bool {
+	return classified.positive &&
+		!classified.negative &&
+		!classified.inapplicable &&
+		classified.expectedPromptFailure != "" &&
+		len(classified.failureLines) == 0 &&
+		storeCLICommandTargetsExactPFN(command.Command)
+}
+
+func storeCLICommandTargetsExactPFN(command string) bool {
+	fields := strings.Fields(command)
+	for index, field := range fields {
+		if !strings.EqualFold(strings.Trim(field, "\"'"), "update") {
+			continue
+		}
+		for _, candidate := range fields[index+1:] {
+			candidate = strings.Trim(candidate, "\"'")
+			if candidate == "" || strings.HasPrefix(candidate, "-") {
+				continue
+			}
+			return packageFamilyNameFromWingetValue(candidate) != ""
+		}
+	}
+	return false
+}
+
+func storeCLINoApplicableUpdateLine(lower string) bool {
+	return strings.Contains(lower, "no applicable update available")
+}
+
+func storeCLIUpdateNegativeLine(lower string) bool {
+	return strings.Contains(lower, "already up to date") ||
+		strings.Contains(lower, "no update available") ||
+		strings.Contains(lower, "no updates available") ||
+		strings.Contains(lower, "no available update") ||
+		strings.Contains(lower, "no updates found") ||
+		strings.Contains(lower, "no update found")
+}
+
+func storeCLIUpdatePositiveLine(lower string) bool {
+	return strings.Contains(lower, "update available") ||
+		strings.Contains(lower, "updates available")
 }
 
 func storeCLIUpdatePromptIndicatesOffer(lower string) bool {
@@ -639,7 +694,7 @@ func parseStoreCLIUpdatesOutput(output string) (storeCLIUpdatesParseResult, erro
 				result.ExpectedOfferCount = count
 			}
 			continue
-		case storeCLIOutputFailureLine(lower):
+		case storeCLIExpectedNoninteractivePromptFailureLine(lower) || storeCLIOutputFailureLine(lower):
 			result.FailureDiagnostics = append(result.FailureDiagnostics, line)
 			meaningful = true
 			continue
@@ -651,15 +706,21 @@ func parseStoreCLIUpdatesOutput(output string) (storeCLIUpdatesParseResult, erro
 			var problems []string
 			switch strings.ToLower(key) {
 			case "product id":
-				if current.complete() && current.ProductID != "" && !strings.EqualFold(current.ProductID, value) {
+				if current.shouldStartNextProductID(value) {
 					flush("next Product ID")
 				}
 				problems = current.setProductID(value)
 			case "pfn", "package family name":
+				if current.shouldStartNextPFN(value) {
+					flush("next PFN")
+				}
 				problems = current.setPFN(value)
 			case "update id":
-				if packageFamilyNameFromWingetValue(value) != "" {
-					problems = current.setPFN(packageFamilyNameFromWingetValue(value))
+				if pfn := packageFamilyNameFromWingetValue(value); pfn != "" {
+					if current.shouldStartNextPFN(pfn) {
+						flush("next Update ID")
+					}
+					problems = current.setPFN(pfn)
 				}
 			case "available version", "new version":
 				problems = current.setAvailableVersion(value)
@@ -739,6 +800,16 @@ func (builder storeCLIUpdatesRecordBuilder) complete() bool {
 	return builder.ProductID != "" && builder.PFN != ""
 }
 
+func (builder storeCLIUpdatesRecordBuilder) shouldStartNextProductID(value string) bool {
+	value = strings.TrimSpace(value)
+	return builder.complete() && value != "" && builder.ProductID != "" && !strings.EqualFold(builder.ProductID, value)
+}
+
+func (builder storeCLIUpdatesRecordBuilder) shouldStartNextPFN(value string) bool {
+	value = strings.TrimSpace(value)
+	return builder.complete() && value != "" && builder.PFN != "" && !strings.EqualFold(builder.PFN, value)
+}
+
 func (builder *storeCLIUpdatesRecordBuilder) setProductID(value string) []string {
 	return builder.setField("Product ID", &builder.ProductID, value)
 }
@@ -778,7 +849,23 @@ func (builder storeCLIUpdatesRecordBuilder) finish() (storeCLIUpdatesParsedOffer
 }
 
 func storeCLIOutputFailureLine(lower string) bool {
-	return strings.Contains(lower, "could not find") ||
+	lower = strings.TrimSpace(lower)
+	if lower == "" ||
+		storeCLIExpectedNoninteractivePromptFailureLine(lower) ||
+		storeCLIUpdateNegativeLine(lower) ||
+		storeCLIInapplicableLine(lower) ||
+		storeCLINoApplicableUpdateLine(lower) {
+		return false
+	}
+	return strings.Contains(lower, "access is denied") ||
+		strings.Contains(lower, "access denied") ||
+		strings.Contains(lower, "unauthorized") ||
+		strings.Contains(lower, "exception") ||
+		strings.Contains(lower, "hresult") ||
+		strings.Contains(lower, "package not found") ||
+		strings.Contains(lower, "product not found") ||
+		strings.Contains(lower, "no product found") ||
+		strings.Contains(lower, "could not find") ||
 		strings.Contains(lower, "error:") ||
 		strings.Contains(lower, "failed") ||
 		strings.Contains(lower, "failure") ||

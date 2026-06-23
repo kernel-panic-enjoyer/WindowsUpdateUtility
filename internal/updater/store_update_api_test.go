@@ -228,10 +228,11 @@ func TestTransactionalStoreAssessmentAPISerializesPublishedStates(t *testing.T) 
 		wantReason          string
 	}{
 		{
-			name:        "complete healthy scan with no updates",
-			providers:   []StoreCatalogProvider{negativeProvider("OpenAI.Codex_abc123", "1.0.0")},
-			wantState:   StoreUpdateCurrent,
-			wantHealthy: true,
+			name:             "complete healthy scan with no updates",
+			providers:        []StoreCatalogProvider{negativeProvider("OpenAI.Codex_abc123", "1.0.0")},
+			wantState:        StoreUpdateCurrent,
+			checkExactTarget: true,
+			wantHealthy:      true,
 		},
 		{
 			name:                "update available",

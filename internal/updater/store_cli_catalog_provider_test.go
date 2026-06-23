@@ -110,6 +110,35 @@ Failed to read input in non-interactive mode.`,
 	}
 }
 
+func TestParseStoreCLIUpdateCheckNegativePhrasesNeverBecomePositive(t *testing.T) {
+	tests := []struct {
+		phrase string
+		want   StoreObservationKind
+	}{
+		{phrase: "No update available", want: StoreObservationAuthoritativeNegative},
+		{phrase: "No updates available", want: StoreObservationAuthoritativeNegative},
+		{phrase: "There is no update available", want: StoreObservationAuthoritativeNegative},
+		{phrase: "No available update", want: StoreObservationAuthoritativeNegative},
+		{phrase: "No updates found", want: StoreObservationAuthoritativeNegative},
+		{phrase: "Already up to date", want: StoreObservationAuthoritativeNegative},
+		{phrase: "No applicable update available", want: StoreObservationNewerCatalogNoApplicableInstaller},
+	}
+	for _, tc := range tests {
+		t.Run(tc.phrase, func(t *testing.T) {
+			got, err := parseStoreCLIUpdateCheck(tc.phrase)
+			if err != nil {
+				t.Fatalf("unexpected error for %q: %v", tc.phrase, err)
+			}
+			if got != tc.want {
+				t.Fatalf("got=%s, want=%s", got, tc.want)
+			}
+			if got == StoreObservationPositiveUpdateOffer {
+				t.Fatalf("%q must not create a positive update offer", tc.phrase)
+			}
+		})
+	}
+}
+
 func TestParseStoreCLIUpdateCheckResultCommandFailures(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -191,6 +220,184 @@ func TestParseStoreCLIUpdateCheckResultCommandFailures(t *testing.T) {
 			name:    "nonzero unrecognized",
 			output:  "Checking updates...",
 			result:  CommandResult{Code: 1, Stderr: "exit status 1"},
+			want:    StoreObservationIncompleteResult,
+			wantErr: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			if tc.ctxErr {
+				cancelled, cancel := context.WithCancel(ctx)
+				cancel()
+				ctx = cancelled
+			}
+			got, err := parseStoreCLIUpdateCheckResult(ctx, tc.output, tc.result)
+			if got != tc.want || (err != nil) != tc.wantErr {
+				t.Fatalf("got=%s err=%v, want=%s err=%v", got, err, tc.want, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestParseStoreCLIUpdateCheckRequiresTrustworthyCommandOutcome(t *testing.T) {
+	exactCommand := "store update Microsoft.VP9VideoExtensions_8wekyb3d8bbwe --apply false"
+	tests := []struct {
+		name    string
+		output  string
+		result  CommandResult
+		ctxErr  bool
+		want    StoreObservationKind
+		wantErr bool
+	}{
+		{
+			name:   "clean successful positive",
+			output: "Update available for 'VP9-Videoerweiterungen'",
+			result: CommandResult{OK: true, Command: exactCommand},
+			want:   StoreObservationPositiveUpdateOffer,
+		},
+		{
+			name:   "clean successful negative",
+			output: "No update available",
+			result: CommandResult{OK: true, Command: exactCommand},
+			want:   StoreObservationAuthoritativeNegative,
+		},
+		{
+			name:   "clean successful inapplicable",
+			output: "No applicable installer is available.",
+			result: CommandResult{OK: true, Command: exactCommand},
+			want:   StoreObservationNewerCatalogNoApplicableInstaller,
+		},
+		{
+			name:    "nonzero plus positive text",
+			output:  "Update available",
+			result:  CommandResult{Command: exactCommand, Code: 1, Stdout: "Update available"},
+			want:    StoreObservationIncompleteResult,
+			wantErr: true,
+		},
+		{
+			name:    "nonzero plus negative text",
+			output:  "No update available",
+			result:  CommandResult{Command: exactCommand, Code: 1, Stdout: "No update available"},
+			want:    StoreObservationIncompleteResult,
+			wantErr: true,
+		},
+		{
+			name:    "nonzero plus inapplicable text",
+			output:  "No applicable installer is available.",
+			result:  CommandResult{Command: exactCommand, Code: 1, Stdout: "No applicable installer is available."},
+			want:    StoreObservationIncompleteResult,
+			wantErr: true,
+		},
+		{
+			name:    "ok true with nonzero code is inconsistent",
+			output:  "Update available",
+			result:  CommandResult{OK: true, Command: exactCommand, Code: 1, Stdout: "Update available"},
+			want:    StoreObservationIncompleteResult,
+			wantErr: true,
+		},
+		{
+			name:    "positive plus standalone access denied",
+			output:  "Update available\nAccess denied",
+			result:  CommandResult{OK: true, Command: exactCommand},
+			want:    StoreObservationIncompleteResult,
+			wantErr: true,
+		},
+		{
+			name:    "positive plus unauthorized",
+			output:  "Update available\nUnauthorized",
+			result:  CommandResult{OK: true, Command: exactCommand},
+			want:    StoreObservationIncompleteResult,
+			wantErr: true,
+		},
+		{
+			name:    "positive plus exception hresult",
+			output:  "Update available\nException HRESULT: 0x80070005",
+			result:  CommandResult{OK: true, Command: exactCommand},
+			want:    StoreObservationIncompleteResult,
+			wantErr: true,
+		},
+		{
+			name:    "positive plus package not found",
+			output:  "Update available\nPackage not found",
+			result:  CommandResult{OK: true, Command: exactCommand},
+			want:    StoreObservationIncompleteResult,
+			wantErr: true,
+		},
+		{
+			name:    "positive plus product not found",
+			output:  "Update available\nProduct not found",
+			result:  CommandResult{OK: true, Command: exactCommand},
+			want:    StoreObservationIncompleteResult,
+			wantErr: true,
+		},
+		{
+			name:    "positive plus generic error",
+			output:  "Update available\nError: catalog failed",
+			result:  CommandResult{OK: true, Command: exactCommand},
+			want:    StoreObservationIncompleteResult,
+			wantErr: true,
+		},
+		{
+			name:    "positive plus timeout code",
+			output:  "Update available",
+			result:  CommandResult{Command: exactCommand, Code: 124, Stdout: "Update available"},
+			want:    StoreObservationIncompleteResult,
+			wantErr: true,
+		},
+		{
+			name:    "positive plus cancellation code",
+			output:  "Update available",
+			result:  CommandResult{Command: exactCommand, Code: commandCancelledCode, Stdout: "Update available"},
+			want:    StoreObservationIncompleteResult,
+			wantErr: true,
+		},
+		{
+			name:    "positive before context cancellation",
+			output:  "Update available",
+			result:  CommandResult{OK: true, Command: exactCommand},
+			ctxErr:  true,
+			want:    StoreObservationIncompleteResult,
+			wantErr: true,
+		},
+		{
+			name:   "allowed exact noninteractive prompt failure",
+			output: "Update available for 'VP9-Videoerweiterungen'\nFailed to read input in non-interactive mode.",
+			result: CommandResult{Command: exactCommand, Code: 1, Stdout: "Update available for 'VP9-Videoerweiterungen'\nFailed to read input in non-interactive mode."},
+			want:   StoreObservationPositiveUpdateOffer,
+		},
+		{
+			name:    "negative plus prompt failure",
+			output:  "No update available\nFailed to read input in non-interactive mode.",
+			result:  CommandResult{Command: exactCommand, Code: 1, Stdout: "No update available\nFailed to read input in non-interactive mode."},
+			want:    StoreObservationIncompleteResult,
+			wantErr: true,
+		},
+		{
+			name:    "inapplicable plus prompt failure",
+			output:  "No applicable installer is available.\nFailed to read input in non-interactive mode.",
+			result:  CommandResult{Command: exactCommand, Code: 1, Stdout: "No applicable installer is available.\nFailed to read input in non-interactive mode."},
+			want:    StoreObservationIncompleteResult,
+			wantErr: true,
+		},
+		{
+			name:    "prompt failure plus another fatal line",
+			output:  "Update available\nFailed to read input in non-interactive mode.\nAccess is denied",
+			result:  CommandResult{Command: exactCommand, Code: 1, Stdout: "Update available\nFailed to read input in non-interactive mode.\nAccess is denied"},
+			want:    StoreObservationIncompleteResult,
+			wantErr: true,
+		},
+		{
+			name:    "generic prompt mentioning two updates",
+			output:  "Would you like to install the 2 Store update(s) now? [y/n] (y):",
+			result:  CommandResult{OK: true, Command: exactCommand},
+			want:    StoreObservationIncompleteResult,
+			wantErr: true,
+		},
+		{
+			name:    "prompt failure without exact command context",
+			output:  "Update available\nFailed to read input in non-interactive mode.",
+			result:  CommandResult{Command: "store update Codex --apply false", Code: 1, Stdout: "Update available\nFailed to read input in non-interactive mode."},
 			want:    StoreObservationIncompleteResult,
 			wantErr: true,
 		},
@@ -321,6 +528,44 @@ PFN : Microsoft.WindowsCalculator_8wekyb3d8bbwe`,
 			wantPFNs: []string{"Microsoft.VP9VideoExtensions_8wekyb3d8bbwe", "Microsoft.WindowsCalculator_8wekyb3d8bbwe"},
 		},
 		{
+			name: "adjacent pfn-first second record",
+			output: `Product ID : 9N4D0MSMP0PT
+PFN : Microsoft.VP9VideoExtensions_8wekyb3d8bbwe
+PFN : Microsoft.WindowsCalculator_8wekyb3d8bbwe
+Product ID : 9NCALC`,
+			wantIDs:  []string{"9N4D0MSMP0PT", "9NCALC"},
+			wantPFNs: []string{"Microsoft.VP9VideoExtensions_8wekyb3d8bbwe", "Microsoft.WindowsCalculator_8wekyb3d8bbwe"},
+		},
+		{
+			name: "pfn-first then product-id-first adjacent records",
+			output: `PFN : Microsoft.VP9VideoExtensions_8wekyb3d8bbwe
+Product ID : 9N4D0MSMP0PT
+Product ID : 9NCALC
+PFN : Microsoft.WindowsCalculator_8wekyb3d8bbwe`,
+			wantIDs:  []string{"9N4D0MSMP0PT", "9NCALC"},
+			wantPFNs: []string{"Microsoft.VP9VideoExtensions_8wekyb3d8bbwe", "Microsoft.WindowsCalculator_8wekyb3d8bbwe"},
+		},
+		{
+			name: "adjacent record beginning with update id",
+			output: `Product ID : 9N4D0MSMP0PT
+PFN : Microsoft.VP9VideoExtensions_8wekyb3d8bbwe
+Update ID : Microsoft.WindowsCalculator_8wekyb3d8bbwe
+Product ID : 9NCALC`,
+			wantIDs:  []string{"9N4D0MSMP0PT", "9NCALC"},
+			wantPFNs: []string{"Microsoft.VP9VideoExtensions_8wekyb3d8bbwe", "Microsoft.WindowsCalculator_8wekyb3d8bbwe"},
+		},
+		{
+			name: "three adjacent records mixed identity order without blanks",
+			output: `Product ID : 9N4D0MSMP0PT
+PFN : Microsoft.VP9VideoExtensions_8wekyb3d8bbwe
+PFN : Microsoft.WindowsCalculator_8wekyb3d8bbwe
+Product ID : 9NCALC
+Product ID : 9NPAINT
+Update ID : Microsoft.Paint_8wekyb3d8bbwe`,
+			wantIDs:  []string{"9N4D0MSMP0PT", "9NCALC", "9NPAINT"},
+			wantPFNs: []string{"Microsoft.VP9VideoExtensions_8wekyb3d8bbwe", "Microsoft.WindowsCalculator_8wekyb3d8bbwe", "Microsoft.Paint_8wekyb3d8bbwe"},
+		},
+		{
 			name: "duplicate identical identity fields",
 			output: `Product ID : 9N4D0MSMP0PT
 Product ID : 9N4D0MSMP0PT
@@ -334,7 +579,9 @@ PFN : Microsoft.VP9VideoExtensions_8wekyb3d8bbwe`,
 			output: `Product ID : 9N4D0MSMP0PT
 PFN : Microsoft.VP9VideoExtensions_8wekyb3d8bbwe
 PFN : Other.App_8wekyb3d8bbwe`,
-			wantErr: true,
+			wantIDs:  []string{"9N4D0MSMP0PT"},
+			wantPFNs: []string{"Microsoft.VP9VideoExtensions_8wekyb3d8bbwe"},
+			wantErr:  true,
 		},
 		{
 			name: "duplicate conflicting product id",
@@ -342,6 +589,15 @@ PFN : Other.App_8wekyb3d8bbwe`,
 Product ID : 9NWRONG
 PFN : Microsoft.VP9VideoExtensions_8wekyb3d8bbwe`,
 			wantErr: true,
+		},
+		{
+			name: "conflicting product id after complete record retained as partial next record",
+			output: `Product ID : 9N4D0MSMP0PT
+PFN : Microsoft.VP9VideoExtensions_8wekyb3d8bbwe
+Product ID : 9NPARTIAL`,
+			wantIDs:  []string{"9N4D0MSMP0PT"},
+			wantPFNs: []string{"Microsoft.VP9VideoExtensions_8wekyb3d8bbwe"},
+			wantErr:  true,
 		},
 		{
 			name: "partial first then valid second",
@@ -749,6 +1005,47 @@ Available Version : 1.2.20.0`}
 	}
 }
 
+func TestStoreCLIUpdatesProviderAdjacentPFNFirstOffers(t *testing.T) {
+	restore := replacePackageActionManagerAvailable(func(manager string) bool { return manager == managerStore })
+	defer restore()
+	scan := StoreScanGeneration{
+		ScanID:           "scan-store-updates-adjacent-pfn-first",
+		UserSID:          "S-1-5-21-store-updates",
+		StartedAt:        time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC),
+		CompletedAt:      time.Date(2026, 6, 21, 12, 0, 1, 0, time.UTC),
+		CompletionStatus: StoreScanCompleted,
+	}
+	vp9PFN := "Microsoft.VP9VideoExtensions_8wekyb3d8bbwe"
+	calcPFN := "Microsoft.WindowsCalculator_8wekyb3d8bbwe"
+	inventory := testStoreInventory(scan, vp9PFN, "1.2.13.0")
+	calc := testStoreInventory(scan, calcPFN, "11.0.0.0")
+	inventory.Records = append(inventory.Records, calc.Records...)
+	inventory.Families = groupStorePackagedAppFamilies(inventory.Records)
+	provider := storeCLIUpdatesCatalogProvider{
+		Now: fixedPipelineTimes(scan.StartedAt, scan.StartedAt.Add(time.Second), scan.StartedAt.Add(2*time.Second), scan.StartedAt.Add(3*time.Second)),
+		Run: func(ctx context.Context, timeout time.Duration, args ...string) CommandResult {
+			return CommandResult{OK: true, Command: strings.Join(args, " "), Stdout: `Product ID : 9N4D0MSMP0PT
+PFN : Microsoft.VP9VideoExtensions_8wekyb3d8bbwe
+PFN : Microsoft.WindowsCalculator_8wekyb3d8bbwe
+Product ID : 9NCALC`}
+		},
+	}
+	run := provider.Observe(context.Background(), scan, inventory.Families)
+	if run.Health != StoreProviderHealthy || len(run.Observations) != 2 || len(run.Mappings) != 2 {
+		t.Fatalf("run=%#v", run)
+	}
+	byPFN := map[string]StoreProviderObservation{}
+	for _, observation := range run.Observations {
+		byPFN[observation.Identity.PackageFamilyName] = observation
+	}
+	for pfn, productID := range map[string]string{vp9PFN: "9N4D0MSMP0PT", calcPFN: "9NCALC"} {
+		got := byPFN[pfn]
+		if got.Kind != StoreObservationPositiveUpdateOffer || got.Target == nil || got.Target.ProductID != productID {
+			t.Fatalf("offer for %s = %#v", pfn, got)
+		}
+	}
+}
+
 func TestStoreCLIUpdatesProviderUnmatchedOfferMakesCoverageIncomplete(t *testing.T) {
 	restore := replacePackageActionManagerAvailable(func(manager string) bool { return manager == managerStore })
 	defer restore()
@@ -967,6 +1264,71 @@ func TestStoreCLIExactProviderVP9AuthoritativeNegative(t *testing.T) {
 	}
 }
 
+func TestStoreCLIExactProviderNoUpdateAvailableIsNegative(t *testing.T) {
+	run := runVP9StoreCLIProviderFixture(t, "9N4D0MSMP0PT", "Microsoft.VP9VideoExtensions_8wekyb3d8bbwe", "No update available", nil)
+	if len(run.Mappings) != 1 {
+		t.Fatalf("verified PFN/Product ID mapping should be retained: %#v", run)
+	}
+	got := run.Observations[0]
+	if got.Kind != StoreObservationAuthoritativeNegative || got.Target != nil {
+		t.Fatalf("No update available must not create a target: %#v", got)
+	}
+	assessment := ReconcileStoreUpdate(StoreReconciliationInput{
+		Identity:          got.Identity,
+		Scan:              StoreScanGeneration{ScanID: got.ScanID, UserSID: got.Identity.UserSID, StartedAt: run.StartedAt, CompletedAt: run.CompletedAt, CompletionStatus: StoreScanCompleted},
+		RequiredProviders: []StoreProviderIdentity{run.Provider},
+		Observations:      run.Observations,
+	})
+	if assessment.State == StoreUpdateAvailable || assessment.Target != nil {
+		t.Fatalf("negative exact evidence must not reconcile to available: %#v", assessment)
+	}
+}
+
+func TestStoreCLIExactProviderNonzeroPositiveIsIncomplete(t *testing.T) {
+	restore := replacePackageActionManagerAvailable(func(manager string) bool { return manager == managerStore })
+	defer restore()
+	scan := StoreScanGeneration{
+		ScanID:           "scan-vp9-nonzero-positive",
+		UserSID:          "S-1-5-21-vp9",
+		StartedAt:        time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC),
+		CompletedAt:      time.Date(2026, 6, 21, 12, 0, 1, 0, time.UTC),
+		CompletionStatus: StoreScanCompleted,
+	}
+	pfn := "Microsoft.VP9VideoExtensions_8wekyb3d8bbwe"
+	provider := storeCLIExactCatalogProvider{
+		Concurrency: 1,
+		Now:         fixedPipelineTimes(scan.StartedAt, scan.StartedAt.Add(time.Second), scan.StartedAt.Add(2*time.Second), scan.StartedAt.Add(3*time.Second)),
+		Run: func(ctx context.Context, timeout time.Duration, args ...string) CommandResult {
+			command := strings.Join(args, " ")
+			switch {
+			case strings.Contains(command, " show "+pfn):
+				return CommandResult{OK: true, Command: command, Stdout: "Product ID : 9N4D0MSMP0PT\nPFN : " + pfn}
+			case strings.Contains(command, " update "+pfn):
+				return CommandResult{Command: command, Code: 1, Stdout: "Update available"}
+			default:
+				return CommandResult{Command: command, Code: 1, Stderr: "unexpected command"}
+			}
+		},
+	}
+	run := provider.Observe(context.Background(), scan, testStoreInventory(scan, pfn, "1.2.13.0").Families)
+	if len(run.Mappings) != 1 {
+		t.Fatalf("mapping should be retained after incomplete update-state command: %#v", run)
+	}
+	got := run.Observations[0]
+	if got.Kind != StoreObservationIncompleteResult || got.Target != nil || got.Health != StoreProviderIncomplete {
+		t.Fatalf("nonzero positive output must be incomplete without target: %#v", got)
+	}
+	assessment := ReconcileStoreUpdate(StoreReconciliationInput{
+		Identity:          got.Identity,
+		Scan:              scan,
+		RequiredProviders: []StoreProviderIdentity{run.Provider},
+		Observations:      run.Observations,
+	})
+	if assessment.State != StoreUpdateUnknown {
+		t.Fatalf("incomplete exact evidence must reconcile to unknown, got %#v", assessment)
+	}
+}
+
 func TestStoreCLIExactProviderPromptOnlyOfferKeepsExactTarget(t *testing.T) {
 	run := runVP9StoreCLIProviderFixture(t, "9N4D0MSMP0PT", "Microsoft.VP9VideoExtensions_8wekyb3d8bbwe", "Would you like to apply the update? [y/n] (y):\nFailed to read input in non-interactive mode.", nil)
 	got := run.Observations[0]
@@ -1045,6 +1407,50 @@ func TestStoreCLIExactCatalogQueryProvider(t *testing.T) {
 	}
 	if !strings.Contains(result.Command, "Store CLI exact catalog state check") {
 		t.Fatalf("expected identity check and state check to be represented in command diagnostics, got %q", result.Command)
+	}
+}
+
+func TestStoreCLIExactCatalogQueryProviderNoUpdateAvailableReportsNoOffer(t *testing.T) {
+	pfn := "Microsoft.VP9VideoExtensions_8wekyb3d8bbwe"
+	request := StoreExactUpdateRequest{Identity: StoreInstalledIdentity{UserSID: "S-1-5-21-vp9", PackageFamilyName: pfn}, UpdateID: pfn, ProductID: "9N4D0MSMP0PT"}
+	provider := storeCLIExactCatalogQueryProvider{Provider: storeCLIExactCatalogProvider{
+		Run: func(ctx context.Context, timeout time.Duration, args ...string) CommandResult {
+			command := strings.Join(args, " ")
+			switch {
+			case strings.Contains(command, " show "+pfn):
+				return CommandResult{OK: true, Command: command, Stdout: "Product ID : 9N4D0MSMP0PT\nPFN : " + pfn}
+			case strings.Contains(command, " update "+pfn):
+				return CommandResult{OK: true, Command: command, Stdout: "No update available"}
+			default:
+				return CommandResult{Command: command, Code: 1, Stderr: "unexpected command"}
+			}
+		},
+	}}
+	got, result := provider.QueryExact(context.Background(), request)
+	if !result.OK || !got.Authoritative || got.OfferAvailable {
+		t.Fatalf("No update available should be authoritative no-offer, catalog=%#v result=%#v", got, result)
+	}
+}
+
+func TestStoreCLIExactCatalogQueryProviderNonzeroPositiveIsNotAuthoritative(t *testing.T) {
+	pfn := "Microsoft.VP9VideoExtensions_8wekyb3d8bbwe"
+	request := StoreExactUpdateRequest{Identity: StoreInstalledIdentity{UserSID: "S-1-5-21-vp9", PackageFamilyName: pfn}, UpdateID: pfn, ProductID: "9N4D0MSMP0PT"}
+	provider := storeCLIExactCatalogQueryProvider{Provider: storeCLIExactCatalogProvider{
+		Run: func(ctx context.Context, timeout time.Duration, args ...string) CommandResult {
+			command := strings.Join(args, " ")
+			switch {
+			case strings.Contains(command, " show "+pfn):
+				return CommandResult{OK: true, Command: command, Stdout: "Product ID : 9N4D0MSMP0PT\nPFN : " + pfn}
+			case strings.Contains(command, " update "+pfn):
+				return CommandResult{Command: command, Code: 1, Stdout: "Update available"}
+			default:
+				return CommandResult{Command: command, Code: 1, Stderr: "unexpected command"}
+			}
+		},
+	}}
+	got, result := provider.QueryExact(context.Background(), request)
+	if got.Authoritative || got.OfferAvailable || result.OK {
+		t.Fatalf("nonzero positive output must not be authoritative, catalog=%#v result=%#v", got, result)
 	}
 }
 

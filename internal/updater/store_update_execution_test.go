@@ -248,6 +248,22 @@ func TestStoreExactUpdateAcceptedButTargetedRescanFails(t *testing.T) {
 	}
 }
 
+func TestStoreExactUpdateFailedTargetedRescanWithNegativeTextDoesNotVerify(t *testing.T) {
+	executor := testStoreExactExecutor(
+		fakeStoreExactRunner{result: CommandResult{OK: true, Command: "store update 9NCODEX", Stdout: "accepted"}},
+		&fakeStoreExactInventory{snapshots: []StoreExactPackageSnapshot{
+			testStoreExactSnapshot("1.0.0", "OpenAI.Codex_1.0.0_x64__abc123", true),
+			testStoreExactSnapshot("1.0.0", "OpenAI.Codex_1.0.0_x64__abc123", true),
+		}},
+		fakeStoreExactCatalog{result: StoreExactCatalogResult{Authoritative: false, OfferAvailable: false, InstalledHealthy: true}, command: CommandResult{Command: "catalog query 9NCODEX", Code: 1, Stdout: "No update available"}},
+		fakeStoreEvents{},
+	)
+	result := executeStoreExactUpdateForTest(t, executor, testExactStorePackage())
+	if result.OK || result.Code != storeUpdateAcceptedNotVerifiedCode {
+		t.Fatalf("failed targeted no-offer text must not verify update, got %#v", result)
+	}
+}
+
 func TestStoreExactUpdateNilCatalogUsesProductionProductIDFirstQuery(t *testing.T) {
 	catalogCalls := 0
 	oldDefaultCatalogProvider := defaultStoreExactCatalogProvider
