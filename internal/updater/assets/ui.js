@@ -916,6 +916,22 @@
     function setStoreHealthSummary(markup){
       if(summary){ summary.innerHTML = markup; }
     }
+    function storeManagerDetailsMarkup(){
+      var manager = latestStatus && latestStatus.managers ? latestStatus.managers.store : null;
+      if(!manager){ return ""; }
+      var details = [];
+      if(manager.inventory_available){
+        details.push("Store apps detected via " + (manager.inventory_backend || "AppX") + " inventory.");
+      }
+      if(!manager.available && manager.action_backend === "winget-msstore-fallback"){
+        details.push("Store installs and updates can fall back to winget for compatible Store IDs.");
+      }
+      if(manager.path){
+        details.push("Store CLI path: " + manager.path);
+      }
+      if(details.length === 0){ return ""; }
+      return '<div class="health-summary manager-status-details"><span class="badge">Inventory</span><span>' + html(details.join(" ")) + '</span></div>';
+    }
     if(latestPackagesLoading){
       setStoreHealthSummary(loadingText("Checking Store status..."));
       target.innerHTML = loadingText("Checking Store coverage...");
@@ -924,7 +940,7 @@
     var health = storeScanHealth();
     if(!health.active){
       setStoreHealthSummary('<span class="badge state-unknown">Legacy</span><span>Detailed Store status unavailable</span>');
-      target.innerHTML = '<div class="health-summary"><span class="badge state-unknown">Legacy Store detector</span><span class="muted">New Store assessment fields are disabled.</span></div>';
+      target.innerHTML = storeManagerDetailsMarkup() + '<div class="health-summary"><span class="badge state-unknown">Legacy Store detector</span><span class="muted">New Store assessment fields are disabled.</span></div>';
       return;
     }
     var title = health.healthy ? "Store scan is complete enough to report Current." : "Store update status needs attention.";
@@ -950,7 +966,7 @@
     health.providerIssues.slice(0, 20).forEach(function(pkg){
       details.push('<li><strong>' + html(pkg.name || pkg.id || "Store package") + ':</strong> ' + html(packageReasonText(pkg) || storeUpdateState(pkg)) + providerDiagnosticsMarkup(pkg) + '</li>');
     });
-    target.innerHTML = '<div class="health-summary">' + badge + '<strong>' + html(title) + '</strong></div><div class="health-metrics">' + metrics + '</div>' + (details.length ? '<details class="diagnostic-details"><summary>Provider diagnostics</summary><ul class="diagnostic-list">' + details.join("") + '</ul></details>' : '');
+    target.innerHTML = storeManagerDetailsMarkup() + '<div class="health-summary">' + badge + '<strong>' + html(title) + '</strong></div><div class="health-metrics">' + metrics + '</div>' + (details.length ? '<details class="diagnostic-details"><summary>Provider diagnostics</summary><ul class="diagnostic-list">' + details.join("") + '</ul></details>' : '');
   }
 
   function renderDashboardSummary(){
@@ -1005,25 +1021,24 @@
     function managerDisplayDetails(name, manager){
       var details = [];
       if(name === "store"){
-        if(manager.inventory_available){
-          details.push('<span class="muted">Store apps detected via ' + html(manager.inventory_backend || 'AppX') + ' inventory</span>');
-        }
-        if(!manager.available && manager.action_backend === "winget-msstore-fallback"){
-          details.push('<span class="muted">Store installs and updates can fall back to winget for compatible Store IDs.</span>');
-        }
-        details.push('<button class="ghost manager-details-button" type="button" data-store-status-open>Details</button>');
-        return '<div class="manager-extra">' + details.join("") + '</div>';
+        return "";
       }
       if(manager.inventory_available){ details.push('<span class="badge ok">Inventory available</span>'); }
       return details.length ? '<div class="manager-extra">' + details.join("") + '</div>' : "";
     }
+    function managerAvailabilityMarkup(name, manager){
+      var badge = '<span class="badge ' + (manager.available ? 'ok' : 'error') + '">' + html(manager.available ? managerAvailabilityText(name, manager) : 'Missing') + '</span>';
+      if(name !== "store"){ return badge; }
+      return '<div class="manager-availability"><button class="ghost manager-details-button" type="button" data-store-status-open>Details</button>' + badge + '</div>';
+    }
     var markup = names.map(function(name){
       var manager = managers[name] || {};
       var details = managerDisplayDetails(name, manager);
+      var availability = managerAvailabilityMarkup(name, manager);
       if(manager.available){
-        return '<div class="manager manager-ok"><div class="manager-main"><span class="manager-dot">' + icon("check") + '</span><div><strong>' + html(managerLabel(name)) + '</strong><span class="muted">' + html(manager.path || '') + '</span></div></div><span class="badge ok">' + html(managerAvailabilityText(name, manager)) + '</span>' + details + '</div>';
+        return '<div class="manager manager-ok"><div class="manager-main"><span class="manager-dot">' + icon("check") + '</span><div><strong>' + html(managerLabel(name)) + '</strong><span class="muted">' + html(manager.path || '') + '</span></div></div>' + availability + details + '</div>';
       }
-      return '<div class="manager manager-missing"><div class="manager-main"><span class="manager-dot">' + icon("alert") + '</span><div><strong>' + html(managerLabel(name)) + '</strong><span class="muted">' + html(manager.error || '') + '</span></div></div><span class="badge error">Missing</span>' + details + '<form class="manager-install-form" method="post" action="/api/managers/install"><input type="hidden" name="manager" value="' + attr(name) + '"><button type="submit">' + icon("install") + '<span>Install ' + html(managerLabel(name)) + '</span></button></form></div>';
+      return '<div class="manager manager-missing"><div class="manager-main"><span class="manager-dot">' + icon("alert") + '</span><div><strong>' + html(managerLabel(name)) + '</strong><span class="muted">' + html(manager.error || '') + '</span></div></div>' + availability + details + '<form class="manager-install-form" method="post" action="/api/managers/install"><input type="hidden" name="manager" value="' + attr(name) + '"><button type="submit">' + icon("install") + '<span>Install ' + html(managerLabel(name)) + '</span></button></form></div>';
     }).join("");
     if(target.innerHTML !== markup){ target.innerHTML = markup; }
   }
@@ -1053,8 +1068,7 @@
   }
 
 
-  function packageNameCell(pkg, options){
-    options = options || {};
+  function packageNameCell(pkg){
     var secondary = pkg.action_backend === "appx-inventory" ? "Store app" : pkg.id;
     if(pkg.unknown_version){
       secondary += " - unknown installed version";
@@ -1062,8 +1076,7 @@
     if(pkg.pinned){
       secondary += " - pinned";
     }
-    var diagnostics = options.diagnostics && storeAssessmentActive(pkg) ? packageDiagnosticsButton(pkg) : "";
-    return '<strong>' + html(pkg.name || "Store app") + '</strong><br><span class="muted">' + html(secondary) + '</span>' + diagnostics;
+    return '<strong>' + html(pkg.name || "Store app") + '</strong><br><span class="muted">' + html(secondary) + '</span>';
   }
 	function managerCell(pkg){
 		var backend = pkg.action_backend ? '<br><span class="muted">' + html(backendLabel(pkg.action_backend)) + '</span>' : '';
@@ -1082,12 +1095,17 @@
     options = options || {};
     var showStatusBadge = options.statusBadge !== false;
     var compact = options.compact === true;
+    function withDiagnostics(content){
+      var diagnostics = options.diagnostics ? packageDiagnosticsButton(pkg) : "";
+      if(!diagnostics){ return content; }
+      return '<div class="available-cell">' + content + diagnostics + '</div>';
+    }
     function withOptionalBadge(text, muted){
       var content = muted ? '<span class="muted">' + html(text) + '</span>' : html(text);
       if(!showStatusBadge){
-        return content;
+        return withDiagnostics(content);
       }
-      return stateBadge(pkg) + '<br>' + content;
+      return withDiagnostics(stateBadge(pkg) + '<br>' + content);
     }
     if(storeAssessmentActive(pkg)){
       var state = storeUpdateState(pkg);
@@ -1113,18 +1131,18 @@
         text = stateLabel(state);
       }
       if(compact && (state === "current" || state === "unknown")){
-        return '<span class="muted">-</span>';
+        return withDiagnostics('<span class="muted">-</span>');
       }
       return withOptionalBadge(text, state !== "available" || pkg.stale || !packageHasExactStoreTarget(pkg));
     }
     if(pkg.manager === "store"){
       if(compact){
-        return '<span class="muted">-</span>';
+        return withDiagnostics('<span class="muted">-</span>');
       }
       return withOptionalBadge("Unknown", true);
     }
     var available = html(pkg.available_version);
-    return available;
+    return withDiagnostics(available);
   }
 	function updateForm(pkg){
     if(storeAssessmentActive(pkg) && !packageHasExactStoreTarget(pkg)){
@@ -1180,7 +1198,7 @@
     target.innerHTML = page.items.map(function(pkg){
       var selectable = packageBulkUpdateable(pkg);
       var rowClass = rowUpdateState(pkg.key) === "active" ? ' class="updating-current"' : '';
-      return '<tr data-key="' + attr(pkg.key) + '"' + rowClass + '><td><input form="update-selected-form" type="checkbox" name="package_key" value="' + attr(pkg.key) + '" aria-label="Select ' + attr(pkg.name) + ' for update"' + ((updateBusy || !selectable) ? ' disabled' : '') + '></td><td>' + packageNameCell(pkg, {diagnostics:true}) + '</td><td>' + managerCell(pkg) + '</td><td>' + html(pkg.version) + '</td><td>' + packageAvailableCell(pkg) + '</td><td>' + autoButton(pkg) + '</td><td>' + updateForm(pkg) + '</td></tr>';
+      return '<tr data-key="' + attr(pkg.key) + '"' + rowClass + '><td><input form="update-selected-form" type="checkbox" name="package_key" value="' + attr(pkg.key) + '" aria-label="Select ' + attr(pkg.name) + ' for update"' + ((updateBusy || !selectable) ? ' disabled' : '') + '></td><td>' + packageNameCell(pkg) + '</td><td>' + managerCell(pkg) + '</td><td>' + html(pkg.version) + '</td><td>' + packageAvailableCell(pkg, {diagnostics:true}) + '</td><td>' + autoButton(pkg) + '</td><td>' + updateForm(pkg) + '</td></tr>';
     }).join("");
     renderPager(page, status, prev, next);
   }

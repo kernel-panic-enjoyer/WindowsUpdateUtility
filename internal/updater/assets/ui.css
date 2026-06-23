@@ -120,7 +120,8 @@ main{width:min(1500px,100%);margin:0 auto;padding:22px 28px 28px}
 .diagnostic-details summary{cursor:pointer;color:var(--muted);font-weight:800}
 .diagnostic-list{display:grid;gap:6px;margin:8px 0 0;padding:0;list-style:none}
 .diagnostic-list li{padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--surface-strong);overflow-wrap:anywhere}
-.diagnostics-button{margin-top:8px;min-height:30px;padding:5px 10px}
+.diagnostics-button{min-height:30px;padding:5px 10px}
+.available-cell{display:grid;gap:8px;align-content:start;justify-items:start}
 .package-diagnostics-body{display:grid;gap:12px}
 .diagnostic-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
 .diagnostic-field{padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--surface-strong);overflow-wrap:anywhere}
@@ -158,8 +159,10 @@ main{width:min(1500px,100%);margin:0 auto;padding:22px 28px 28px}
 .manager-main .muted{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
 .manager-dot{display:grid;width:32px;height:32px;place-items:center;border-radius:8px;background:var(--surface-strong);color:var(--green);flex:0 0 auto}
 .manager-missing .manager-dot{color:var(--red)}
+.manager-availability{display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap}
 .manager-extra{grid-column:1/-1;display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding-left:42px}
 .manager-details-button{min-height:30px;padding:5px 10px}
+.manager-status-details{align-items:flex-start}
 .manager form,.update-form,.install-form,.manager-install-form,.update-all-form{margin:0}
 .stack{display:grid;gap:10px}
 .check-control{display:inline-flex;align-items:center;gap:7px;color:var(--muted);font-weight:700}

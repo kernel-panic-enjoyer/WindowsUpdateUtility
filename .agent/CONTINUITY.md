@@ -6,6 +6,7 @@
 - 2026-06-23T16:39:55+02:00 [USER] Active objective: explain and correct why stale/no-target Store assessments appear in the primary `Updates Available` queue.
 - 2026-06-23T16:46:42+02:00 [USER] Active objective: move per-row update diagnostics under `Updates Available` into a popup instead of inline row expansion.
 - 2026-06-23T16:56:54+02:00 [USER] Active objective: stop stale retained Store evidence from rendering as `Update available` in Installed Packages.
+- 2026-06-23T17:04:26+02:00 [USER] Active objective: clean the Package Managers Store row by moving the AppX inventory note into Details and aligning the Details button next to the availability badge.
 
 [DECISIONS]
 
@@ -30,6 +31,7 @@
 - 2026-06-23T16:39:55+02:00 [CODE] UI `Updates Available` filtering now requires Store assessments to be fresh `available`; stale retained positives and no-target Store diagnostics remain in Installed Packages/Store details instead of the primary update queue.
 - 2026-06-23T16:46:42+02:00 [CODE] Update-table diagnostics now render as a compact `Diagnostics` button that opens `package-diagnostics-modal`; provider evidence stays inspectable without expanding rows inline.
 - 2026-06-23T16:56:54+02:00 [CODE] Store compatibility adapters now expose `update_available=true` only for fresh exact Store offers; stale Store positives remain `update_state=available` with `stale=true` for diagnostics but are not updateable or sorted as updates.
+- 2026-06-23T17:04:26+02:00 [CODE] Package Managers Store row now renders only the Store CLI path plus an availability cluster; the `Details` button sits beside the `Available`/`Missing` badge, and the AppX inventory note moved into the Store status modal.
 
 [DISCOVERIES]
 
@@ -51,3 +53,4 @@
 - 2026-06-23T16:39:55+02:00 [TOOL] Stale Store queue validation passed: focused Store UI smoke tests, `go test -count=1 ./...`, `go vet ./...`, bundled Node `--check internal/updater/assets/ui.js`, and `dev\scripts\Build-Workspace.ps1`; rebuilt `dist\WindowsUpdaterWebUI.exe`.
 - 2026-06-23T16:46:42+02:00 [TOOL] Diagnostics-popup validation passed: UI smoke tests, bundled Node `--check internal/updater/assets/ui.js`, `go test -count=1 ./...`, `go vet ./...`, and `dev\scripts\Build-Workspace.ps1`; rebuilt `dist\WindowsUpdaterWebUI.exe`.
 - 2026-06-23T16:56:54+02:00 [TOOL] Stale Store evidence validation passed: focused stale regression tests, `go test -count=1 ./...`, `go vet ./...`, bundled Node `--check internal/updater/assets/ui.js`, and `dev\scripts\Build-Workspace.ps1`; rebuilt `dist\WindowsUpdaterWebUI.exe`.
+- 2026-06-23T17:04:26+02:00 [TOOL] Store manager-row cleanup validation passed: focused UI smoke test, bundled Node `--check internal/updater/assets/ui.js`, `go test -count=1 ./...`, `go vet ./...`, and `dev\scripts\Build-Workspace.ps1`; rebuilt `dist\WindowsUpdaterWebUI.exe`.
