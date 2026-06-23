@@ -223,7 +223,9 @@ func TestRenderedHTMLContainsAsyncUpdateHooks(t *testing.T) {
 		`data-log-category="chocolatey"`,
 		`id="log-search"`,
 		`id="log-connection-status"`,
-		`Log disconnected; retrying`,
+		`class="hero-topline"`,
+		`connection-badge`,
+		`Log reconnecting`,
 		`setLogConnectionState`,
 		`maxBrowserLogEntries`,
 		`maxBrowserLogBytes`,
@@ -258,8 +260,9 @@ func TestRenderedHTMLContainsAsyncUpdateHooks(t *testing.T) {
 		`id="installed-page-status"`,
 		`packageMatchesInstalledSearch`,
 		`packageAvailableCell`,
+		`packageAvailableCell(pkg, {diagnostics:true})`,
 		`packageAvailableCell(pkg, {statusBadge:false, compact:true})`,
-		`packageNameCell(pkg, {diagnostics:true})`,
+		`available-cell`,
 		`managersRendered`,
 		`renderUpdatesTable`,
 		`renderInstalledTable`,
@@ -335,6 +338,9 @@ func TestRenderedHTMLContainsAsyncUpdateHooks(t *testing.T) {
 		`name="token"`,
 		`searchParams.set("token"`,
 		`PFN:`,
+		`packageNameCell(pkg, {diagnostics:true})`,
+		`Session log disconnected. Reconnecting`,
+		`Log disconnected; retrying`,
 	} {
 		if strings.Contains(surface, unexpected) {
 			t.Fatalf("rendered page or embedded assets should not contain %q", unexpected)

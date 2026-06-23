@@ -67,7 +67,7 @@ var pageTemplate = template.Must(template.New("page").Funcs(template.FuncMap{
 
     <section class="dashboard-hero">
       <div class="hero-copy">
-        <span class="eyebrow">Updates first</span>
+        <div class="hero-topline"><span class="eyebrow">Updates first</span><span id="log-connection-status" class="badge connection-badge" role="status" aria-live="polite">Connecting</span></div>
         <h2>Keep Windows apps current without leaving the browser.</h2>
         <p class="muted">Winget, Chocolatey, and Store inventory are merged into one local control surface.</p>
       </div>
@@ -139,7 +139,7 @@ var pageTemplate = template.Must(template.New("page").Funcs(template.FuncMap{
 	</section>
 
     <section id="session-log-panel" class="panel log-panel">
-      <div class="section-heading"><div><span class="panel-kicker">Command output</span><h2>Session Log</h2></div><div class="button-row"><span id="log-connection-status" class="badge" role="status" aria-live="polite">Connecting</span><label class="sr-only" for="log-search">Search active log</label><input id="log-search" class="table-search" type="search" placeholder="Search active log" autocomplete="off"><label class="check-control"><input id="log-autoscroll" type="checkbox" checked> Auto Scroll</label><button id="copy-log-view" class="ghost" type="button"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></span><span>Copy Log</span></button><button id="export-log-view" class="ghost" type="button"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></span><span>Export Logs</span></button><button id="clear-log-view" class="ghost" type="button">Clear View</button></div></div>
+      <div class="section-heading"><div><span class="panel-kicker">Command output</span><h2>Session Log</h2></div><div class="button-row"><label class="sr-only" for="log-search">Search active log</label><input id="log-search" class="table-search" type="search" placeholder="Search active log" autocomplete="off"><label class="check-control"><input id="log-autoscroll" type="checkbox" checked> Auto Scroll</label><button id="copy-log-view" class="ghost" type="button"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></span><span>Copy Log</span></button><button id="export-log-view" class="ghost" type="button"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></span><span>Export Logs</span></button><button id="clear-log-view" class="ghost" type="button">Clear View</button></div></div>
       <div class="log-tabs" role="tablist" aria-label="Session log categories" aria-orientation="horizontal">
         {{range $index, $tab := logTabs}}<button id="log-tab-{{$tab.Category}}" class="log-tab{{if eq $index 0}} active{{end}}" type="button" role="tab" aria-selected="{{if eq $index 0}}true{{else}}false{{end}}" aria-controls="session-log" tabindex="{{if eq $index 0}}0{{else}}-1{{end}}" data-log-category="{{$tab.Category}}">{{$tab.Label}}</button>{{end}}
       </div>

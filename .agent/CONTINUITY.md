@@ -7,6 +7,9 @@
 - 2026-06-23T16:46:42+02:00 [USER] Active objective: move per-row update diagnostics under `Updates Available` into a popup instead of inline row expansion.
 - 2026-06-23T16:56:54+02:00 [USER] Active objective: stop stale retained Store evidence from rendering as `Update available` in Installed Packages.
 - 2026-06-23T17:04:26+02:00 [USER] Active objective: clean the Package Managers Store row by moving the AppX inventory note into Details and aligning the Details button next to the availability badge.
+- 2026-06-23T17:10:48+02:00 [USER] Active objective: move per-package Diagnostics buttons out of package name cells so the updates table name column stays readable.
+- 2026-06-23T17:14:22+02:00 [USER] Active objective: match the Store manager `Details` button border height to the adjacent `Available` badge.
+- 2026-06-23T17:19:07+02:00 [USER] Active objective: move the session-log connection indicator from Session Log/global notices into the top dashboard banner.
 
 [DECISIONS]
 
@@ -32,6 +35,9 @@
 - 2026-06-23T16:46:42+02:00 [CODE] Update-table diagnostics now render as a compact `Diagnostics` button that opens `package-diagnostics-modal`; provider evidence stays inspectable without expanding rows inline.
 - 2026-06-23T16:56:54+02:00 [CODE] Store compatibility adapters now expose `update_available=true` only for fresh exact Store offers; stale Store positives remain `update_state=available` with `stale=true` for diagnostics but are not updateable or sorted as updates.
 - 2026-06-23T17:04:26+02:00 [CODE] Package Managers Store row now renders only the Store CLI path plus an availability cluster; the `Details` button sits beside the `Available`/`Missing` badge, and the AppX inventory note moved into the Store status modal.
+- 2026-06-23T17:10:48+02:00 [CODE] Update-row Diagnostics buttons now render inside the Available cell via `packageAvailableCell(..., {diagnostics:true})`; `packageNameCell` no longer accepts or renders diagnostics.
+- 2026-06-23T17:14:22+02:00 [CODE] `.manager-details-button` now uses the same compact min-height, padding, radius, and font scale as the adjacent `.badge` pill.
+- 2026-06-23T17:19:07+02:00 [CODE] `log-connection-status` now renders in the dashboard hero banner as `connection-badge`; Session Log controls no longer include the badge, and log reconnects update the badge without showing a large notice.
 
 [DISCOVERIES]
 
@@ -54,3 +60,6 @@
 - 2026-06-23T16:46:42+02:00 [TOOL] Diagnostics-popup validation passed: UI smoke tests, bundled Node `--check internal/updater/assets/ui.js`, `go test -count=1 ./...`, `go vet ./...`, and `dev\scripts\Build-Workspace.ps1`; rebuilt `dist\WindowsUpdaterWebUI.exe`.
 - 2026-06-23T16:56:54+02:00 [TOOL] Stale Store evidence validation passed: focused stale regression tests, `go test -count=1 ./...`, `go vet ./...`, bundled Node `--check internal/updater/assets/ui.js`, and `dev\scripts\Build-Workspace.ps1`; rebuilt `dist\WindowsUpdaterWebUI.exe`.
 - 2026-06-23T17:04:26+02:00 [TOOL] Store manager-row cleanup validation passed: focused UI smoke test, bundled Node `--check internal/updater/assets/ui.js`, `go test -count=1 ./...`, `go vet ./...`, and `dev\scripts\Build-Workspace.ps1`; rebuilt `dist\WindowsUpdaterWebUI.exe`.
+- 2026-06-23T17:10:48+02:00 [TOOL] Diagnostics-button relocation validation passed: focused UI smoke test, bundled Node `--check internal/updater/assets/ui.js`, `go test -count=1 ./...`, `go vet ./...`, and `dev\scripts\Build-Workspace.ps1`; rebuilt `dist\WindowsUpdaterWebUI.exe`.
+- 2026-06-23T17:14:22+02:00 [TOOL] Store manager `Details` button sizing validation passed: focused UI smoke test, bundled Node `--check internal/updater/assets/ui.js`, `go test -count=1 ./...`, `go vet ./...`, and `dev\scripts\Build-Workspace.ps1`; rebuilt `dist\WindowsUpdaterWebUI.exe`.
+- 2026-06-23T17:19:07+02:00 [TOOL] Connection-badge relocation validation passed: focused UI smoke test, bundled Node `--check internal/updater/assets/ui.js`, `go test -count=1 ./...`, `go vet ./...`, and `dev\scripts\Build-Workspace.ps1`; rebuilt `dist\WindowsUpdaterWebUI.exe`.

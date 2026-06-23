@@ -355,8 +355,7 @@
         logPollDelay = Math.min(10000, Math.round(logPollDelay * 1.35));
       }
     }catch(e){
-      setLogConnectionState("disconnected", "Log disconnected; retrying");
-      showNotice("Session log disconnected. Reconnecting...");
+      setLogConnectionState("disconnected", "Log reconnecting");
       logPollDelay = Math.min(15000, Math.round(logPollDelay * 1.6));
     }
   }
@@ -406,8 +405,7 @@
       }catch(e){}
     });
     eventStream.onerror = function(){
-      setLogConnectionState("disconnected", "Log disconnected; retrying");
-      showNotice("Session log disconnected. Reconnecting...");
+      setLogConnectionState("disconnected", "Log reconnecting");
       if(eventStream){
         eventStream.close();
         eventStream = null;

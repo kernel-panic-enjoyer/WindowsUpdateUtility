@@ -80,8 +80,10 @@ main{width:min(1500px,100%);margin:0 auto;padding:22px 28px 28px}
 .hidden{display:none!important}
 .sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}
 .dashboard-hero{display:grid;grid-template-columns:minmax(0,1fr) minmax(360px,560px);gap:18px;align-items:end;margin-bottom:16px;padding:22px;border:1px solid var(--line);border-radius:8px;background:linear-gradient(135deg,color-mix(in srgb,var(--surface) 92%,var(--blue)),var(--surface));box-shadow:var(--shadow-soft)}
+.hero-topline{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .hero-copy h2{margin:5px 0 7px;font-size:28px;line-height:1.14;letter-spacing:0;max-width:760px}
 .hero-copy p{margin:0}
+.connection-badge{vertical-align:middle}
 .eyebrow,.panel-kicker{display:block;color:var(--teal);font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.08em}
 .hero-search{justify-content:flex-end;align-items:stretch}
 .search-field{display:flex;align-items:center;gap:8px;min-width:280px;flex:1;border:1px solid var(--line);border-radius:8px;background:var(--input);color:var(--muted);padding:0 10px}
@@ -161,7 +163,7 @@ main{width:min(1500px,100%);margin:0 auto;padding:22px 28px 28px}
 .manager-missing .manager-dot{color:var(--red)}
 .manager-availability{display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap}
 .manager-extra{grid-column:1/-1;display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding-left:42px}
-.manager-details-button{min-height:30px;padding:5px 10px}
+.manager-details-button{min-height:24px;padding:2px 8px;border-radius:6px;font-size:12px;line-height:1.2}
 .manager-status-details{align-items:flex-start}
 .manager form,.update-form,.install-form,.manager-install-form,.update-all-form{margin:0}
 .stack{display:grid;gap:10px}
