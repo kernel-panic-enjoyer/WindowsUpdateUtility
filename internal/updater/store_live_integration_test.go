@@ -138,8 +138,9 @@ func TestLiveAPIPackagesVP9Assessment(t *testing.T) {
 		t.Skip("live Microsoft Store API harness requires Windows")
 	}
 	ensureLiveWorkspaceDirs(t)
-	app := testSessionApp()
+	app := liveAcceptanceApp()
 	app.refreshInventorySync("live VP9 API acceptance")
+	awaitBackgroundStoreScan(t, app)
 
 	request := authenticatedRequest(app, http.MethodGet, "/api/packages", nil)
 	response := httptest.NewRecorder()
@@ -247,8 +248,10 @@ func TestLiveVP9ExactUpdateExecution(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
 
-	app := testSessionApp()
-	preInventory := app.refreshInventorySync("live VP9 pre-update acceptance")
+	app := liveAcceptanceApp()
+	app.refreshInventorySync("live VP9 pre-update acceptance")
+	awaitBackgroundStoreScan(t, app)
+	preInventory := app.inventorySnapshot().Inventory
 	prePackage, found := findPackageByPFN(preInventory.Packages, liveStoreVP9PackageFamilyName)
 	if !found {
 		t.Fatalf("VP9 package family %s was not found before update", liveStoreVP9PackageFamilyName)
@@ -272,7 +275,9 @@ func TestLiveVP9ExactUpdateExecution(t *testing.T) {
 		PollEvery: 5 * time.Second,
 	}
 	result := executor.Execute(ctx, prePackage)
-	postInventory := app.refreshInventorySync("live VP9 post-update acceptance")
+	app.refreshInventorySync("live VP9 post-update acceptance")
+	awaitBackgroundStoreScan(t, app)
+	postInventory := app.inventorySnapshot().Inventory
 	postPackage, postFound := findPackageByPFN(postInventory.Packages, liveStoreVP9PackageFamilyName)
 
 	evidence := map[string]any{
@@ -294,6 +299,27 @@ func TestLiveVP9ExactUpdateExecution(t *testing.T) {
 	if postFound && postPackage.UpdateState == string(StoreUpdateAvailable) {
 		t.Fatalf("VP9 still appears available after verified update: %#v", postPackage)
 	}
+}
+
+// liveAcceptanceApp builds an App with the background Store scan enabled so the
+// live acceptance harness performs a fresh Store scan (the server-only flag is
+// otherwise off for test apps).
+func liveAcceptanceApp() *App {
+	return &App{token: "test-token", sessionToken: "test-session", storeBackgroundScanEnabled: true}
+}
+
+// awaitBackgroundStoreScan blocks until the in-flight background Store scan has
+// completed so the assertions read fresh published assessments.
+func awaitBackgroundStoreScan(t *testing.T, app *App) {
+	t.Helper()
+	deadline := time.Now().Add(12 * time.Minute)
+	for time.Now().Before(deadline) {
+		if !app.inventorySnapshot().StoreLoading {
+			return
+		}
+		time.Sleep(time.Second)
+	}
+	t.Fatal("background Store scan did not complete in time")
 }
 
 func ensureLiveWorkspaceDirs(t *testing.T) {

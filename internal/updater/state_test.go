@@ -1,6 +1,7 @@
 package updater
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -210,6 +211,13 @@ func TestRunAutoUpdateSkipsUnknownVersionPackages(t *testing.T) {
 		}}}}
 	}
 	defer func() { inventoryGetter = oldGetter }()
+	// runAutoUpdate now runs a fresh Store scan inline (standalone task process
+	// has no server). Stub it so the test does not spawn real Store subprocesses.
+	oldStoreScan := runStoreTransactionalScanForInventory
+	runStoreTransactionalScanForInventory = func(ctx context.Context) (StoreScanResult, error) {
+		return StoreScanResult{}, nil
+	}
+	defer func() { runStoreTransactionalScanForInventory = oldStoreScan }()
 
 	results := runAutoUpdate()
 	if len(results) != 0 {

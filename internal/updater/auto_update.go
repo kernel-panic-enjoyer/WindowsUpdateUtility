@@ -61,6 +61,12 @@ func runAutoUpdate() []UpdateResult {
 		return nil
 	}
 	inventory := inventoryGetter()
+	// The scheduled auto-update task runs as a standalone process with no running
+	// server, so the App's background Store scan never fires here. getInventory
+	// only overlays the last published snapshot, so run a fresh transactional
+	// Store scan inline to discover currently-available Store updates before
+	// deciding what to update (matching the pre-progressive-loading behavior).
+	inventory = applyStoreTransactionalScanPipeline(context.Background(), state, inventory)
 	selectedSet := map[string]bool{}
 	for _, key := range selected {
 		normalized := normalizeAutoUpdatePackageKey(key)

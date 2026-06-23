@@ -70,7 +70,7 @@ func runServer(noBrowser bool) error {
 	if err != nil {
 		return err
 	}
-	app := &App{token: token, sessionToken: sessionToken, listenHost: defaultHost, listenPort: port}
+	app := &App{token: token, sessionToken: sessionToken, listenHost: defaultHost, listenPort: port, storeBackgroundScanEnabled: true}
 	defer app.runShutdownCleanups()
 	stopSignalWatcher := app.startShutdownSignalWatcher()
 	defer stopSignalWatcher()

@@ -8,6 +8,9 @@
   var installedPage = 1;
   var installedPageSize = 10;
   var installedSearchQuery = "";
+  var updatesManagerFilter = "all";
+  var installedManagerFilter = "all";
+  var latestStoreLoading = false;
   var searchResults = [];
   var searchMetadata = {};
   var searchPage = 1;
@@ -1171,6 +1174,14 @@
 		}
 		return '<span class="muted">-</span>';
 	}
+  function packageMatchesManagerFilter(pkg, manager){
+    return manager === "all" || (!!pkg && pkg.manager === manager);
+  }
+  function visibleUpdates(){
+    return packages.filter(packageNeedsUpdateAttention).filter(function(pkg){
+      return packageMatchesManagerFilter(pkg, updatesManagerFilter);
+    });
+  }
   function packageMatchesInstalledSearch(pkg){
     var query = installedSearchQuery.trim().toLowerCase();
     if(!query){ return true; }
@@ -1185,9 +1196,15 @@
     var next = $("updates-next");
     if(!target){ return; }
     if(updates.length === 0){
-      var emptyText = storeCoverageHealthy() ? 'No updates available.' : 'Store update status is unknown. Review scan health.';
+      var emptyText;
+      if(updatesManagerFilter !== "all"){
+        emptyText = 'No updates for the selected manager.';
+      } else {
+        emptyText = storeCoverageHealthy() ? 'No updates available.' : 'Store update status is unknown. Review scan health.';
+      }
       target.innerHTML = loading ? loadingTableRow(7, "Checking for updates...") : '<tr><td colspan="7">' + html(emptyText) + '</td></tr>';
-      renderEmptyPager(status, loading ? loadingText('Checking...') : html(storeCoverageHealthy() ? 'No updates' : 'Store status unknown'), prev, next);
+      var emptyLabel = loading ? loadingText('Checking...') : html(updatesManagerFilter !== "all" ? 'No matches' : (storeCoverageHealthy() ? 'No updates' : 'Store status unknown'));
+      renderEmptyPager(status, emptyLabel, prev, next);
       return;
     }
     var page = pagedItems(updates, updatePage, updatePageSize);
@@ -1205,10 +1222,13 @@
     var prev = $("installed-prev");
     var next = $("installed-next");
     if(!target){ return; }
-    var visiblePackages = packages.filter(packageMatchesInstalledSearch);
+    var hasFilter = !!installedSearchQuery || installedManagerFilter !== "all";
+    var visiblePackages = packages.filter(function(pkg){
+      return packageMatchesManagerFilter(pkg, installedManagerFilter) && packageMatchesInstalledSearch(pkg);
+    });
     if(visiblePackages.length === 0){
-		target.innerHTML = loading ? loadingTableRow(7, "Loading packages...") : '<tr><td colspan="7">' + (installedSearchQuery ? 'No packages match your filter.' : 'No managed packages found.') + '</td></tr>';
-      renderEmptyPager(status, loading ? loadingText('Loading...') : html(installedSearchQuery ? 'No matches' : 'No packages'), prev, next);
+		target.innerHTML = loading ? loadingTableRow(7, "Loading packages...") : '<tr><td colspan="7">' + (hasFilter ? 'No packages match your filter.' : 'No managed packages found.') + '</td></tr>';
+      renderEmptyPager(status, loading ? loadingText('Loading...') : html(hasFilter ? 'No matches' : 'No packages'), prev, next);
       return;
     }
     var page = pagedItems(visiblePackages, installedPage, installedPageSize);
@@ -1218,27 +1238,55 @@
     var rowClass = rowUpdateState(pkg.key) === "active" ? ' class="updating-current"' : '';
 		return '<tr data-key="' + attr(pkg.key) + '"' + rowClass + '><td>' + packageNameCell(pkg) + '</td><td>' + managerCell(pkg) + '</td><td>' + html(pkg.version) + '</td><td>' + packageAvailableCell(pkg, {statusBadge:false, compact:true}) + '</td><td>' + rowStatus + '</td><td>' + autoButton(pkg) + '</td><td>' + installedAction(pkg) + '</td></tr>';
 	}).join("");
-    renderPager(page, status, prev, next, installedSearchQuery ? " matches" : "");
+    renderPager(page, status, prev, next, hasFilter ? " matches" : "");
   }
   function renderPackageTables(){
-    var updates = packages.filter(packageNeedsUpdateAttention);
+    var allUpdates = packages.filter(packageNeedsUpdateAttention);
     var updateablePackages = packages.filter(packageAutoUpdateable);
     var updateJobRunning = activeUpdateJobRunning();
     $("auto-all").disabled = updateBusy || updateablePackages.length === 0;
     $("auto-none").disabled = updateBusy || updateablePackages.length === 0;
-    renderUpdatesTable(updates, latestPackagesLoading);
+    renderUpdatesTable(visibleUpdates(), latestPackagesLoading);
     renderInstalledTable(latestPackagesLoading);
-    var supportedUpdates = updates.filter(packageBulkUpdateable);
+    var supportedUpdates = allUpdates.filter(packageBulkUpdateable);
     $("update-all-button").disabled = updateBusy || updateJobRunning || supportedUpdates.length === 0;
     $("update-selected-button").disabled = updateBusy || updateJobRunning || supportedUpdates.length === 0;
     renderDashboardSummary();
+  }
+  function renderStoreLoadingNotes(loading){
+    ["updates-store-loading", "installed-store-loading"].forEach(function(id){
+      var node = $(id);
+      if(node){ node.classList.toggle("hidden", !loading); }
+    });
+  }
+  function syncManagerFilterOptions(data){
+    var managers = (data && data.managers) || {};
+    [["updates-manager-filter", "updates"], ["installed-manager-filter", "installed"]].forEach(function(spec){
+      var select = $(spec[0]);
+      if(!select){ return; }
+      var current = spec[1] === "updates" ? updatesManagerFilter : installedManagerFilter;
+      Array.prototype.forEach.call(select.options, function(opt){
+        if(opt.value === "all"){ return; }
+        var available = !!(managers[opt.value] && managers[opt.value].available);
+        opt.hidden = !available;
+        opt.disabled = !available;
+      });
+      if(current !== "all" && !(managers[current] && managers[current].available)){
+        current = "all";
+        if(spec[1] === "updates"){ updatesManagerFilter = "all"; } else { installedManagerFilter = "all"; }
+      }
+      select.value = current;
+    });
   }
   function renderPackages(data){
     renderManagers(data);
     packages = data.packages || [];
     latestStoreScanHealth = data.store_scan_health || null;
     latestPackagesLoading = !!data.loading;
+    latestStoreLoading = !!data.store_loading;
+    syncManagerFilterOptions(data);
     renderStoreScanHealth();
+    renderStoreLoadingNotes(latestStoreLoading);
     renderPackageTables();
   }
 
@@ -1446,8 +1494,9 @@
       var data = await (await fetch(api("/api/packages", {}), options)).json();
       if(seq !== packageRequestSeq){ return null; }
       renderPackages(data);
-      packagePollDelay = data.loading ? Math.min(15000, Math.round(packagePollDelay * 1.35)) : 900;
-      if(data.loading){ schedulePackageLoad(false, packagePollDelay); }
+      var stillLoading = !!(data.loading || data.store_loading);
+      packagePollDelay = stillLoading ? Math.min(15000, Math.round(packagePollDelay * 1.35)) : 900;
+      if(stillLoading){ schedulePackageLoad(false, packagePollDelay); }
       return data;
     }catch(e){
       if(e && e.name === "AbortError"){ return null; }
@@ -2358,11 +2407,21 @@
   $("update-allow-pinned").addEventListener("change", function(){ renderPackageTables(); });
   $("updates-prev").addEventListener("click", function(){
     updatePage--;
-    renderUpdatesTable(packages.filter(packageNeedsUpdateAttention), latestPackagesLoading);
+    renderUpdatesTable(visibleUpdates(), latestPackagesLoading);
   });
   $("updates-next").addEventListener("click", function(){
     updatePage++;
-    renderUpdatesTable(packages.filter(packageNeedsUpdateAttention), latestPackagesLoading);
+    renderUpdatesTable(visibleUpdates(), latestPackagesLoading);
+  });
+  $("updates-manager-filter").addEventListener("change", function(){
+    updatesManagerFilter = this.value || "all";
+    updatePage = 1;
+    renderPackageTables();
+  });
+  $("installed-manager-filter").addEventListener("change", function(){
+    installedManagerFilter = this.value || "all";
+    installedPage = 1;
+    renderInstalledTable(latestPackagesLoading);
   });
   $("search-prev").addEventListener("click", function(){
     searchPage--;

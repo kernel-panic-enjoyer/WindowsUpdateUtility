@@ -12,6 +12,11 @@ const gracefulShutdownTimeout = 5 * time.Second
 type InventoryResponse struct {
 	Inventory
 	AsyncSnapshot
+	// StoreLoading is true while the (slow) Microsoft Store update scan is
+	// still running in the background after the fast managers (winget, choco)
+	// have already been returned. The frontend keeps polling and shows a
+	// per-Store loading indicator while this is true.
+	StoreLoading bool `json:"store_loading,omitempty"`
 }
 
 type StatusResponse struct {
@@ -52,19 +57,28 @@ type App struct {
 	inventoryRefreshID int64
 	inventoryFetchedAt time.Time
 	inventoryErr       string
-	status             StatusResponse
-	statusLoading      bool
-	statusQueued       bool
-	statusFetchedAt    time.Time
-	statusErr          string
-	jobsMu             sync.Mutex
-	jobs               map[string]*OperationJob
-	jobSeq             int64
-	jobQueue           []string
-	jobActive          bool
-	shutdownOnce       sync.Once
-	shutdownCleanupMu  sync.Mutex
-	shutdownCleanups   []func()
+	// Microsoft Store update scan runs in the background so it never blocks the
+	// fast managers. storeScanLoading reports an in-flight background scan;
+	// storeScanFetchedAt records when the last one finished (for debouncing).
+	// storeBackgroundScanEnabled is set only on the production App so unit tests
+	// (which stub inventoryGetter) never spawn real Store scans.
+	storeScanLoading           bool
+	storeScanQueued            bool
+	storeScanFetchedAt         time.Time
+	storeBackgroundScanEnabled bool
+	status                     StatusResponse
+	statusLoading              bool
+	statusQueued               bool
+	statusFetchedAt            time.Time
+	statusErr                  string
+	jobsMu                     sync.Mutex
+	jobs                       map[string]*OperationJob
+	jobSeq                     int64
+	jobQueue                   []string
+	jobActive                  bool
+	shutdownOnce               sync.Once
+	shutdownCleanupMu          sync.Mutex
+	shutdownCleanups           []func()
 }
 
 func (app *App) addShutdownCleanup(cleanup func()) {

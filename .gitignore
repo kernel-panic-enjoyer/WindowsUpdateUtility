@@ -34,3 +34,7 @@ __pycache__/
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Local hook + settings (machine-specific paths)
+.claude/settings.local.json
+.claude/build-exe.sh

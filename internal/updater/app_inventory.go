@@ -30,10 +30,10 @@ func (app *App) refreshInventory(force bool) {
 	app.mu.Unlock()
 	appLog("Inventory refresh started.")
 
-	go app.runInventoryRefresh(refreshID)
+	go app.runInventoryRefresh(refreshID, force)
 }
 
-func (app *App) runInventoryRefresh(refreshID int64) {
+func (app *App) runInventoryRefresh(refreshID int64, force bool) {
 	inventory := inventoryGetter()
 	app.mu.Lock()
 	if refreshID != app.inventoryRefreshID {
@@ -49,14 +49,22 @@ func (app *App) runInventoryRefresh(refreshID int64) {
 		app.inventoryLoading = true
 		app.inventoryRefreshID++
 		nextRefreshID := app.inventoryRefreshID
+		startScan := app.beginStoreScanLocked(force)
 		app.mu.Unlock()
 		appLog("Inventory refresh completed with %d package(s); running queued refresh.", len(inventory.Packages))
-		go app.runInventoryRefresh(nextRefreshID)
+		if startScan {
+			go app.runStoreScan()
+		}
+		go app.runInventoryRefresh(nextRefreshID, true)
 		return
 	}
 	app.inventoryLoading = false
+	startScan := app.beginStoreScanLocked(force)
 	app.mu.Unlock()
 	appLog("Inventory refresh completed with %d package(s).", len(inventory.Packages))
+	if startScan {
+		go app.runStoreScan()
+	}
 }
 
 func (app *App) refreshInventorySync(reason string) Inventory {
@@ -87,15 +95,84 @@ func (app *App) refreshInventorySync(reason string) Inventory {
 		app.inventoryLoading = true
 		app.inventoryRefreshID++
 		nextRefreshID := app.inventoryRefreshID
+		startScan := app.beginStoreScanLocked(true)
 		app.mu.Unlock()
 		appLog("Inventory refresh completed for %s with %d package(s); running queued refresh.", reason, len(inventory.Packages))
-		go app.runInventoryRefresh(nextRefreshID)
+		if startScan {
+			go app.runStoreScan()
+		}
+		go app.runInventoryRefresh(nextRefreshID, true)
 		return inventory
 	}
 	app.inventoryLoading = false
+	startScan := app.beginStoreScanLocked(true)
 	app.mu.Unlock()
 	appLog("Inventory refresh completed for %s with %d package(s).", reason, len(inventory.Packages))
+	if startScan {
+		go app.runStoreScan()
+	}
 	return inventory
+}
+
+// storeScanCooldown debounces automatic (non-forced) background Store scans so
+// the heavy provider sweep does not re-run on every stale-cache refresh.
+// Forced refreshes (startup, jobs, explicit user refresh) bypass the cooldown.
+const storeScanCooldown = 5 * time.Minute
+
+// beginStoreScanLocked decides whether to start a background Store scan and, if
+// so, marks one in flight. It must be called with app.mu held and returns true
+// when the caller should launch app.runStoreScan in a goroutine.
+func (app *App) beginStoreScanLocked(force bool) bool {
+	if !app.storeBackgroundScanEnabled || !storeTransactionalScanEnabled() {
+		return false
+	}
+	// A non-forced refresh within the cooldown window does not warrant a scan.
+	if !force && !app.storeScanFetchedAt.IsZero() && time.Since(app.storeScanFetchedAt) < storeScanCooldown {
+		return false
+	}
+	if app.storeScanLoading {
+		// A scan is already running. Queue a follow-up so this request is not
+		// lost to an in-flight scan that may have started before the caller's
+		// action (for example, re-scanning after applying a Store update).
+		app.storeScanQueued = true
+		return false
+	}
+	app.storeScanLoading = true
+	return true
+}
+
+// runStoreScan runs the expensive Microsoft Store transactional scan and
+// persists its published snapshot. It does not write back to app.inventory:
+// inventorySnapshot re-overlays the latest published snapshot on every read, so
+// the fresh Store generation surfaces automatically on the next poll.
+//
+// If a fresh scan is requested while one is in flight (storeScanQueued), this
+// loops and runs exactly one follow-up so a forced refresh is never dropped;
+// storeScanLoading stays true across the follow-up so the frontend keeps
+// polling until the latest requested scan completes.
+func (app *App) runStoreScan() {
+	for {
+		appLog("Background Microsoft Store update scan started.")
+		result, err := runStoreTransactionalScanForInventory(context.Background())
+		switch {
+		case err != nil:
+			appLog("Background Store update scan failed: %s", err)
+		case !result.Published:
+			appLog("Background Store update scan %s completed but was not published.", result.Scan.ScanID)
+		default:
+			appLog("Background Store update scan %s completed.", result.Scan.ScanID)
+		}
+		app.mu.Lock()
+		app.storeScanFetchedAt = time.Now()
+		if app.storeScanQueued {
+			app.storeScanQueued = false
+			app.mu.Unlock()
+			continue
+		}
+		app.storeScanLoading = false
+		app.mu.Unlock()
+		return
+	}
 }
 
 func (app *App) inventorySnapshot() InventoryResponse {
@@ -104,11 +181,13 @@ func (app *App) inventorySnapshot() InventoryResponse {
 	loading := app.inventoryLoading
 	fetchedAt := app.inventoryFetchedAt
 	errText := app.inventoryErr
+	storeLoading := app.storeScanLoading
 	app.mu.RUnlock()
 
 	response := InventoryResponse{
 		Inventory:     inventory,
 		AsyncSnapshot: asyncSnapshot(loading, fetchedAt, errText),
+		StoreLoading:  storeLoading,
 	}
 	if response.Managers == nil {
 		response.Managers = map[string]ManagerStatus{}
