@@ -5,8 +5,9 @@ Scope: manual validation for the medium-integrity WebUI coordinator and elevated
 Build under test:
 
 ```powershell
-$env:GOCACHE='C:\Users\User\Documents\Updater\.gocache'
-go build -ldflags='-H=windowsgui' -o 'dist\WindowsUpdaterWebUI.exe' .
+$root='C:\Users\User\Documents\Updater'
+Set-Location $root
+powershell -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1
 ```
 
 ## 1. Administrator Account

@@ -45,14 +45,20 @@ func runCommandContext(parent context.Context, timeout time.Duration, args ...st
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
-	if isPackageManagerMutationCommand(args) {
-		if !lockMutexContext(ctx, &packageManagerMutationMu) {
+	logCommand("command", result.Command)
+	mutationCommand := isPackageManagerMutationCommand(args)
+	if mutationCommand {
+		if !lockMutexContextWithWait(ctx, &packageManagerMutationMu, func() {
+			logCommand("app", "Waiting for another package-manager mutation to finish before running "+result.Command)
+		}) {
 			return commandContextDoneResult(ctx, result.Command, "while waiting for package manager lock", categories)
 		}
 		defer packageManagerMutationMu.Unlock()
 	}
-	if isWingetCommand(args) {
-		if !lockMutexContext(ctx, &wingetCommandMu) {
+	if shouldAcquireWingetCommandLock(args) {
+		if !lockMutexContextWithWait(ctx, &wingetCommandMu, func() {
+			logCommand("app", "Waiting for another winget mutation to finish before running "+result.Command)
+		}) {
 			return commandContextDoneResult(ctx, result.Command, "while waiting for winget lock", categories)
 		}
 		defer wingetCommandMu.Unlock()
@@ -81,7 +87,6 @@ func runCommandContext(parent context.Context, timeout time.Duration, args ...st
 		return result
 	}
 
-	logCommand("command", result.Command)
 	if err := cmd.Start(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			result.Code = 124

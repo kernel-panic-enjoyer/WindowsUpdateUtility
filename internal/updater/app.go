@@ -63,11 +63,41 @@ type App struct {
 	jobQueue           []string
 	jobActive          bool
 	shutdownOnce       sync.Once
+	shutdownCleanupMu  sync.Mutex
+	shutdownCleanups   []func()
+}
+
+func (app *App) addShutdownCleanup(cleanup func()) {
+	if cleanup == nil {
+		return
+	}
+	app.shutdownCleanupMu.Lock()
+	defer app.shutdownCleanupMu.Unlock()
+	app.shutdownCleanups = append(app.shutdownCleanups, cleanup)
+}
+
+func (app *App) runShutdownCleanups() {
+	app.shutdownCleanupMu.Lock()
+	cleanups := append([]func(){}, app.shutdownCleanups...)
+	app.shutdownCleanups = nil
+	app.shutdownCleanupMu.Unlock()
+
+	for i := len(cleanups) - 1; i >= 0; i-- {
+		func(cleanup func()) {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					appLog("Shutdown cleanup failed: %v", recovered)
+				}
+			}()
+			cleanup()
+		}(cleanups[i])
+	}
 }
 
 func (app *App) requestShutdown(source string) {
 	app.shutdownOnce.Do(func() {
 		appLog("%s quit requested.", source)
+		app.runShutdownCleanups()
 		if app.server == nil {
 			return
 		}

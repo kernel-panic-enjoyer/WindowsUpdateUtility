@@ -41,9 +41,33 @@ var pageTemplate = template.Must(template.New("page").Funcs(template.FuncMap{
     <section id="notice" class="notice hidden"></section>
     <section id="toast-region" class="toast-region" aria-live="polite" aria-atomic="false"></section>
 
+    <section id="store-status-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="store-status-modal-title">
+      <div class="modal-backdrop" data-store-status-close></div>
+      <div class="modal-panel store-health-modal" role="document">
+        <div class="modal-header">
+          <div><span class="panel-kicker">Microsoft Store</span><h2 id="store-status-modal-title">Store status details</h2></div>
+          <button id="store-status-close" class="ghost" type="button" data-store-status-close><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 6l12 12"/><path d="M18 6 6 18"/></svg></span><span>Close</span></button>
+        </div>
+        <div id="store-scan-health-summary" class="store-health-summary-text"><span class="loading-text"><span class="spinner" aria-hidden="true"></span><span>Checking Store status...</span></span></div>
+        <div class="button-row store-health-actions"><button id="store-diagnostics-export-button" class="ghost" type="button"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></span><span>Export Store Diagnostics</span></button><button id="store-rescan-button" class="ghost" type="button"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 1-15.5 6.2"/><path d="M3 12a9 9 0 0 1 15.5-6.2"/><path d="M3 18v-6h6"/><path d="M21 6v6h-6"/></svg></span><span>Rescan Store Status</span></button></div>
+        <div id="store-scan-health-body" class="store-health-body" aria-live="polite"><span class="loading-text"><span class="spinner" aria-hidden="true"></span><span>Checking Store coverage...</span></span></div>
+      </div>
+    </section>
+
+    <section id="package-diagnostics-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="package-diagnostics-modal-title">
+      <div class="modal-backdrop" data-package-diagnostics-close></div>
+      <div class="modal-panel package-diagnostics-modal" role="document">
+        <div class="modal-header">
+          <div><span class="panel-kicker">Update diagnostics</span><h2 id="package-diagnostics-modal-title">Package diagnostics</h2></div>
+          <button id="package-diagnostics-close" class="ghost" type="button" data-package-diagnostics-close><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 6l12 12"/><path d="M18 6 6 18"/></svg></span><span>Close</span></button>
+        </div>
+        <div id="package-diagnostics-body" class="package-diagnostics-body" aria-live="polite"></div>
+      </div>
+    </section>
+
     <section class="dashboard-hero">
       <div class="hero-copy">
-        <span class="eyebrow">Updates first</span>
+        <div class="hero-topline"><span class="eyebrow">Updates first</span><span id="log-connection-status" class="badge connection-badge" role="status" aria-live="polite">Connecting</span></div>
         <h2>Keep Windows apps current without leaving the browser.</h2>
         <p class="muted">Winget, Chocolatey, and Store inventory are merged into one local control surface.</p>
       </div>
@@ -58,11 +82,6 @@ var pageTemplate = template.Must(template.New("page").Funcs(template.FuncMap{
       <article class="summary-card"><span class="summary-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M6 7v12h12V7"/><path d="M9 11h6"/></svg></span><div><p>Managed packages</p><strong id="summary-packages">-</strong><span id="summary-packages-detail" class="muted">Inventory loading</span></div></article>
       <article class="summary-card"><span class="summary-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 8h10"/><path d="M7 12h10"/><path d="M7 16h6"/><rect x="4" y="4" width="16" height="16" rx="3"/></svg></span><div><p>Package managers</p><strong id="summary-managers">-</strong><span id="summary-managers-detail" class="muted"><span class="loading-text"><span class="spinner" aria-hidden="true"></span><span>Checking tools</span></span></span></div></article>
       <article class="summary-card"><span class="summary-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 6v6l4 2"/><circle cx="12" cy="12" r="9"/></svg></span><div><p>Automation</p><strong id="summary-automation">-</strong><span id="summary-automation-detail" class="muted"><span class="loading-text"><span class="spinner" aria-hidden="true"></span><span>Loading tasks</span></span></span></div></article>
-    </section>
-
-    <section id="store-scan-health" class="panel store-health-panel" aria-live="polite">
-      <div class="section-heading"><div><span class="panel-kicker">Store scan health</span><h2>Microsoft Store Update Status</h2></div><div class="button-row"><button id="store-diagnostics-export-button" class="ghost" type="button"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></span><span>Export Store Diagnostics</span></button><button id="store-rescan-button" class="ghost" type="button"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 1-15.5 6.2"/><path d="M3 12a9 9 0 0 1 15.5-6.2"/><path d="M3 18v-6h6"/><path d="M21 6v6h-6"/></svg></span><span>Rescan Store Status</span></button></div></div>
-      <div id="store-scan-health-body" class="store-health-body"><span class="loading-text"><span class="spinner" aria-hidden="true"></span><span>Checking Store coverage...</span></span></div>
     </section>
 
     <section class="control-grid">
@@ -120,7 +139,7 @@ var pageTemplate = template.Must(template.New("page").Funcs(template.FuncMap{
 	</section>
 
     <section id="session-log-panel" class="panel log-panel">
-      <div class="section-heading"><div><span class="panel-kicker">Command output</span><h2>Session Log</h2></div><div class="button-row"><span id="log-connection-status" class="badge" role="status" aria-live="polite">Connecting</span><label class="sr-only" for="log-search">Search active log</label><input id="log-search" class="table-search" type="search" placeholder="Search active log" autocomplete="off"><label class="check-control"><input id="log-autoscroll" type="checkbox" checked> Auto Scroll</label><button id="copy-log-view" class="ghost" type="button"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></span><span>Copy Log</span></button><button id="export-log-view" class="ghost" type="button"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></span><span>Export Logs</span></button><button id="clear-log-view" class="ghost" type="button">Clear View</button></div></div>
+      <div class="section-heading"><div><span class="panel-kicker">Command output</span><h2>Session Log</h2></div><div class="button-row"><label class="sr-only" for="log-search">Search active log</label><input id="log-search" class="table-search" type="search" placeholder="Search active log" autocomplete="off"><label class="check-control"><input id="log-autoscroll" type="checkbox" checked> Auto Scroll</label><button id="copy-log-view" class="ghost" type="button"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></span><span>Copy Log</span></button><button id="export-log-view" class="ghost" type="button"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></span><span>Export Logs</span></button><button id="clear-log-view" class="ghost" type="button">Clear View</button></div></div>
       <div class="log-tabs" role="tablist" aria-label="Session log categories" aria-orientation="horizontal">
         {{range $index, $tab := logTabs}}<button id="log-tab-{{$tab.Category}}" class="log-tab{{if eq $index 0}} active{{end}}" type="button" role="tab" aria-selected="{{if eq $index 0}}true{{else}}false{{end}}" aria-controls="session-log" tabindex="{{if eq $index 0}}0{{else}}-1{{end}}" data-log-category="{{$tab.Category}}">{{$tab.Label}}</button>{{end}}
       </div>

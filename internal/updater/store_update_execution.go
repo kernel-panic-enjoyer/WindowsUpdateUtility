@@ -84,13 +84,16 @@ type StoreExactUpdateCallbacks struct {
 	Verifying func(StoreExactUpdateRequest)
 }
 
-var storeExactUpdateExecutor = defaultStoreExactUpdateExecutor()
+var (
+	storeExactUpdateExecutor         = defaultStoreExactUpdateExecutor()
+	defaultStoreExactCatalogProvider = func() StoreExactCatalogProvider { return storeProductIDFirstExactCatalogQueryProvider{} }
+)
 
 func defaultStoreExactUpdateExecutor() StoreExactUpdateExecutor {
 	return StoreExactUpdateExecutor{
-		Runner:    storeCLIExactUpdateRunner{},
+		Runner:    storeProductIDFirstExactUpdateRunner{},
 		Inventory: storePackagedSnapshotProvider{Provider: storePackagedAppInventoryProvider()},
-		Catalog:   unsupportedStoreExactCatalogProvider{},
+		Catalog:   defaultStoreExactCatalogProvider(),
 		Events:    noStorePackageEvents{},
 		Timeout:   storeExactUpdateVerifyTimeout,
 		PollEvery: storeExactUpdatePollInterval,
@@ -115,13 +118,13 @@ func (executor StoreExactUpdateExecutor) ExecuteWithCallbacks(ctx context.Contex
 		return validationCommandResult("store exact update", err)
 	}
 	if executor.Runner == nil {
-		executor.Runner = storeCLIExactUpdateRunner{}
+		executor.Runner = storeProductIDFirstExactUpdateRunner{}
 	}
 	if executor.Inventory == nil {
 		executor.Inventory = storePackagedSnapshotProvider{Provider: storePackagedAppInventoryProvider()}
 	}
 	if executor.Catalog == nil {
-		executor.Catalog = unsupportedStoreExactCatalogProvider{}
+		executor.Catalog = defaultStoreExactCatalogProvider()
 	}
 	if executor.Events == nil {
 		executor.Events = noStorePackageEvents{}
@@ -249,11 +252,14 @@ func exactStoreUpdateRequestFromPackage(ctx context.Context, pkg Package) (Store
 	if pkg.Manager != managerStore {
 		return StoreExactUpdateRequest{}, errors.New("exact Store update execution requires a Store package")
 	}
-	if strings.ToLower(strings.TrimSpace(pkg.UpdateState)) != string(StoreUpdateAvailable) || !pkg.UpdateAvailable {
+	if strings.ToLower(strings.TrimSpace(pkg.UpdateState)) != string(StoreUpdateAvailable) {
 		return StoreExactUpdateRequest{}, errors.New("Store update requires a fresh available assessment")
 	}
 	if pkg.Stale {
 		return StoreExactUpdateRequest{}, errors.New("Store update requires a fresh assessment; stale updates must be rescanned first")
+	}
+	if !pkg.UpdateAvailable {
+		return StoreExactUpdateRequest{}, errors.New("Store update requires a fresh available assessment")
 	}
 	pfn := storeInstalledPackageFamilyName(pkg)
 	if pfn == "" {
@@ -264,18 +270,22 @@ func exactStoreUpdateRequestFromPackage(ctx context.Context, pkg Package) (Store
 		return StoreExactUpdateRequest{}, fmt.Errorf("Store update user could not be identified: %w", err)
 	}
 	identity := StoreInstalledIdentity{UserSID: userSID, PackageFamilyName: pfn}
-	target := strings.TrimSpace(pkg.StoreProductID)
+	target := firstNonEmpty(pkg.StoreProductID, pkg.StoreUpdateID)
 	if !pkg.ExactActionTargetAvailable || target == "" {
 		return StoreExactUpdateRequest{}, errors.New("Store update requires an exact verified Product ID or provider target")
 	}
-	if !packageActionManagerAvailable(managerStore) {
-		return StoreExactUpdateRequest{}, errors.New("Store CLI is not available to execute the exact Store update target")
+	productID := strings.TrimSpace(pkg.StoreProductID)
+	updateID := strings.TrimSpace(pkg.StoreUpdateID)
+	provider, err := exactStoreUpdateExecutionProvider(productID, updateID)
+	if err != nil {
+		return StoreExactUpdateRequest{}, err
 	}
 	request := StoreExactUpdateRequest{
 		Identity:         identity,
-		ProductID:        strings.TrimSpace(pkg.StoreProductID),
+		ProductID:        productID,
+		UpdateID:         updateID,
 		Target:           target,
-		Provider:         StoreProviderIdentity{ID: managerStore, Name: "Store CLI", Backend: backendStoreCLI},
+		Provider:         provider,
 		ScanID:           strings.TrimSpace(pkg.ScanID),
 		ObservedAt:       strings.TrimSpace(pkg.ObservedAt),
 		InstalledVersion: firstNonEmpty(pkg.InstalledVersion, pkg.Version),
@@ -285,6 +295,16 @@ func exactStoreUpdateRequestFromPackage(ctx context.Context, pkg Package) (Store
 		return StoreExactUpdateRequest{}, err
 	}
 	return request, nil
+}
+
+func exactStoreUpdateExecutionProvider(productID, updateID string) (StoreProviderIdentity, error) {
+	if strings.TrimSpace(productID) != "" && packageActionManagerAvailable(managerWinget) {
+		return StoreProviderIdentity{ID: managerWinget, Name: "WinGet Microsoft Store exact update", Backend: backendWingetMSStoreFallback}, nil
+	}
+	if (strings.TrimSpace(productID) != "" || strings.TrimSpace(updateID) != "") && packageActionManagerAvailable(managerStore) {
+		return StoreProviderIdentity{ID: managerStore, Name: "Store CLI exact update", Backend: backendStoreCLI}, nil
+	}
+	return StoreProviderIdentity{}, errors.New("no exact Store update executor is available for the verified target")
 }
 
 func verifyPublishedStoreUpdateAssessment(ctx context.Context, request StoreExactUpdateRequest) error {
@@ -312,6 +332,9 @@ func verifyPublishedStoreUpdateAssessment(ctx context.Context, request StoreExac
 		}
 		if assessment.StoreProductID != "" && request.ProductID != "" && assessment.StoreProductID != request.ProductID {
 			return errors.New("Store update Product ID does not match the verified published assessment")
+		}
+		if assessment.UpdateID != "" && request.UpdateID != "" && assessment.UpdateID != request.UpdateID {
+			return errors.New("Store update ID does not match the verified published assessment")
 		}
 		return nil
 	}
@@ -383,7 +406,66 @@ func appendDiagnosticLine(existing, line string) string {
 type storeCLIExactUpdateRunner struct{}
 
 func (storeCLIExactUpdateRunner) RunStoreUpdate(ctx context.Context, request StoreExactUpdateRequest) CommandResult {
-	return runStoreUpdateCommandWithApplyFallback(ctx, request.Target)
+	candidates := exactStoreUpdateRequestTargets(request)
+	return runPackageUpdateCandidates(ctx, candidates, "store exact target", func(target string) CommandResult {
+		return runStoreUpdateCommandWithApplyFallback(ctx, target)
+	})
+}
+
+type storeProductIDFirstExactUpdateRunner struct{}
+
+func (storeProductIDFirstExactUpdateRunner) RunStoreUpdate(ctx context.Context, request StoreExactUpdateRequest) CommandResult {
+	productID := strings.TrimSpace(request.ProductID)
+	if productID == "" || !packageActionManagerAvailable(managerWinget) {
+		return storeCLIExactUpdateRunner{}.RunStoreUpdate(ctx, request)
+	}
+	wingetResult := runPackageActionCommand(ctx, managerWinget, packageActionTimeout, wingetMSStoreProductIDUpgradeCommand(productID)...)
+	if wingetResult.OK || ctx.Err() != nil || !shouldTryAlternatePackageTarget(wingetResult) {
+		return wingetResult
+	}
+	appLog("WinGet msstore exact Product ID target %q was not accepted; trying Store CLI exact targets.", productID)
+	storeResult := storeCLIExactUpdateRunner{}.RunStoreUpdate(ctx, request)
+	return mergeCommandResults(wingetResult, storeResult, "Store CLI exact target fallback")
+}
+
+func exactStoreUpdateRequestTargets(request StoreExactUpdateRequest) []string {
+	return uniqueUpdateTargets([]string{
+		request.ProductID,
+		request.UpdateID,
+		request.Target,
+	})
+}
+
+type storeProductIDFirstExactCatalogQueryProvider struct {
+	Winget StoreExactCatalogProvider
+	Store  StoreExactCatalogProvider
+}
+
+func (provider storeProductIDFirstExactCatalogQueryProvider) QueryExact(ctx context.Context, request StoreExactUpdateRequest) (StoreExactCatalogResult, CommandResult) {
+	storeProvider := provider.Store
+	if storeProvider == nil {
+		storeProvider = storeCLIExactCatalogQueryProvider{}
+	}
+	if strings.TrimSpace(request.ProductID) == "" || !packageActionManagerAvailable(managerWinget) {
+		return storeProvider.QueryExact(ctx, request)
+	}
+	wingetProvider := provider.Winget
+	if wingetProvider == nil {
+		wingetProvider = wingetMSStoreExactCatalogQueryProvider{}
+	}
+	wingetCatalog, wingetResult := wingetProvider.QueryExact(ctx, request)
+	if wingetCatalog.Authoritative || ctx.Err() != nil || !packageActionManagerAvailable(managerStore) {
+		return wingetCatalog, wingetResult
+	}
+	storeCatalog, storeResult := storeProvider.QueryExact(ctx, request)
+	merged := mergeCommandResults(wingetResult, storeResult, "Store CLI exact catalog fallback")
+	if storeCatalog.Authoritative {
+		return storeCatalog, merged
+	}
+	if storeCatalog.Diagnostics != "" {
+		wingetCatalog.Diagnostics = firstNonEmpty(wingetCatalog.Diagnostics, storeCatalog.Diagnostics)
+	}
+	return wingetCatalog, merged
 }
 
 type storePackagedSnapshotProvider struct {
@@ -429,5 +511,5 @@ type noStorePackageEvents struct{}
 func (noStorePackageEvents) Subscribe(context.Context, StoreInstalledIdentity) (<-chan StorePackageChangeEvent, func(), error) {
 	ch := make(chan StorePackageChangeEvent)
 	close(ch)
-	return ch, nil, nil
+	return ch, nil, errors.New("current-user PackageCatalog event subscription is not implemented in this build")
 }

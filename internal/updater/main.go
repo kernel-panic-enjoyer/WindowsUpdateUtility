@@ -9,8 +9,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -69,6 +71,10 @@ func runServer(noBrowser bool) error {
 		return err
 	}
 	app := &App{token: token, sessionToken: sessionToken, listenHost: defaultHost, listenPort: port}
+	defer app.runShutdownCleanups()
+	stopSignalWatcher := app.startShutdownSignalWatcher()
+	defer stopSignalWatcher()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", app.serveHTTP)
 	server := &http.Server{
@@ -88,7 +94,7 @@ func runServer(noBrowser bool) error {
 	if err != nil {
 		appLog("Tray icon could not be started: %s", err)
 	} else {
-		defer tray.Stop()
+		app.addShutdownCleanup(tray.Stop)
 	}
 	if !noBrowser {
 		_ = openURL(url)
@@ -96,6 +102,36 @@ func runServer(noBrowser bool) error {
 		fmt.Println(url)
 	}
 	return server.ListenAndServe()
+}
+
+func (app *App) startShutdownSignalWatcher() func() {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt)
+	stopWatcher := app.watchShutdownSignals(signals)
+	var stopOnce sync.Once
+	return func() {
+		stopOnce.Do(func() {
+			signal.Stop(signals)
+			stopWatcher()
+		})
+	}
+}
+
+func (app *App) watchShutdownSignals(signals <-chan os.Signal) func() {
+	done := make(chan struct{})
+	var stopOnce sync.Once
+	go func() {
+		select {
+		case <-signals:
+			app.requestShutdown("OS signal")
+		case <-done:
+		}
+	}()
+	return func() {
+		stopOnce.Do(func() {
+			close(done)
+		})
+	}
 }
 
 func hasArg(name string) bool {

@@ -28,15 +28,18 @@ func TestParseAppxPackageJSON(t *testing.T) {
 
 func TestFriendlyAppxNameCleansPackageIdentity(t *testing.T) {
 	cases := map[string]string{
-		"19568ShareX.ShareX":                             "ShareX",
-		"28017CharlesMilette.TranslucentTB":              "Translucent TB",
-		"38002AlexanderFrangos.TwinkleTray":              "Twinkle Tray",
-		"9662DuongDieuPhap.ImageGlass":                   "Image Glass",
-		"Microsoft.WindowsNotepad":                       "Windows Notepad",
-		"Microsoft.WindowsAppRuntime.Singleton":          "Windows App Runtime Singleton",
-		"Microsoft.WindowsAppRuntime.CBS.1.8":            "Windows App Runtime CBS 1.8",
-		"MicrosoftCorporationII.WinAppRuntime.Singleton": "Win App Runtime Singleton",
-		"Contoso.FooBar.Baz2":                            "Foo Bar Baz2",
+		"19568ShareX.ShareX":                                 "ShareX",
+		"19568ShareX.ShareX_egrzcvs15399j":                   "ShareX",
+		"28017CharlesMilette.TranslucentTB":                  "Translucent TB",
+		"28017CharlesMilette.TranslucentTB_v826wp6bftszj":    "Translucent TB",
+		"38002AlexanderFrangos.TwinkleTray":                  "Twinkle Tray",
+		"9662DuongDieuPhap.ImageGlass":                       "Image Glass",
+		"Microsoft.WindowsNotepad":                           "Windows Notepad",
+		"Microsoft.WindowsAppRuntime.Singleton":              "Windows App Runtime Singleton",
+		"Microsoft.WindowsAppRuntime.CBS.1.8":                "Windows App Runtime CBS 1.8",
+		"MicrosoftCorporationII.WinAppRuntime.Singleton":     "Win App Runtime Singleton",
+		"Contoso.FooBar.Baz2":                                "Foo Bar Baz2",
+		"1527c705-839a-4832-9118-54d4bd6a0c89_cw5n1h2txyewy": "Store app",
 	}
 	for input, want := range cases {
 		if got := friendlyAppxName(input, ""); got != want {
@@ -167,6 +170,47 @@ func TestMergeStoreNativeUpdatePackagesMarksInstalledStoreRow(t *testing.T) {
 	}
 	if !got[0].UpdateAvailable || got[0].AvailableVersion != "26.611.8604.0" {
 		t.Fatalf("expected installed Store row to be marked updateable, got %#v", got[0])
+	}
+}
+
+func TestMergeAppxInventoryPackagesDoesNotRunDisplayNameResolverUnderNewDetector(t *testing.T) {
+	t.Setenv(storeLegacyDetectorRollbackFlag, "")
+	state := defaultState()
+	managers := map[string]ManagerStatus{
+		managerStore: {Available: true},
+	}
+	commandResults := map[string]CommandResult{}
+	appx := []Package{
+		{
+			ID:            "OpenAI.Codex_1.0.0.0_x64__abc123",
+			Name:          "Codex",
+			Version:       "1.0.0.0",
+			Manager:       managerStore,
+			Source:        sourceAppX,
+			Match:         "OpenAI.Codex_abc123",
+			ActionBackend: backendAppXInventory,
+		},
+	}
+	calls := 0
+	restore := replaceStoreSearchHook(func(query string) ([]Package, CommandResult) {
+		calls++
+		return []Package{{ID: "9NCODEX", Name: "Codex", Manager: managerStore}}, CommandResult{OK: true, Command: "store search " + query}
+	})
+	defer restore()
+
+	got := mergeAppxInventoryPackages(&state, managers, commandResults, nil, appx, map[string]string{})
+
+	if calls != 0 {
+		t.Fatalf("new Store detector must not run display-name Store resolver, calls=%d", calls)
+	}
+	if _, ok := commandResults["store_resolve_codex"]; ok {
+		t.Fatalf("new Store detector recorded legacy resolver command output: %#v", commandResults)
+	}
+	if len(got) != 1 || got[0].ID != appx[0].ID || got[0].UpdateSupported || got[0].UpdateAvailable {
+		t.Fatalf("new Store detector should keep AppX row inventory-only until transactional assessment applies: %#v", got)
+	}
+	if len(state.StoreResolveCache) != 0 {
+		t.Fatalf("new Store detector must not write legacy display-name resolver cache: %#v", state.StoreResolveCache)
 	}
 }
 

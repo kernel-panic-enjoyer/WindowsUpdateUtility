@@ -8,70 +8,6 @@ import (
 	"time"
 )
 
-func TestParseStorePackagedInventoryResponse(t *testing.T) {
-	scan := testNativeInventoryScan("scan-1", "S-1-5-21-test-1001")
-	data := `{
-		"protocol_version":1,
-		"scan_id":"scan-1",
-		"user_sid":"S-1-5-21-test-1001",
-		"started_at":"2026-06-21T10:00:00Z",
-		"completed_at":"2026-06-21T10:00:01Z",
-		"complete":true,
-		"records":[{
-			"user_sid":"S-1-5-21-test-1001",
-			"package_family_name":"OpenAI.Codex_abc",
-			"package_full_name":"OpenAI.Codex_1.2.3.4_x64__abc",
-			"identity_name":"OpenAI.Codex",
-			"publisher":"CN=OpenAI",
-			"publisher_id":"abc",
-			"version":{"major":1,"minor":2,"build":3,"revision":4},
-			"processor_architecture":"X64",
-			"install_location":"C:\\Program Files\\WindowsApps\\OpenAI.Codex",
-			"package_type":"Windows.ApplicationModel.Package",
-			"is_bundle":true,
-			"status":{"ok":true},
-			"display_name":"Codex"
-		}]
-	}`
-	inventory, err := parseStorePackagedInventoryResponse([]byte(data), scan)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if inventory.Scan.CompletionStatus != StoreScanCompleted {
-		t.Fatalf("completion = %q, want %q", inventory.Scan.CompletionStatus, StoreScanCompleted)
-	}
-	if len(inventory.Records) != 1 || inventory.Records[0].Version.String() != "1.2.3.4" {
-		t.Fatalf("unexpected records: %#v", inventory.Records)
-	}
-	if got := inventory.Records[0].Classification; got != storePackageClassBundle {
-		t.Fatalf("classification = %q, want bundle", got)
-	}
-	if len(inventory.Families) != 1 || !inventory.Families[0].ProductLike {
-		t.Fatalf("unexpected families: %#v", inventory.Families)
-	}
-}
-
-func TestParseStorePackagedInventoryRejectsMalformedAndWrongUserResponses(t *testing.T) {
-	scan := testNativeInventoryScan("scan-1", "S-1-5-21-test-1001")
-	tests := []struct {
-		name string
-		data string
-	}{
-		{"malformed", `{"protocol_version":`},
-		{"unknown field", `{"protocol_version":1,"scan_id":"scan-1","user_sid":"S-1-5-21-test-1001","complete":true,"records":[],"extra":true}`},
-		{"wrong user", `{"protocol_version":1,"scan_id":"scan-1","user_sid":"S-1-5-21-test-1002","complete":true,"records":[]}`},
-		{"wrong scan", `{"protocol_version":1,"scan_id":"scan-2","user_sid":"S-1-5-21-test-1001","complete":true,"records":[]}`},
-		{"missing pfn", `{"protocol_version":1,"scan_id":"scan-1","user_sid":"S-1-5-21-test-1001","complete":true,"records":[{"user_sid":"S-1-5-21-test-1001","package_full_name":"A_1.0.0.0_x64__abc","identity_name":"A","version":{},"status":{"ok":true}}]}`},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if _, err := parseStorePackagedInventoryResponse([]byte(tt.data), scan); err == nil {
-				t.Fatal("expected parse rejection")
-			}
-		})
-	}
-}
-
 func TestGroupStorePackagedAppFamiliesUsesPFNIdentity(t *testing.T) {
 	userSID := "S-1-5-21-test-1001"
 	records := []StorePackagedAppRecord{
@@ -118,6 +54,45 @@ func TestNativeStorePackagesSkipFrameworkResourceAndOptionalOnlyFamilies(t *test
 	}
 }
 
+func TestNativeStorePackagesUseFriendlyPresentationNames(t *testing.T) {
+	userSID := "S-1-5-21-test-1001"
+	inventory := StorePackagedAppInventory{
+		Records: []StorePackagedAppRecord{
+			testNativeRecord(userSID, "19568ShareX.ShareX_egrzcvs15399j", "19568ShareX.ShareX_20.2.0.0_x64__egrzcvs15399j", "", StorePackageVersion{Major: 20, Minor: 2}, storePackageClassMain),
+			testNativeRecord(userSID, "1527c705-839a-4832-9118-54d4bd6a0c89_cw5n1h2txyewy", "1527c705-839a-4832-9118-54d4bd6a0c89_1.0.0.0_x64__cw5n1h2txyewy", "", StorePackageVersion{Major: 1}, storePackageClassMain),
+		},
+	}
+	inventory.Families = groupStorePackagedAppFamilies(inventory.Records)
+	packages := packagesFromNativeStorePackagedInventory(defaultState(), inventory)
+	if len(packages) != 2 {
+		t.Fatalf("packages = %d, want 2: %#v", len(packages), packages)
+	}
+	byID := map[string]Package{}
+	for _, pkg := range packages {
+		byID[pkg.ID] = pkg
+	}
+	if got := byID["19568ShareX.ShareX_egrzcvs15399j"].Name; got != "ShareX" {
+		t.Fatalf("ShareX presentation name = %q, want ShareX", got)
+	}
+	if got := byID["1527c705-839a-4832-9118-54d4bd6a0c89_cw5n1h2txyewy"].Name; got != "Store app" {
+		t.Fatalf("opaque Store identity presentation name = %q, want Store app", got)
+	}
+}
+
+func TestNewStorePackagedAppScanRecordsSystemContext(t *testing.T) {
+	restoreContext := replaceStoreScanSystemContext(storeScanSystemContext{
+		WindowsVersion: "Windows 11 24H2",
+		WindowsBuild:   "10.0.26200.8655",
+		Architecture:   "x64",
+	})
+	defer restoreContext()
+
+	scan := newStorePackagedAppScan("S-1-5-21-native-context")
+	if scan.WindowsVersion != "Windows 11 24H2" || scan.WindowsBuild != "10.0.26200.8655" || scan.Architecture != "x64" {
+		t.Fatalf("native inventory scan context was not recorded: %#v", scan)
+	}
+}
+
 func TestCompareStorePackagedInventoryDiagnostics(t *testing.T) {
 	userSID := "S-1-5-21-test-1001"
 	native := StorePackagedAppInventory{
@@ -148,12 +123,14 @@ func TestCompareStorePackagedInventoryDiagnostics(t *testing.T) {
 	}
 }
 
-func TestBrokerStorePackagedAppInventoryProviderTimeoutAndPartialErrors(t *testing.T) {
+func TestWinRTStorePackagedAppInventoryProviderTimeoutAndPartialErrors(t *testing.T) {
 	scan := testNativeInventoryScan("scan-1", "S-1-5-21-test-1001")
-	provider := brokerStorePackagedAppInventoryProvider{
-		Path: "broker.exe",
-		Runner: func(ctx context.Context, path string, input []byte) ([]byte, []byte, error) {
-			return nil, []byte("timeout"), context.DeadlineExceeded
+	provider := winrtStorePackagedAppInventoryProvider{
+		Timeout:        time.Millisecond,
+		CurrentUserSID: func() (string, error) { return "S-1-5-21-test-1001", nil },
+		Enumerate: func(ctx context.Context, userSID string) ([]StorePackagedAppRecord, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
 		},
 	}
 	inventory, result := provider.Inventory(context.Background(), scan)
@@ -162,20 +139,47 @@ func TestBrokerStorePackagedAppInventoryProviderTimeoutAndPartialErrors(t *testi
 	}
 }
 
-func TestBrokerStorePackagedAppInventoryProviderParsesSuccessfulResponse(t *testing.T) {
+func TestWinRTStorePackagedAppInventoryProviderBuildsCompleteInventory(t *testing.T) {
 	scan := testNativeInventoryScan("scan-1", "S-1-5-21-test-1001")
-	provider := brokerStorePackagedAppInventoryProvider{
-		Path: "broker.exe",
-		Runner: func(ctx context.Context, path string, input []byte) ([]byte, []byte, error) {
-			if !strings.Contains(string(input), `"scan_id":"scan-1"`) {
-				return nil, nil, errors.New("request did not contain scan id")
-			}
-			return []byte(`{"protocol_version":1,"scan_id":"scan-1","user_sid":"S-1-5-21-test-1001","complete":true,"records":[{"user_sid":"S-1-5-21-test-1001","package_family_name":"App_abc","package_full_name":"App_1.0.0.0_x64__abc","identity_name":"App","version":{"major":1},"status":{"ok":true}}]}`), nil, nil
+	provider := winrtStorePackagedAppInventoryProvider{
+		CurrentUserSID: func() (string, error) { return "S-1-5-21-test-1001", nil },
+		Enumerate: func(ctx context.Context, userSID string) ([]StorePackagedAppRecord, error) {
+			return []StorePackagedAppRecord{
+				testNativeRecord(userSID, "App_abc", "App_1.0.0.0_x64__abc", "App", StorePackageVersion{Major: 1}, storePackageClassMain),
+			}, nil
 		},
 	}
 	inventory, result := provider.Inventory(context.Background(), scan)
-	if !result.OK || len(inventory.Records) != 1 {
-		t.Fatalf("expected successful parse, inventory=%#v result=%#v", inventory, result)
+	if !result.OK || inventory.Partial || inventory.Scan.CompletionStatus != StoreScanCompleted || len(inventory.Records) != 1 || len(inventory.Families) != 1 {
+		t.Fatalf("expected successful direct inventory, inventory=%#v result=%#v", inventory, result)
+	}
+}
+
+func TestWinRTStorePackagedAppInventoryProviderRejectsWrongUser(t *testing.T) {
+	scan := testNativeInventoryScan("scan-1", "S-1-5-21-test-1001")
+	provider := winrtStorePackagedAppInventoryProvider{
+		CurrentUserSID: func() (string, error) { return "S-1-5-21-test-1002", nil },
+		Enumerate: func(ctx context.Context, userSID string) ([]StorePackagedAppRecord, error) {
+			return nil, errors.New("should not enumerate")
+		},
+	}
+	inventory, result := provider.Inventory(context.Background(), scan)
+	if result.OK || !inventory.Partial || !strings.Contains(result.Stderr, "user SID mismatch") {
+		t.Fatalf("expected wrong-user rejection, inventory=%#v result=%#v", inventory, result)
+	}
+}
+
+func TestWinRTStorePackagedAppInventoryProviderRejectsMalformedRecords(t *testing.T) {
+	scan := testNativeInventoryScan("scan-1", "S-1-5-21-test-1001")
+	provider := winrtStorePackagedAppInventoryProvider{
+		CurrentUserSID: func() (string, error) { return "S-1-5-21-test-1001", nil },
+		Enumerate: func(ctx context.Context, userSID string) ([]StorePackagedAppRecord, error) {
+			return []StorePackagedAppRecord{{UserSID: userSID, PackageFullName: "App_1.0.0.0_x64__abc", IdentityName: "App"}}, nil
+		},
+	}
+	inventory, result := provider.Inventory(context.Background(), scan)
+	if result.OK || !inventory.Partial || !strings.Contains(result.Stderr, "missing package family name") {
+		t.Fatalf("expected malformed record rejection, inventory=%#v result=%#v", inventory, result)
 	}
 }
 

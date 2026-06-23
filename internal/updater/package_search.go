@@ -291,16 +291,22 @@ func normalizedValuesContain(values []string, query string) bool {
 func wingetSearch(query string) ([]Package, CommandResult) {
 	variants := searchQueryVariants(query)
 	var cleanEmptyResult *CommandResult
+	var results []CommandResult
+	var packages []Package
 	for index, candidate := range variants {
 		result := runCommand(90*time.Second, managerCommand(managerWinget, "search", candidate, "--accept-source-agreements", "--disable-interactivity")...)
-		packages := parseWingetSearchPackages(result)
-		if len(packages) > 0 {
-			return packages, result
+		results = append(results, result)
+		found := parseWingetSearchPackages(result)
+		if len(found) > 0 {
+			packages = append(packages, found...)
 		}
 		if result.OK && cleanEmptyResult == nil {
 			cleanEmptyResult = &result
 		}
 		if index == len(variants)-1 {
+			if len(packages) > 0 {
+				return packages, combineWingetSearchResults(results)
+			}
 			if cleanEmptyResult != nil {
 				return nil, *cleanEmptyResult
 			}
@@ -308,6 +314,34 @@ func wingetSearch(query string) ([]Package, CommandResult) {
 		}
 	}
 	return nil, CommandResult{Code: 1, Command: "winget search", Stderr: "no winget search variants were available"}
+}
+
+func combineWingetSearchResults(results []CommandResult) CommandResult {
+	if len(results) == 0 {
+		return CommandResult{Code: 1, Command: "winget search", Stderr: "no winget search variants were available"}
+	}
+	if len(results) == 1 {
+		return results[0]
+	}
+	var commands, stdout, stderr []string
+	for _, result := range results {
+		if strings.TrimSpace(result.Command) != "" {
+			commands = append(commands, result.Command)
+		}
+		if strings.TrimSpace(result.Stdout) != "" {
+			stdout = append(stdout, result.Stdout)
+		}
+		if strings.TrimSpace(result.Stderr) != "" {
+			stderr = append(stderr, result.Stderr)
+		}
+	}
+	return CommandResult{
+		OK:      true,
+		Code:    0,
+		Command: strings.Join(commands, " | "),
+		Stdout:  strings.Join(stdout, "\n"),
+		Stderr:  strings.Join(stderr, "\n"),
+	}
 }
 
 func parseWingetSearchPackages(result CommandResult) []Package {
@@ -333,6 +367,19 @@ func searchQueryVariants(query string) []string {
 	normalized = strings.Join(strings.Fields(normalized), " ")
 	if normalized != "" && !strings.EqualFold(normalized, query) {
 		variants = append(variants, normalized)
+	}
+	compact := strings.Join(strings.Fields(normalized), "")
+	if compact != "" {
+		seen := false
+		for _, variant := range variants {
+			if strings.EqualFold(variant, compact) {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			variants = append(variants, compact)
+		}
 	}
 	return variants
 }

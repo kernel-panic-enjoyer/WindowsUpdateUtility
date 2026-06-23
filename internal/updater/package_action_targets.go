@@ -32,6 +32,7 @@ func storeUpdateTargetCandidates(pkg Package) []string {
 	if pkg.Manager == managerStore && pkg.UpdateState != "" {
 		return uniqueUpdateTargets([]string{
 			pkg.StoreProductID,
+			pkg.StoreUpdateID,
 		})
 	}
 	return uniqueUpdateTargets([]string{

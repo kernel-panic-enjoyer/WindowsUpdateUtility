@@ -20,6 +20,36 @@ func TestStateDirOverride(t *testing.T) {
 	}
 }
 
+func TestAppTempDirOverride(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("UPDATER_TEMP_DIR", dir)
+	got, err := appTempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != dir {
+		t.Fatalf("expected temp override %s, got %s", dir, got)
+	}
+}
+
+func TestAppTempDirUsesSystemTempByDefault(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("UPDATER_TEMP_DIR", "")
+	t.Setenv("TMP", root)
+	t.Setenv("TEMP", root)
+	got, err := appTempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(root, appDirName)
+	if got != want {
+		t.Fatalf("expected temp dir %s, got %s", want, got)
+	}
+	if _, err := os.Stat(want); err != nil {
+		t.Fatalf("expected temp dir to be created: %v", err)
+	}
+}
+
 func TestLoadStateMigratesStoreAppsOutOfWingetBucket(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("UPDATER_STATE_DIR", dir)

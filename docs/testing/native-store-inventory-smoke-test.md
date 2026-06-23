@@ -2,25 +2,15 @@
 
 Scope: manual validation for the current-user packaged-application inventory provider.
 
-## Build Broker
-
-Requires a Windows SDK/.NET machine:
+## Build
 
 ```powershell
-dotnet publish .\native\store-inventory-broker\WindowsUpdater.StoreInventoryBroker.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
+powershell -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1
 ```
 
-Copy or build the result beside `WindowsUpdaterWebUI.exe` as:
-
-```text
-WindowsUpdater.StoreInventoryBroker.exe
-```
-
-Alternatively set:
-
-```powershell
-$env:UPDATER_STORE_INVENTORY_BROKER='C:\path\to\WindowsUpdater.StoreInventoryBroker.exe'
-```
+The app uses in-process Go WinRT/AppModel calls for current-user packaged-app
+inventory. It should not build, extract, or launch
+`WindowsUpdater.StoreInventoryBroker.exe`.
 
 ## Diagnostic Dual Run
 
@@ -37,7 +27,7 @@ Expected result: comparison diagnostics are produced, but no Store update state 
 
 1. Set `UPDATER_NATIVE_STORE_INVENTORY=1`.
 2. Start the app without elevation.
-3. Confirm no PowerShell AppX inventory command is run for normal Store inventory.
+3. Confirm no PowerShell AppX inventory command and no Store inventory sidecar process is run for normal Store inventory.
 4. Confirm Store packages are grouped by package family name and framework/resource/optional-only families are not shown as independent Store products.
 5. Confirm Store update detection is not added by this phase.
 
@@ -51,9 +41,9 @@ Expected result: current-user native inventory is available behind the flag, wit
 
 Expected result: native responses with the wrong user SID are rejected.
 
-## Broker Failure
+## Direct Provider Failure
 
-1. Set `UPDATER_STORE_INVENTORY_BROKER` to a missing or crashing executable.
+1. Force a provider failure with a local diagnostic build or debugger.
 2. Enable dual-run.
 3. Refresh inventory.
 

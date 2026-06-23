@@ -12,7 +12,10 @@ func shouldTryAlternatePackageTarget(result CommandResult) bool {
 	}
 	return outputContainsAny(output, []string{
 		"no applicable upgrade",
+		"no available upgrade",
 		"kein anwendbares upgrade",
+		"kein verfügbares upgrade",
+		"keine neueren paketversionen",
 		"no installed package found",
 		"no package found",
 		"no product found",

@@ -46,6 +46,10 @@
   var toastSeq = 0;
   var toasts = [];
   var toastAnimationFrame = 0;
+  var spinnerAnimationFrame = 0;
+  var spinnerPeriodMs = 900;
+  var spinnerObserver = null;
+  var reducedMotionQuery = window.matchMedia ? window.matchMedia("(prefers-reduced-motion: reduce)") : null;
   function $(id){ return document.getElementById(id); }
   function api(path, params){
     var url = new URL(path, window.location.origin);
@@ -60,6 +64,42 @@
   function attr(value){ return html(value); }
   function spinner(){
     return '<span class="spinner" aria-hidden="true"></span>';
+  }
+  function spinnerMotionReduced(){
+    return !!(reducedMotionQuery && reducedMotionQuery.matches);
+  }
+  function hasActiveSpinners(){
+    return !!document.querySelector(".spinner");
+  }
+  function updateSpinnerPhase(){
+    if(spinnerMotionReduced()){
+      document.documentElement.style.setProperty("--spinner-angle", "0deg");
+      return;
+    }
+    var angle = ((Date.now() % spinnerPeriodMs) / spinnerPeriodMs) * 360;
+    document.documentElement.style.setProperty("--spinner-angle", angle.toFixed(2) + "deg");
+  }
+  function startSpinnerLoop(){
+    if(spinnerAnimationFrame || document.hidden || spinnerMotionReduced() || !hasActiveSpinners()){ return; }
+    function tick(){
+      spinnerAnimationFrame = 0;
+      updateSpinnerPhase();
+      if(!document.hidden && hasActiveSpinners()){
+        spinnerAnimationFrame = window.requestAnimationFrame(tick);
+      }
+    }
+    spinnerAnimationFrame = window.requestAnimationFrame(tick);
+  }
+  function stopSpinnerLoop(){
+    if(spinnerAnimationFrame){
+      window.cancelAnimationFrame(spinnerAnimationFrame);
+      spinnerAnimationFrame = 0;
+    }
+  }
+  function observeSpinnerPresence(){
+    if(spinnerObserver || !window.MutationObserver || !document.body){ return; }
+    spinnerObserver = new MutationObserver(function(){ startSpinnerLoop(); });
+    spinnerObserver.observe(document.body, {childList:true, subtree:true});
   }
   function loadingText(message){
     return '<span class="loading-text">' + spinner() + '<span class="loading-message">' + html(message) + '</span></span>';
@@ -315,8 +355,7 @@
         logPollDelay = Math.min(10000, Math.round(logPollDelay * 1.35));
       }
     }catch(e){
-      setLogConnectionState("disconnected", "Log disconnected; retrying");
-      showNotice("Session log disconnected. Reconnecting...");
+      setLogConnectionState("disconnected", "Log reconnecting");
       logPollDelay = Math.min(15000, Math.round(logPollDelay * 1.6));
     }
   }
@@ -366,8 +405,7 @@
       }catch(e){}
     });
     eventStream.onerror = function(){
-      setLogConnectionState("disconnected", "Log disconnected; retrying");
-      showNotice("Session log disconnected. Reconnecting...");
+      setLogConnectionState("disconnected", "Log reconnecting");
       if(eventStream){
         eventStream.close();
         eventStream = null;
@@ -698,7 +736,11 @@
   function stateBadge(pkg){
     var state = storeUpdateState(pkg);
     var className = "state-" + (pkg && pkg.stale ? "stale" : state);
-    var label = pkg && pkg.stale ? stateLabel(state) + " (stale)" : stateLabel(state);
+    var label = pkg && pkg.stale ? "Stale" : stateLabel(state);
+    if(storeAssessmentActive(pkg) && state === "available" && !pkg.stale && !packageHasExactStoreTarget(pkg)){
+      className = "state-unknown";
+      label = "Target unavailable";
+    }
     return '<span class="badge state-badge ' + attr(className) + '">' + html(label) + '</span>';
   }
   function packageHasExactStoreTarget(pkg){
@@ -712,20 +754,24 @@
     return storeUpdateState(pkg) === "available" && !pkg.stale;
   }
   function packageHasUpdate(pkg){
-    if(storeAssessmentActive(pkg)){ return storeUpdateState(pkg) === "available"; }
+    if(storeAssessmentActive(pkg)){ return packageHasFreshStoreAssessment(pkg) && packageHasExactStoreTarget(pkg); }
     if(pkg && pkg.manager === "store"){ return false; }
     return !!pkg.update_available;
   }
   function packageNeedsUpdateAttention(pkg){
     if(pkg && pkg.manager === "store" && !storeAssessmentActive(pkg)){ return true; }
     if(!storeAssessmentActive(pkg)){ return !!pkg.update_available; }
-    var state = storeUpdateState(pkg);
-    return state === "available" || state === "pending" || state === "conflict" || state === "inapplicable" || !!pkg.stale;
+    return packageHasUpdate(pkg);
   }
   function packageReasonText(pkg){
     return String((pkg && pkg.update_reason) || "").trim();
   }
   function providerDiagnosticsMarkup(pkg){
+    var list = providerDiagnosticsListMarkup(pkg);
+    if(!list){ return ""; }
+    return '<details class="diagnostic-details"><summary>Update diagnostics</summary>' + list + '</details>';
+  }
+  function providerDiagnosticsListMarkup(pkg){
     var summaries = (pkg && pkg.provider_summaries) || [];
     if(!packageReasonText(pkg) && summaries.length === 0){ return ""; }
     var items = [];
@@ -738,7 +784,7 @@
       if(summary.error){ text += " - " + summary.error; }
       items.push('<li>' + html(text) + '</li>');
     });
-    return '<details class="diagnostic-details"><summary>Update diagnostics</summary><ul class="diagnostic-list">' + items.join("") + '</ul></details>';
+    return '<ul class="diagnostic-list">' + items.join("") + '</ul>';
   }
   function defaultStoreHealthCounts(){
     return {available:0,current:0,unknown:0,conflict:0,inapplicable:0,pending:0,stale:0};
@@ -796,20 +842,109 @@
     var health = storeScanHealth();
     return !health.active || health.healthy;
   }
+  function updateModalOpenState(){
+    var openModal = document.querySelector(".modal:not(.hidden)");
+    document.body.classList.toggle("modal-open", !!openModal);
+  }
+  function openStoreStatusModal(){
+    var modal = $("store-status-modal");
+    if(!modal){ return; }
+    renderStoreScanHealth();
+    modal.classList.remove("hidden");
+    updateModalOpenState();
+    var closeButton = $("store-status-close");
+    if(closeButton){ closeButton.focus(); }
+  }
+  function closeStoreStatusModal(){
+    var modal = $("store-status-modal");
+    if(!modal){ return; }
+    modal.classList.add("hidden");
+    updateModalOpenState();
+  }
+  function packageByKey(key){
+    key = String(key || "");
+    for(var i = 0; i < packages.length; i++){
+      if(packages[i] && String(packages[i].key || "") === key){ return packages[i]; }
+    }
+    return null;
+  }
+  function packageDiagnosticsButton(pkg){
+    if(!storeAssessmentActive(pkg) || (!packageReasonText(pkg) && !(pkg.provider_summaries || []).length)){ return ""; }
+    return '<button class="ghost diagnostics-button" type="button" data-package-diagnostics-open data-key="' + attr(pkg.key) + '" aria-label="Show update diagnostics for ' + attr(pkg.name || pkg.id || "package") + '">' + icon("alert") + '<span>Diagnostics</span></button>';
+  }
+  function packageDiagnosticField(label, value){
+    value = String(value || "").trim();
+    if(!value){ return ""; }
+    return '<div class="diagnostic-field"><span>' + html(label) + '</span>' + html(value) + '</div>';
+  }
+  function openPackageDiagnosticsModal(key){
+    var pkg = packageByKey(key);
+    var modal = $("package-diagnostics-modal");
+    var title = $("package-diagnostics-modal-title");
+    var body = $("package-diagnostics-body");
+    if(!pkg || !modal || !body){ return; }
+    if(title){ title.textContent = pkg.name || pkg.id || "Package diagnostics"; }
+    var fields = [
+      packageDiagnosticField("Manager", managerLabel(pkg.manager)),
+      packageDiagnosticField("Backend", backendLabel(pkg.action_backend || pkg.source || pkg.manager)),
+      packageDiagnosticField("Package family", pkg.installed_package_family_name),
+      packageDiagnosticField("Product ID", pkg.store_product_id),
+      packageDiagnosticField("Scan ID", pkg.scan_id),
+      packageDiagnosticField("Observed", pkg.observed_at)
+    ].join("");
+    body.innerHTML =
+      '<div class="health-summary">' + stateBadge(pkg) + '<strong>' + html(packageReasonText(pkg) || stateLabel(storeUpdateState(pkg))) + '</strong></div>' +
+      (fields ? '<div class="diagnostic-grid">' + fields + '</div>' : '') +
+      (providerDiagnosticsListMarkup(pkg) || '<p class="muted">No provider diagnostics are attached to this package.</p>');
+    modal.classList.remove("hidden");
+    updateModalOpenState();
+    var closeButton = $("package-diagnostics-close");
+    if(closeButton){ closeButton.focus(); }
+  }
+  function closePackageDiagnosticsModal(){
+    var modal = $("package-diagnostics-modal");
+    if(!modal){ return; }
+    modal.classList.add("hidden");
+    updateModalOpenState();
+  }
   function renderStoreScanHealth(){
     var target = $("store-scan-health-body");
+    var summary = $("store-scan-health-summary");
     if(!target){ return; }
+    function setStoreHealthSummary(markup){
+      if(summary){ summary.innerHTML = markup; }
+    }
+    function storeManagerDetailsMarkup(){
+      var manager = latestStatus && latestStatus.managers ? latestStatus.managers.store : null;
+      if(!manager){ return ""; }
+      var details = [];
+      if(manager.inventory_available){
+        details.push("Store apps detected via " + (manager.inventory_backend || "AppX") + " inventory.");
+      }
+      if(!manager.available && manager.action_backend === "winget-msstore-fallback"){
+        details.push("Store installs and updates can fall back to winget for compatible Store IDs.");
+      }
+      if(manager.path){
+        details.push("Store CLI path: " + manager.path);
+      }
+      if(details.length === 0){ return ""; }
+      return '<div class="health-summary manager-status-details"><span class="badge">Inventory</span><span>' + html(details.join(" ")) + '</span></div>';
+    }
     if(latestPackagesLoading){
+      setStoreHealthSummary(loadingText("Checking Store status..."));
       target.innerHTML = loadingText("Checking Store coverage...");
       return;
     }
     var health = storeScanHealth();
     if(!health.active){
-      target.innerHTML = '<div class="health-summary"><span class="badge state-unknown">Legacy Store detector</span><span class="muted">New Store assessment fields are disabled.</span></div>';
+      setStoreHealthSummary('<span class="badge state-unknown">Legacy</span><span>Detailed Store status unavailable</span>');
+      target.innerHTML = storeManagerDetailsMarkup() + '<div class="health-summary"><span class="badge state-unknown">Legacy Store detector</span><span class="muted">New Store assessment fields are disabled.</span></div>';
       return;
     }
     var title = health.healthy ? "Store scan is complete enough to report Current." : "Store update status needs attention.";
     var badge = health.healthy ? '<span class="badge state-current">Healthy</span>' : '<span class="badge state-unknown">Not authoritative</span>';
+    var summaryText = health.healthy ? "Coverage OK" : "Needs review";
+    setStoreHealthSummary(badge + '<span>' + html(summaryText) + '</span>');
     var metrics = ["available","current","unknown","conflict","inapplicable","pending","stale"].map(function(key){
       return '<span class="badge state-' + attr(key) + '">' + html(stateLabel(key)) + ': ' + html(health.counts[key] || 0) + '</span>';
     }).join("");
@@ -829,7 +964,7 @@
     health.providerIssues.slice(0, 20).forEach(function(pkg){
       details.push('<li><strong>' + html(pkg.name || pkg.id || "Store package") + ':</strong> ' + html(packageReasonText(pkg) || storeUpdateState(pkg)) + providerDiagnosticsMarkup(pkg) + '</li>');
     });
-    target.innerHTML = '<div class="health-summary">' + badge + '<strong>' + html(title) + '</strong></div><div class="health-metrics">' + metrics + '</div>' + (details.length ? '<details class="diagnostic-details"><summary>Provider diagnostics</summary><ul class="diagnostic-list">' + details.join("") + '</ul></details>' : '');
+    target.innerHTML = storeManagerDetailsMarkup() + '<div class="health-summary">' + badge + '<strong>' + html(title) + '</strong></div><div class="health-metrics">' + metrics + '</div>' + (details.length ? '<details class="diagnostic-details"><summary>Provider diagnostics</summary><ul class="diagnostic-list">' + details.join("") + '</ul></details>' : '');
   }
 
   function renderDashboardSummary(){
@@ -884,24 +1019,24 @@
     function managerDisplayDetails(name, manager){
       var details = [];
       if(name === "store"){
-        if(manager.inventory_available){
-          details.push('<span class="muted">Store apps detected via ' + html(manager.inventory_backend || 'AppX') + ' inventory</span>');
-        }
-        if(!manager.available && manager.action_backend === "winget-msstore-fallback"){
-          details.push('<span class="muted">Store installs and updates can fall back to winget for compatible Store IDs.</span>');
-        }
-        return details.join("");
+        return "";
       }
       if(manager.inventory_available){ details.push('<span class="badge ok">Inventory available</span>'); }
-      return details.join("");
+      return details.length ? '<div class="manager-extra">' + details.join("") + '</div>' : "";
+    }
+    function managerAvailabilityMarkup(name, manager){
+      var badge = '<span class="badge ' + (manager.available ? 'ok' : 'error') + '">' + html(manager.available ? managerAvailabilityText(name, manager) : 'Missing') + '</span>';
+      if(name !== "store"){ return badge; }
+      return '<div class="manager-availability"><button class="ghost manager-details-button" type="button" data-store-status-open>Details</button>' + badge + '</div>';
     }
     var markup = names.map(function(name){
       var manager = managers[name] || {};
       var details = managerDisplayDetails(name, manager);
+      var availability = managerAvailabilityMarkup(name, manager);
       if(manager.available){
-        return '<div class="manager manager-ok"><div class="manager-main"><span class="manager-dot">' + icon("check") + '</span><div><strong>' + html(managerLabel(name)) + '</strong><span class="muted">' + html(manager.path || '') + '</span></div></div><span class="badge ok">' + html(managerAvailabilityText(name, manager)) + '</span>' + details + '</div>';
+        return '<div class="manager manager-ok"><div class="manager-main"><span class="manager-dot">' + icon("check") + '</span><div><strong>' + html(managerLabel(name)) + '</strong><span class="muted">' + html(manager.path || '') + '</span></div></div>' + availability + details + '</div>';
       }
-      return '<div class="manager manager-missing"><div class="manager-main"><span class="manager-dot">' + icon("alert") + '</span><div><strong>' + html(managerLabel(name)) + '</strong><span class="muted">' + html(manager.error || '') + '</span></div></div><span class="badge error">Missing</span>' + details + '<form class="manager-install-form" method="post" action="/api/managers/install"><input type="hidden" name="manager" value="' + attr(name) + '"><button type="submit">' + icon("install") + '<span>Install ' + html(managerLabel(name)) + '</span></button></form></div>';
+      return '<div class="manager manager-missing"><div class="manager-main"><span class="manager-dot">' + icon("alert") + '</span><div><strong>' + html(managerLabel(name)) + '</strong><span class="muted">' + html(manager.error || '') + '</span></div></div>' + availability + details + '<form class="manager-install-form" method="post" action="/api/managers/install"><input type="hidden" name="manager" value="' + attr(name) + '"><button type="submit">' + icon("install") + '<span>Install ' + html(managerLabel(name)) + '</span></button></form></div>';
     }).join("");
     if(target.innerHTML !== markup){ target.innerHTML = markup; }
   }
@@ -939,11 +1074,7 @@
     if(pkg.pinned){
       secondary += " - pinned";
     }
-    var identity = "";
-    if(storeAssessmentActive(pkg) && pkg.installed_package_family_name){
-      identity = '<br><span class="muted">PFN: ' + html(pkg.installed_package_family_name) + '</span>';
-    }
-    return '<strong>' + html(pkg.name) + '</strong><br><span class="muted">' + html(secondary) + '</span>' + identity + (storeAssessmentActive(pkg) ? providerDiagnosticsMarkup(pkg) : '');
+    return '<strong>' + html(pkg.name || "Store app") + '</strong><br><span class="muted">' + html(secondary) + '</span>';
   }
 	function managerCell(pkg){
 		var backend = pkg.action_backend ? '<br><span class="muted">' + html(backendLabel(pkg.action_backend)) + '</span>' : '';
@@ -958,12 +1089,31 @@
     }
     return '<button class="auto-package toggle-button" type="button" data-key="' + attr(pkg.key) + '" data-package-name="' + attr(pkg.name) + '" data-enabled="' + (pkg.auto_update ? 'true' : 'false') + '" aria-pressed="' + (pkg.auto_update ? 'true' : 'false') + '" aria-label="Auto-update for ' + attr(pkg.name) + '"' + (updateBusy ? ' disabled' : '') + '><span>' + (pkg.auto_update ? 'On' : 'Off') + '</span></button>';
   }
-  function packageAvailableCell(pkg){
+  function packageAvailableCell(pkg, options){
+    options = options || {};
+    var showStatusBadge = options.statusBadge !== false;
+    var compact = options.compact === true;
+    function withDiagnostics(content){
+      var diagnostics = options.diagnostics ? packageDiagnosticsButton(pkg) : "";
+      if(!diagnostics){ return content; }
+      return '<div class="available-cell">' + content + diagnostics + '</div>';
+    }
+    function withOptionalBadge(text, muted){
+      var content = muted ? '<span class="muted">' + html(text) + '</span>' : html(text);
+      if(!showStatusBadge){
+        return withDiagnostics(content);
+      }
+      return withDiagnostics(stateBadge(pkg) + '<br>' + content);
+    }
     if(storeAssessmentActive(pkg)){
       var state = storeUpdateState(pkg);
       var offered = pkg.offered_version || pkg.available_version || "";
       var text = "";
-      if(state === "available"){
+      if(pkg.stale){
+        text = "Stale evidence";
+      }else if(state === "available" && !packageHasExactStoreTarget(pkg)){
+        text = "Exact target unavailable";
+      }else if(state === "available"){
         text = offered ? offered : "Update available";
       }else if(state === "pending"){
         text = offered ? offered + " pending" : "Pending verification";
@@ -978,13 +1128,19 @@
       }else{
         text = stateLabel(state);
       }
-      return stateBadge(pkg) + '<br><span class="muted">' + html(text) + '</span>';
+      if(compact && (state === "current" || state === "unknown")){
+        return withDiagnostics('<span class="muted">-</span>');
+      }
+      return withOptionalBadge(text, state !== "available" || pkg.stale || !packageHasExactStoreTarget(pkg));
     }
     if(pkg.manager === "store"){
-      return stateBadge(pkg) + '<br><span class="muted">Unknown</span>';
+      if(compact){
+        return withDiagnostics('<span class="muted">-</span>');
+      }
+      return withOptionalBadge("Unknown", true);
     }
     var available = html(pkg.available_version);
-    return available;
+    return withDiagnostics(available);
   }
 	function updateForm(pkg){
     if(storeAssessmentActive(pkg) && !packageHasExactStoreTarget(pkg)){
@@ -1040,7 +1196,7 @@
     target.innerHTML = page.items.map(function(pkg){
       var selectable = packageBulkUpdateable(pkg);
       var rowClass = rowUpdateState(pkg.key) === "active" ? ' class="updating-current"' : '';
-      return '<tr data-key="' + attr(pkg.key) + '"' + rowClass + '><td><input form="update-selected-form" type="checkbox" name="package_key" value="' + attr(pkg.key) + '" aria-label="Select ' + attr(pkg.name) + ' for update"' + ((updateBusy || !selectable) ? ' disabled' : '') + '></td><td>' + packageNameCell(pkg) + '</td><td>' + managerCell(pkg) + '</td><td>' + html(pkg.version) + '</td><td>' + packageAvailableCell(pkg) + '</td><td>' + autoButton(pkg) + '</td><td>' + updateForm(pkg) + '</td></tr>';
+      return '<tr data-key="' + attr(pkg.key) + '"' + rowClass + '><td><input form="update-selected-form" type="checkbox" name="package_key" value="' + attr(pkg.key) + '" aria-label="Select ' + attr(pkg.name) + ' for update"' + ((updateBusy || !selectable) ? ' disabled' : '') + '></td><td>' + packageNameCell(pkg) + '</td><td>' + managerCell(pkg) + '</td><td>' + html(pkg.version) + '</td><td>' + packageAvailableCell(pkg, {diagnostics:true}) + '</td><td>' + autoButton(pkg) + '</td><td>' + updateForm(pkg) + '</td></tr>';
     }).join("");
     renderPager(page, status, prev, next);
   }
@@ -1061,7 +1217,7 @@
 	target.innerHTML = page.items.map(function(pkg){
 		var rowStatus = pkg.manager === "store" ? stateBadge(pkg) : (pkg.update_supported === false ? '<span class="badge">Inventory only</span>' : ((pkg.unknown_version || pkg.pinned) && pkg.update_available ? '<span class="badge warn">Explicit update</span>' : (pkg.update_available ? '<span class="badge warn">Update</span>' : '<span class="badge ok">Current</span>')));
     var rowClass = rowUpdateState(pkg.key) === "active" ? ' class="updating-current"' : '';
-		return '<tr data-key="' + attr(pkg.key) + '"' + rowClass + '><td>' + packageNameCell(pkg) + '</td><td>' + managerCell(pkg) + '</td><td>' + html(pkg.version) + '</td><td>' + packageAvailableCell(pkg) + '</td><td>' + rowStatus + '</td><td>' + autoButton(pkg) + '</td><td>' + installedAction(pkg) + '</td></tr>';
+		return '<tr data-key="' + attr(pkg.key) + '"' + rowClass + '><td>' + packageNameCell(pkg) + '</td><td>' + managerCell(pkg) + '</td><td>' + html(pkg.version) + '</td><td>' + packageAvailableCell(pkg, {statusBadge:false, compact:true}) + '</td><td>' + rowStatus + '</td><td>' + autoButton(pkg) + '</td><td>' + installedAction(pkg) + '</td></tr>';
 	}).join("");
     renderPager(page, status, prev, next, installedSearchQuery ? " matches" : "");
   }
@@ -2001,6 +2157,26 @@
 
 
   document.addEventListener("click", function(event){
+    var openStoreStatus = event.target.closest("[data-store-status-open]");
+    if(openStoreStatus){
+      openStoreStatusModal();
+      return;
+    }
+    var closeStoreStatus = event.target.closest("[data-store-status-close]");
+    if(closeStoreStatus){
+      closeStoreStatusModal();
+      return;
+    }
+    var openPackageDiagnostics = event.target.closest("[data-package-diagnostics-open]");
+    if(openPackageDiagnostics){
+      openPackageDiagnosticsModal(openPackageDiagnostics.dataset.key);
+      return;
+    }
+    var closePackageDiagnostics = event.target.closest("[data-package-diagnostics-close]");
+    if(closePackageDiagnostics){
+      closePackageDiagnosticsModal();
+      return;
+    }
     var toastClose = event.target.closest(".toast-close");
     if(toastClose){
       var toast = toastClose.closest(".toast");
@@ -2018,6 +2194,16 @@
     }
   });
   document.addEventListener("keydown", function(event){
+    var storeModal = $("store-status-modal");
+    var packageModal = $("package-diagnostics-modal");
+    if(event.key === "Escape" && packageModal && !packageModal.classList.contains("hidden")){
+      closePackageDiagnosticsModal();
+      return;
+    }
+    if(event.key === "Escape" && storeModal && !storeModal.classList.contains("hidden")){
+      closeStoreStatusModal();
+      return;
+    }
     var tab = event.target.closest(".log-tab");
     if(!tab){ return; }
     switch(event.key){
@@ -2119,8 +2305,10 @@
   });
   document.addEventListener("visibilitychange", function(){
     if(document.hidden){
+      stopSpinnerLoop();
       pauseToastTimers();
     }else{
+      startSpinnerLoop();
       resumeToastTimers();
       if(!eventStream){ startEventStream(); }
       if(latestStatus && latestStatus.loading){ loadStatus(false); }
@@ -2239,6 +2427,21 @@
 
 
   setTheme(currentTheme());
+  updateSpinnerPhase();
+  observeSpinnerPresence();
+  startSpinnerLoop();
+  if(reducedMotionQuery){
+    var onReducedMotionChange = function(){
+      stopSpinnerLoop();
+      updateSpinnerPhase();
+      startSpinnerLoop();
+    };
+    if(reducedMotionQuery.addEventListener){
+      reducedMotionQuery.addEventListener("change", onReducedMotionChange);
+    }else if(reducedMotionQuery.addListener){
+      reducedMotionQuery.addListener(onReducedMotionChange);
+    }
+  }
   loadStatus(false);
   startEventStream();
   loadPackages(false).then(function(){ checkActiveUpdateJob(); });

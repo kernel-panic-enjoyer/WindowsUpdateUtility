@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestArgValueParsesEqualsAndSeparatedForms(t *testing.T) {
@@ -36,5 +37,24 @@ func TestRandomTokenFailsClosedWhenCryptoRandomFails(t *testing.T) {
 	}
 	if token != "" {
 		t.Fatalf("expected no fallback token, got %q", token)
+	}
+}
+
+func TestShutdownSignalWatcherRunsCleanup(t *testing.T) {
+	app := &App{}
+	cleanupDone := make(chan struct{})
+	app.addShutdownCleanup(func() {
+		close(cleanupDone)
+	})
+	signals := make(chan os.Signal, 1)
+	stop := app.watchShutdownSignals(signals)
+	defer stop()
+
+	signals <- os.Interrupt
+
+	select {
+	case <-cleanupDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown signal did not run registered cleanup")
 	}
 }

@@ -1,7 +1,9 @@
 # Windows Updater WebUI
 
-A single-binary Go Windows updater with a browser UI for winget, Chocolatey,
-and Microsoft Store apps.
+A single distributed Go Windows updater with a browser UI for winget,
+Chocolatey, and Microsoft Store apps. Microsoft Store packaged-app inventory is
+enumerated in-process through Go WinRT/AppModel calls in the interactive user's
+session.
 
 ## Features
 
@@ -9,8 +11,13 @@ and Microsoft Store apps.
 - Runs the WebUI in the interactive user session and uses elevation only for actions that require it.
 - Detects winget, Chocolatey, and the native Store CLI.
 - Lists installed winget, Chocolatey, and current-user Store packaged apps in one table.
-- Uses the new Microsoft Store assessment model by default. Store status is `Unknown` unless the app has a fresh, complete, exact, current-user scan.
-- Detects available updates and enables update buttons only for packages with updates and exact action targets.
+- Uses the exact Microsoft Store assessment model by default. Store status is
+  `Unknown` unless the app has a fresh, complete, exact, current-user scan; it
+  must not guess Store update state from display names or fuzzy matches.
+- Detects available updates and enables update buttons only for packages with
+  updates and exact action targets. Store execution attempts verified Product
+  ID first through WinGet msstore when available, with verified Store CLI exact
+  targets used only as fallback.
 - Searches for installable packages and filters out truncated winget IDs.
 - Installs packages from winget, Chocolatey, or Store after an explicit button click.
 - Updates individual packages, selected packages, or all packages.
@@ -23,27 +30,29 @@ and Microsoft Store apps.
 ## Project Layout
 
 - `main.go`: thin executable entrypoint.
+- `app.manifest` / `app.syso`: Windows icon and explicit `asInvoker` manifest so the WebUI starts without startup elevation.
 - `internal/updater`: application backend, WebUI, package-manager integrations, tests, and embedded assets.
-- `internal/updater/assets`: app icon and favicon source assets.
-- `tools/icongen`: icon generation utility.
+- `internal/updater/assets`: app icon, favicon, CSS, and JavaScript assets.
+- `dev/scripts`: developer build and distribution smoke helpers.
+- `dev/tools/icongen`: icon generation utility.
+- `dev/tools/spikes`: disposable Store/API validation probes, excluded from the production binary.
+- `docs/architecture`: architecture decision records.
+- `docs/status`: current implementation status and release-gate notes.
+- `docs/testing`: manual Windows smoke-test procedures.
+- `docs/troubleshooting`: user-facing troubleshooting notes.
 - `dist`: local build output.
 
 ## Build
 
 Use Go 1.22+ on Windows:
 
-```cmd
-set GOCACHE=%CD%\.gocache
-go test ./...
-go build -ldflags="-H=windowsgui" -o dist\WindowsUpdaterWebUI.exe .
+```powershell
+powershell -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1
 ```
 
-If your Windows folder policy blocks writing `.exe` files into this directory,
-build to another folder:
-
-```cmd
-go build -ldflags="-H=windowsgui" -o "%TEMP%\WindowsUpdaterWebUI.exe" .
-```
+`dev\scripts\Build-Workspace.ps1` runs formatting, tests, vet, the WebUI
+JavaScript syntax check, and the Windows GUI build. Toolchain caches and
+temporary files use the normal Go, PowerShell, and Windows defaults.
 
 ## Run
 
@@ -55,9 +64,15 @@ runtime, VBS launcher, or C# launcher is required.
 
 For development without UAC:
 
-```cmd
-set GOCACHE=%CD%\.gocache
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
 go run . --no-elevate
+```
+
+For automated distribution smoke tests, use:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\dev\scripts\Smoke-Distribution.ps1 -Exe .\dist\WindowsUpdaterWebUI.exe
 ```
 
 ## Notes

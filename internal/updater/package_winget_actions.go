@@ -51,6 +51,14 @@ func wingetUpgradeCommand(manager, id string, extra ...string) []string {
 	return wingetPackageCommand("upgrade", wingetSourceArg(manager), id, extra...)
 }
 
+func wingetMSStoreProductIDUpgradeCommand(productID string) []string {
+	return wingetPackageCommand("upgrade", sourceMSStore, productID)
+}
+
+func wingetMSStoreProductIDUpgradeAvailableCommand(productID string) []string {
+	return managerCommand(managerWinget, "list", "--upgrade-available", "--id", productID, "--exact", "--source", sourceMSStore, "--accept-source-agreements", "--disable-interactivity")
+}
+
 func wingetUpgradeNameCommand(manager, name string, extra ...string) []string {
 	return wingetPackageNameCommand("upgrade", wingetSourceArg(manager), name, extra...)
 }

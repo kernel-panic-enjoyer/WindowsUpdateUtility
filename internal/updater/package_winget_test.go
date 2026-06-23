@@ -51,6 +51,45 @@ GitHub CLI                   GitHub.cli                         2.74.0    Monike
 	}
 }
 
+func TestParseWingetSearchTableWhenNameFillsColumn(t *testing.T) {
+	output := `
+Name                                   ID                                        Version        Quelle
+--------------------------------------------------------------------------------------------------------
+Visual Studio Community                XPDCFJDKLZJLP8                            Unknown        msstore
+Microsoft Visual Studio Community 2019 Microsoft.VisualStudio.2019.Community     16.11.37301.9  winget
+Visual Studio Community 2022           Microsoft.VisualStudio.2022.Community     17.14.35       winget
+Visual Studio Community 2026 Insiders  Microsoft.VisualStudio.Community.Insiders 18.8.11912.234 winget
+`
+	got := parseWingetTable(output)
+	if len(got) != 4 {
+		t.Fatalf("expected 4 packages, got %d: %#v", len(got), got)
+	}
+	if got[1].Name != "Microsoft Visual Studio Community 2019" || got[1].ID != "Microsoft.VisualStudio.2019.Community" || got[1].Source != sourceWinget {
+		t.Fatalf("expected full-width Community 2019 row to parse, got %#v", got[1])
+	}
+	if got[2].Name != "Visual Studio Community 2022" || got[2].ID != "Microsoft.VisualStudio.2022.Community" || got[2].Version != "17.14.35" {
+		t.Fatalf("expected Community 2022 row to parse, got %#v", got[2])
+	}
+	if got[3].ID != "Microsoft.VisualStudio.Community.Insiders" || got[3].Source != sourceWinget {
+		t.Fatalf("expected Community Insiders row to parse, got %#v", got[3])
+	}
+}
+
+func TestParseWingetExactIDSearchTableWithoutSourceColumn(t *testing.T) {
+	output := `
+Name                          ID                                     Version
+-----------------------------------------------------------------------------
+Visual Studio BuildTools 2022 Microsoft.VisualStudio.2022.BuildTools 17.14.35
+`
+	got := parseWingetSearchPackages(CommandResult{OK: true, Stdout: output})
+	if len(got) != 1 {
+		t.Fatalf("expected 1 package, got %d: %#v", len(got), got)
+	}
+	if got[0].Name != "Visual Studio BuildTools 2022" || got[0].ID != "Microsoft.VisualStudio.2022.BuildTools" || got[0].Key != "winget:Microsoft.VisualStudio.2022.BuildTools" {
+		t.Fatalf("expected exact BuildTools row to be search result, got %#v", got[0])
+	}
+}
+
 func TestParseWingetTableMapsMicrosoftStoreSource(t *testing.T) {
 	output := `
 Name              ID                       Version  Available Source

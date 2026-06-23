@@ -4,15 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"runtime"
+	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
 
 const (
 	storeTransactionalScanFeatureFlag = "UPDATER_STORE_TRANSACTIONAL_SCAN"
+	storeProviderTimeoutEnv           = "UPDATER_STORE_PROVIDER_TIMEOUT_SECONDS"
 	defaultStoreCatalogProviderID     = "store-catalog-unimplemented"
-	defaultStoreProviderTimeout       = 45 * time.Second
+	defaultStoreProviderTimeout       = 6 * time.Minute
 )
 
 var (
@@ -28,6 +31,7 @@ type StoreCatalogProvider interface {
 
 type StoreCatalogProviderRun struct {
 	Provider     StoreProviderIdentity
+	Version      string
 	StartedAt    time.Time
 	CompletedAt  time.Time
 	Health       StoreProviderHealth
@@ -65,12 +69,19 @@ func storeTransactionalScanEnabled() bool {
 }
 
 func defaultStoreScanPipeline(store *StoreScanStore) *StoreScanPipeline {
+	managers := detectManagers()
+	storeVersion := managers[managerStore].Version
+	wingetVersion := managers[managerWinget].Version
 	return &StoreScanPipeline{
 		Store:             store,
 		InventoryProvider: storePackagedAppInventoryProvider(),
-		CatalogProviders:  []StoreCatalogProvider{unsupportedStoreCatalogProvider{}},
-		ProviderTimeout:   defaultStoreProviderTimeout,
-		Now:               storeScanNow,
+		CatalogProviders: []StoreCatalogProvider{
+			storeCLIExactCatalogProvider{Version: storeVersion},
+			storeCLIUpdatesCatalogProvider{Version: storeVersion},
+			wingetMSStoreExactCatalogProvider{Version: wingetVersion},
+		},
+		ProviderTimeout: configuredStoreProviderTimeout(),
+		Now:             storeScanNow,
 	}
 }
 
@@ -97,12 +108,14 @@ func (pipeline *StoreScanPipeline) Run(ctx context.Context) (StoreScanResult, er
 	if err != nil {
 		return StoreScanResult{}, err
 	}
+	systemContext := currentStoreScanSystemContext()
 	scan := StoreScanGeneration{
 		ScanID:           pipeline.scanID(now),
 		UserSID:          userSID,
 		StartedAt:        now,
-		WindowsVersion:   runtime.GOOS,
-		Architecture:     runtime.GOARCH,
+		WindowsVersion:   systemContext.WindowsVersion,
+		WindowsBuild:     systemContext.WindowsBuild,
+		Architecture:     systemContext.Architecture,
 		ProviderVersions: map[string]string{},
 		ProviderHealth:   map[string]StoreProviderHealth{},
 		CompletionStatus: StoreScanRunning,
@@ -209,7 +222,7 @@ func (pipeline *StoreScanPipeline) runCatalogProviders(ctx context.Context, scan
 	}
 	timeout := pipeline.ProviderTimeout
 	if timeout <= 0 {
-		timeout = defaultStoreProviderTimeout
+		timeout = configuredStoreProviderTimeout()
 	}
 	runs := make([]StoreCatalogProviderRun, len(providers))
 	var wg sync.WaitGroup
@@ -235,11 +248,67 @@ func (pipeline *StoreScanPipeline) runCatalogProviders(ctx context.Context, scan
 				run.Health = StoreProviderFailed
 				run.Error = runCtx.Err().Error()
 			}
+			run = sanitizeCatalogProviderRun(scan, run)
+			run = synthesizeMissingProviderObservations(scan, run, families)
 			runs[index] = sanitizeCatalogProviderRun(scan, run)
 		}()
 	}
 	wg.Wait()
 	return runs
+}
+
+func synthesizeMissingProviderObservations(scan StoreScanGeneration, run StoreCatalogProviderRun, families []StorePackagedAppFamily) StoreCatalogProviderRun {
+	if run.Health == StoreProviderHealthy {
+		return run
+	}
+	kind := observationKindForProviderHealth(run.Health)
+	seen := map[string]bool{}
+	for _, observation := range run.Observations {
+		if observation.Identity.UserSID == scan.UserSID && observation.Identity.PackageFamilyName != "" {
+			seen[strings.ToLower(observation.Identity.PackageFamilyName)] = true
+		}
+	}
+	observedAt := run.CompletedAt
+	if observedAt.IsZero() {
+		observedAt = scan.CompletedAt
+	}
+	if observedAt.IsZero() {
+		observedAt = scan.StartedAt
+	}
+	diagnostics := sanitizeProviderDiagnostic(firstNonEmpty(run.Error, "provider did not return complete evidence for this package family"))
+	for _, family := range families {
+		if !family.ProductLike || !family.Identity.Resolved() || family.Identity.UserSID != scan.UserSID {
+			continue
+		}
+		key := strings.ToLower(family.Identity.PackageFamilyName)
+		if seen[key] {
+			continue
+		}
+		run.Observations = append(run.Observations, StoreProviderObservation{
+			Provider:         run.Provider,
+			Health:           run.Health,
+			Kind:             kind,
+			Identity:         family.Identity,
+			ScanID:           scan.ScanID,
+			ObservedAt:       observedAt,
+			InstalledVersion: family.Primary.Version.String(),
+			Diagnostics:      diagnostics,
+		})
+	}
+	return run
+}
+
+func observationKindForProviderHealth(health StoreProviderHealth) StoreObservationKind {
+	switch health {
+	case StoreProviderFailed:
+		return StoreObservationProviderFailure
+	case StoreProviderUnsupported:
+		return StoreObservationUnsupportedProvider
+	case StoreProviderStale:
+		return StoreObservationStaleResult
+	default:
+		return StoreObservationIncompleteResult
+	}
 }
 
 func sanitizeCatalogProviderRun(scan StoreScanGeneration, run StoreCatalogProviderRun) StoreCatalogProviderRun {
@@ -278,6 +347,26 @@ func sanitizeCatalogProviderRun(scan StoreScanGeneration, run StoreCatalogProvid
 		mappings = append(mappings, mapping)
 	}
 	run.Mappings = mappings
+	run = downgradeRunHealthForBlockingObservations(run)
+	return run
+}
+
+func downgradeRunHealthForBlockingObservations(run StoreCatalogProviderRun) StoreCatalogProviderRun {
+	if run.Health != StoreProviderHealthy {
+		return run
+	}
+	for _, observation := range run.Observations {
+		if !observationBlocksAssessment(observation) {
+			continue
+		}
+		run.Health = StoreProviderIncomplete
+		providerKey := observation.Provider.Key()
+		if providerKey == "" {
+			providerKey = run.Provider.Key()
+		}
+		run.Error = firstNonEmpty(run.Error, fmt.Sprintf("%s returned incomplete package-level evidence", providerKey))
+		return run
+	}
 	return run
 }
 
@@ -292,8 +381,8 @@ func providerHealthMap(runs []StoreCatalogProviderRun) map[string]StoreProviderH
 func providerVersionMap(runs []StoreCatalogProviderRun) map[string]string {
 	versions := map[string]string{}
 	for _, run := range runs {
-		if key := run.Provider.Key(); key != "" {
-			versions[key] = "1"
+		if key := run.Provider.Key(); key != "" && strings.TrimSpace(run.Version) != "" {
+			versions[key] = strings.TrimSpace(run.Version)
 		}
 	}
 	return versions
@@ -304,11 +393,29 @@ func scanCompletionStatus(inventory StorePackagedAppInventory, runs []StoreCatal
 		return StoreScanFailed
 	}
 	for _, run := range runs {
-		if run.Health != StoreProviderHealthy {
+		if run.Provider.Key() == "store-current-user-inventory" || storeCatalogProviderRequired(run.Provider) {
+			if run.Health != StoreProviderHealthy {
+				return StoreScanIncomplete
+			}
+			continue
+		}
+		if run.Health != StoreProviderHealthy && len(runs) == 1 {
 			return StoreScanIncomplete
 		}
 	}
 	return StoreScanCompleted
+}
+
+func configuredStoreProviderTimeout() time.Duration {
+	value := strings.TrimSpace(os.Getenv(storeProviderTimeoutEnv))
+	if value == "" {
+		return defaultStoreProviderTimeout
+	}
+	seconds, err := strconv.Atoi(value)
+	if err != nil || seconds <= 0 {
+		return defaultStoreProviderTimeout
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 func scanShouldPublish(scan StoreScanGeneration, inventory StorePackagedAppInventory) bool {
@@ -333,6 +440,7 @@ func (pipeline *StoreScanPipeline) previousAssessments(ctx context.Context, user
 func reconcileStoreScanAssessments(scan StoreScanGeneration, families []StorePackagedAppFamily, providerRuns []StoreCatalogProviderRun, previous map[StoreInstalledIdentity]StorePublishedAssessment) []StorePublishedAssessment {
 	required := requiredStoreCatalogProviders(providerRuns)
 	observations := allStoreProviderObservations(providerRuns)
+	verifiedProductIDs := verifiedProductIDsByIdentity(providerRuns, scan)
 	assessments := make([]StorePublishedAssessment, 0, len(families))
 	for _, family := range families {
 		if !family.ProductLike {
@@ -345,7 +453,7 @@ func reconcileStoreScanAssessments(scan StoreScanGeneration, families []StorePac
 			RequiredProviders: required,
 			Observations:      observations,
 		})
-		if previousAssessment, ok := previous[identity]; ok && shouldRetainPreviousPositive(scan, assessment) {
+		if previousAssessment, ok := previous[identity]; ok && shouldRetainPreviousPositive(scan, assessment) && !hasCurrentHealthyRetraction(scan, identity, providerRuns) {
 			assessment.State = StoreUpdateAvailable
 			assessment.Reason = "retained previous positive update because the latest scan was incomplete"
 			assessment.AvailableVersion = previousAssessment.AvailableVersion
@@ -372,6 +480,9 @@ func reconcileStoreScanAssessments(scan StoreScanGeneration, families []StorePac
 			updateID = assessment.Target.UpdateID
 			exact = assessment.Target.ExactFor(identity)
 		}
+		if productID == "" {
+			productID = verifiedProductIDs[identity]
+		}
 		assessments = append(assessments, StorePublishedAssessment{
 			StoreUpdateAssessment:      assessment,
 			ObservedAt:                 observedAt,
@@ -384,15 +495,79 @@ func reconcileStoreScanAssessments(scan StoreScanGeneration, families []StorePac
 	return assessments
 }
 
+func hasCurrentHealthyRetraction(scan StoreScanGeneration, identity StoreInstalledIdentity, providerRuns []StoreCatalogProviderRun) bool {
+	if scan.CompletionStatus != StoreScanCompleted {
+		return false
+	}
+	for _, run := range providerRuns {
+		if run.Health != StoreProviderHealthy {
+			continue
+		}
+		for _, observation := range run.Observations {
+			if !observation.Matches(identity, scan) || observation.Health != StoreProviderHealthy {
+				continue
+			}
+			switch observation.Kind {
+			case StoreObservationAuthoritativeNegative, StoreObservationNewerCatalogNoApplicableInstaller:
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func verifiedProductIDsByIdentity(providerRuns []StoreCatalogProviderRun, scan StoreScanGeneration) map[StoreInstalledIdentity]string {
+	type productIDState struct {
+		productID string
+		conflict  bool
+	}
+	states := map[StoreInstalledIdentity]productIDState{}
+	for _, run := range providerRuns {
+		for _, mapping := range run.Mappings {
+			if !mapping.VerifiedFor(mapping.InstalledIdentity, scan) {
+				continue
+			}
+			state := states[mapping.InstalledIdentity]
+			if state.productID == "" {
+				state.productID = mapping.ProductID
+			} else if !strings.EqualFold(state.productID, mapping.ProductID) {
+				state.conflict = true
+			}
+			states[mapping.InstalledIdentity] = state
+		}
+	}
+	verified := map[StoreInstalledIdentity]string{}
+	for identity, state := range states {
+		if state.productID != "" && !state.conflict {
+			verified[identity] = state.productID
+		}
+	}
+	return verified
+}
+
 func requiredStoreCatalogProviders(runs []StoreCatalogProviderRun) []StoreProviderIdentity {
 	required := []StoreProviderIdentity{}
 	for _, run := range runs {
 		if run.Provider.Key() == "store-current-user-inventory" {
 			continue
 		}
+		if !storeCatalogProviderRequired(run.Provider) {
+			continue
+		}
 		required = append(required, run.Provider)
 	}
 	return required
+}
+
+func storeCatalogProviderRequired(provider StoreProviderIdentity) bool {
+	switch provider.Key() {
+	case storeCLIExactProviderID, wingetMSStoreExactProviderID:
+		return false
+	case storeCLIUpdatesProviderID:
+		return true
+	default:
+		return true
+	}
 }
 
 func allStoreProviderObservations(runs []StoreCatalogProviderRun) []StoreProviderObservation {
@@ -410,7 +585,9 @@ func shouldRetainPreviousPositive(scan StoreScanGeneration, assessment StoreUpda
 	if scan.CompletionStatus == StoreScanCompleted {
 		return false
 	}
-	return assessment.State == StoreUpdateUnknown || assessment.State == StoreUpdateCurrent
+	return assessment.State == StoreUpdateUnknown ||
+		assessment.State == StoreUpdateCurrent ||
+		assessment.State == StoreUpdateInapplicable
 }
 
 func applicabilityForAssessment(assessment StoreUpdateAssessment) string {

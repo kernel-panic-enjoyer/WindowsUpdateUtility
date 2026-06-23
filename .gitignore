@@ -21,9 +21,8 @@ profile.cov
 go.work
 go.work.sum
 
-# Local app state and caches
+# Local app state
 .state/
-.gocache/
 __pycache__/
 *.pyc
 .pytest_cache/

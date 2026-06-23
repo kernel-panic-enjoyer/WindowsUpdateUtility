@@ -44,6 +44,30 @@ func stateDir() (string, error) {
 	return "", errors.New("could not create a state directory")
 }
 
+func appTempDir() (string, error) {
+	if override := os.Getenv("UPDATER_TEMP_DIR"); override != "" {
+		if err := os.MkdirAll(override, 0o755); err != nil {
+			return "", err
+		}
+		if !canWriteDir(override) {
+			return "", fmt.Errorf("temporary directory is not writable: %s", override)
+		}
+		return override, nil
+	}
+
+	candidates := []string{}
+	if value := os.TempDir(); value != "" {
+		candidates = append(candidates, filepath.Join(value, appDirName))
+	}
+
+	for _, candidate := range candidates {
+		if err := os.MkdirAll(candidate, 0o755); err == nil && canWriteDir(candidate) {
+			return candidate, nil
+		}
+	}
+	return "", errors.New("could not create a temporary directory")
+}
+
 func canWriteDir(dir string) bool {
 	path := filepath.Join(dir, fmt.Sprintf(".write-test-%d-%d", os.Getpid(), time.Now().UnixNano()))
 	if err := os.WriteFile(path, []byte("ok"), 0o600); err != nil {

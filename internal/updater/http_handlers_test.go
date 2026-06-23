@@ -156,6 +156,21 @@ func TestFaviconServesEmbeddedAppIconWithoutToken(t *testing.T) {
 	}
 }
 
+func TestRequestShutdownRunsRegisteredCleanupsOnce(t *testing.T) {
+	app := &App{}
+	calls := 0
+	app.addShutdownCleanup(func() {
+		calls++
+	})
+
+	app.requestShutdown("test")
+	app.requestShutdown("test again")
+
+	if calls != 1 {
+		t.Fatalf("expected shutdown cleanup once, got %d", calls)
+	}
+}
+
 func TestBootstrapTokenCreatesHttpOnlySessionAndRedirectsClean(t *testing.T) {
 	app := &App{token: "bootstrap-token", sessionToken: "session-token", listenHost: defaultHost, listenPort: 4183}
 	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:4183/?token=bootstrap-token", nil)
@@ -303,6 +318,10 @@ func TestRequestBoundaryRejectsBadHostOriginAndFetchMetadata(t *testing.T) {
 
 func TestShutdownRouteStopsServer(t *testing.T) {
 	app := testSessionApp()
+	cleanupDone := make(chan struct{})
+	app.addShutdownCleanup(func() {
+		close(cleanupDone)
+	})
 	server := httptest.NewServer(http.HandlerFunc(app.serveHTTP))
 	app.server = server.Config
 	defer server.Close()
@@ -319,6 +338,11 @@ func TestShutdownRouteStopsServer(t *testing.T) {
 	_ = response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("expected shutdown response ok, got %d", response.StatusCode)
+	}
+	select {
+	case <-cleanupDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown route did not run registered cleanup")
 	}
 
 	deadline := time.Now().Add(2 * time.Second)

@@ -106,10 +106,15 @@ func applyPublishedStoreAssessmentsToInventory(state State, inventory Inventory,
 }
 
 func packageFromPublishedStoreAssessment(state State, assessment StorePublishedAssessment, family StorePackagedAppFamily, scanProviders []StorePackageProviderSummary) Package {
-	name := assessment.Identity.PackageFamilyName
+	name := friendlyAppxName(assessment.Identity.PackageFamilyName, "")
 	version := assessment.InstalledVersion
 	if family.Identity.PackageFamilyName != "" {
-		name = firstNonEmpty(family.DisplayName, family.Primary.IdentityName, family.Identity.PackageFamilyName)
+		name = firstNonEmpty(
+			family.DisplayName,
+			friendlyAppxName(family.Primary.IdentityName, family.Primary.DisplayName),
+			friendlyAppxName(family.Identity.PackageFamilyName, ""),
+			name,
+		)
 		version = firstNonEmpty(version, family.Primary.Version.String())
 	}
 	pkg := Package{
@@ -142,18 +147,24 @@ func applyPublishedStoreAssessmentToPackage(pkg Package, assessment StorePublish
 	pkg.ExactActionTargetAvailable = assessment.ExactActionTargetAvailable
 	pkg.InstalledPackageFamilyName = assessment.Identity.PackageFamilyName
 	pkg.StoreProductID = assessment.StoreProductID
+	pkg.StoreUpdateID = assessment.UpdateID
 	pkg.InstalledVersion = firstNonEmpty(assessment.InstalledVersion, pkg.Version)
 	pkg.OfferedVersion = assessment.AvailableVersion
 	pkg.Applicability = assessment.Applicability
 	pkg.ProviderSummaries = providerSummariesFromEvidence(assessment.Evidence, assessment.ObservedAt, scanProviders)
-	pkg.UpdateAvailable = assessment.State == StoreUpdateAvailable
+	pkg.UpdateAvailable = assessment.State == StoreUpdateAvailable && !assessment.Stale && assessment.ExactActionTargetAvailable
 	pkg.AvailableVersion = assessment.AvailableVersion
+	if !pkg.UpdateAvailable && assessment.State != StoreUpdatePending {
+		pkg.AvailableVersion = ""
+	}
 	if pkg.UpdateAvailable && !assessment.ExactActionTargetAvailable {
 		pkg.UpdateSupported = false
 	} else if pkg.UpdateAvailable {
 		pkg.UpdateSupported = true
+	} else if assessment.Stale {
+		pkg.UpdateSupported = false
 	}
-	if assessment.StoreProductID != "" && assessment.ExactActionTargetAvailable {
+	if (assessment.StoreProductID != "" || assessment.UpdateID != "") && assessment.ExactActionTargetAvailable {
 		pkg.ActionBackend = backendStoreCLI
 	}
 	pkg.Key = storePackagePublicKey(pkg)

@@ -51,6 +51,7 @@
 *{box-sizing:border-box}
 html{min-width:320px}
 body{margin:0;background:linear-gradient(180deg,var(--bg-soft),var(--bg));color:var(--text);font:14px/1.45 "Segoe UI",system-ui,-apple-system,BlinkMacSystemFont,sans-serif}
+body.modal-open{overflow:hidden}
 button,input{font:inherit}
 button{display:inline-flex;min-height:36px;align-items:center;justify-content:center;gap:8px;border:1px solid var(--blue);border-radius:8px;background:var(--blue);color:#fff;padding:7px 12px;font-weight:700;cursor:pointer;white-space:nowrap;transition:background .12s ease,border-color .12s ease,box-shadow .12s ease,transform .12s ease}
 button:hover:not(:disabled){background:var(--blue-strong);border-color:var(--blue-strong);box-shadow:0 8px 18px rgba(37,99,235,.18)}
@@ -66,8 +67,7 @@ input[type=checkbox]{min-height:auto;border-radius:4px;padding:0}
 svg{display:block}
 .button-icon svg,.summary-icon svg,.app-mark svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .loading-text{display:inline-flex;align-items:center;gap:8px;vertical-align:middle}
-.spinner{display:inline-block;width:16px;height:16px;border-radius:50%;background:conic-gradient(from 0turn,transparent 0turn,color-mix(in srgb,currentColor 18%,transparent) .16turn,color-mix(in srgb,currentColor 58%,transparent) .48turn,currentColor .86turn,currentColor 1turn);-webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 calc(100% - 2px));mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 calc(100% - 2px));animation:spin .9s linear infinite;flex:0 0 auto;will-change:transform}
-@keyframes spin{from{transform:rotate(0turn)}to{transform:rotate(1turn)}}
+.spinner{display:inline-block;width:16px;height:16px;border-radius:50%;background:conic-gradient(from 0turn,transparent 0turn,color-mix(in srgb,currentColor 18%,transparent) .16turn,color-mix(in srgb,currentColor 58%,transparent) .48turn,currentColor .86turn,currentColor 1turn);-webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 calc(100% - 2px));mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 calc(100% - 2px));transform:rotate(var(--spinner-angle,0deg));flex:0 0 auto;will-change:transform}
 .app-header{display:flex;justify-content:space-between;gap:18px;align-items:center;padding:18px 28px;background:color-mix(in srgb,var(--surface) 84%,var(--bg));border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5;backdrop-filter:blur(10px)}
 .brand-block{display:flex;align-items:center;gap:13px;min-width:0}
 .app-mark{display:grid;width:42px;height:42px;place-items:center;border-radius:12px;background:linear-gradient(135deg,var(--blue),var(--teal));color:#fff;box-shadow:var(--shadow-soft);flex:0 0 auto}
@@ -80,8 +80,10 @@ main{width:min(1500px,100%);margin:0 auto;padding:22px 28px 28px}
 .hidden{display:none!important}
 .sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}
 .dashboard-hero{display:grid;grid-template-columns:minmax(0,1fr) minmax(360px,560px);gap:18px;align-items:end;margin-bottom:16px;padding:22px;border:1px solid var(--line);border-radius:8px;background:linear-gradient(135deg,color-mix(in srgb,var(--surface) 92%,var(--blue)),var(--surface));box-shadow:var(--shadow-soft)}
+.hero-topline{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .hero-copy h2{margin:5px 0 7px;font-size:28px;line-height:1.14;letter-spacing:0;max-width:760px}
 .hero-copy p{margin:0}
+.connection-badge{vertical-align:middle}
 .eyebrow,.panel-kicker{display:block;color:var(--teal);font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.08em}
 .hero-search{justify-content:flex-end;align-items:stretch}
 .search-field{display:flex;align-items:center;gap:8px;min-width:280px;flex:1;border:1px solid var(--line);border-radius:8px;background:var(--input);color:var(--muted);padding:0 10px}
@@ -100,7 +102,18 @@ main{width:min(1500px,100%);margin:0 auto;padding:22px 28px 28px}
 .section-heading{justify-content:space-between;margin-bottom:12px}
 .section-heading h2{margin:0;font-size:21px;line-height:1.2;letter-spacing:0}
 .muted{color:var(--muted)}
-.store-health-panel{border-left:4px solid var(--blue)}
+.modal{position:fixed;inset:0;z-index:30;display:grid;place-items:center;padding:20px}
+.modal.hidden{display:none!important}
+.modal-backdrop{position:absolute;inset:0;background:rgba(3,8,15,.58);backdrop-filter:blur(3px)}
+.modal-panel{position:relative;width:min(820px,calc(100vw - 28px));max-height:min(780px,calc(100vh - 28px));overflow:auto;background:var(--surface);border:1px solid var(--line-strong);border-radius:8px;box-shadow:var(--shadow);padding:18px}
+.modal-header{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:12px}
+.modal-header h2{margin:2px 0 0;font-size:22px;line-height:1.2}
+.store-health-modal{border-left:4px solid var(--blue)}
+.package-diagnostics-modal{border-left:4px solid var(--amber)}
+.store-health-summary-text{display:flex;align-items:center;gap:8px;min-width:0;color:var(--muted);font-size:14px}
+.store-health-modal>.store-health-summary-text{margin-bottom:12px}
+.store-health-actions{justify-content:flex-end;margin-bottom:12px}
+.store-health-actions button{min-height:34px;padding:7px 10px}
 .store-health-body{display:grid;gap:10px}
 .health-summary{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .health-summary strong{font-size:16px}
@@ -109,6 +122,12 @@ main{width:min(1500px,100%);margin:0 auto;padding:22px 28px 28px}
 .diagnostic-details summary{cursor:pointer;color:var(--muted);font-weight:800}
 .diagnostic-list{display:grid;gap:6px;margin:8px 0 0;padding:0;list-style:none}
 .diagnostic-list li{padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--surface-strong);overflow-wrap:anywhere}
+.diagnostics-button{min-height:30px;padding:5px 10px}
+.available-cell{display:grid;gap:8px;align-content:start;justify-items:start}
+.package-diagnostics-body{display:grid;gap:12px}
+.diagnostic-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.diagnostic-field{padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--surface-strong);overflow-wrap:anywhere}
+.diagnostic-field span{display:block;color:var(--muted);font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.04em}
 .state-badge{text-transform:capitalize}
 .state-available{color:var(--amber);border-color:color-mix(in srgb,var(--amber) 38%,var(--line))}
 .state-current{color:var(--green);border-color:color-mix(in srgb,var(--green) 38%,var(--line))}
@@ -142,6 +161,10 @@ main{width:min(1500px,100%);margin:0 auto;padding:22px 28px 28px}
 .manager-main .muted{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
 .manager-dot{display:grid;width:32px;height:32px;place-items:center;border-radius:8px;background:var(--surface-strong);color:var(--green);flex:0 0 auto}
 .manager-missing .manager-dot{color:var(--red)}
+.manager-availability{display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap}
+.manager-extra{grid-column:1/-1;display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding-left:42px}
+.manager-details-button{min-height:24px;padding:2px 8px;border-radius:6px;font-size:12px;line-height:1.2}
+.manager-status-details{align-items:flex-start}
 .manager form,.update-form,.install-form,.manager-install-form,.update-all-form{margin:0}
 .stack{display:grid;gap:10px}
 .check-control{display:inline-flex;align-items:center;gap:7px;color:var(--muted);font-weight:700}
@@ -207,10 +230,16 @@ pre{white-space:pre-wrap;overflow:auto;background:var(--log-bg);color:var(--log-
   table{min-width:880px}
   .table-wrap{overflow-x:auto}
   .manager{grid-template-columns:1fr}
+  .manager-extra{padding-left:0}
+  .modal{padding:12px}
+  .modal-panel{width:100%;max-height:calc(100vh - 24px)}
+  .modal-header{display:grid}
+  .diagnostic-grid{grid-template-columns:1fr}
   .session-log{width:100%;min-width:0}
   .toast-region{right:12px;bottom:12px;left:12px;width:auto}
 }
 @media(prefers-reduced-motion:reduce){
-  .spinner,.progress-bar span{animation:none}
+  .spinner{transform:none;will-change:auto}
+  .progress-bar span{animation:none}
 }
 

@@ -1,23 +1,17 @@
 package updater
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"time"
 )
 
 const (
-	storePackagedInventoryProtocolVersion = 1
-	storePackagedInventoryTimeout         = 90 * time.Second
+	storePackagedInventoryTimeout = 90 * time.Second
 
 	sourceNativeAppX = "native-appx"
 
@@ -100,29 +94,6 @@ type StorePackagedAppFamily struct {
 	ProductLike bool                     `json:"product_like"`
 }
 
-type storePackagedInventoryRequest struct {
-	ProtocolVersion int    `json:"protocol_version"`
-	ScanID          string `json:"scan_id"`
-	UserSID         string `json:"user_sid"`
-}
-
-type storePackagedInventoryResponse struct {
-	ProtocolVersion int                      `json:"protocol_version"`
-	ScanID          string                   `json:"scan_id"`
-	UserSID         string                   `json:"user_sid"`
-	StartedAt       string                   `json:"started_at,omitempty"`
-	CompletedAt     string                   `json:"completed_at,omitempty"`
-	Complete        bool                     `json:"complete"`
-	Partial         bool                     `json:"partial,omitempty"`
-	Error           string                   `json:"error,omitempty"`
-	Records         []StorePackagedAppRecord `json:"records"`
-}
-
-type brokerStorePackagedAppInventoryProvider struct {
-	Path   string
-	Runner func(context.Context, string, []byte) ([]byte, []byte, error)
-}
-
 func nativeStoreInventoryEnabled() bool {
 	return storeNewDetectorActive() || featureFlagEnabled("UPDATER_NATIVE_STORE_INVENTORY")
 }
@@ -136,130 +107,7 @@ func featureFlagEnabled(name string) bool {
 	return value == "1" || value == "true" || value == "yes" || value == "on"
 }
 
-func defaultStorePackagedAppInventoryProvider() StorePackagedAppInventoryProvider {
-	return brokerStorePackagedAppInventoryProvider{Path: storeInventoryBrokerPath(), Runner: runStoreInventoryBroker}
-}
-
 var storePackagedAppInventoryProvider = defaultStorePackagedAppInventoryProvider
-
-func storeInventoryBrokerPath() string {
-	if override := os.Getenv("UPDATER_STORE_INVENTORY_BROKER"); override != "" {
-		return override
-	}
-	exe, err := os.Executable()
-	if err != nil {
-		return "WindowsUpdater.StoreInventoryBroker.exe"
-	}
-	return filepath.Join(filepath.Dir(exe), "WindowsUpdater.StoreInventoryBroker.exe")
-}
-
-func (provider brokerStorePackagedAppInventoryProvider) Inventory(ctx context.Context, scan StoreScanGeneration) (StorePackagedAppInventory, CommandResult) {
-	path := strings.TrimSpace(provider.Path)
-	if path == "" {
-		path = storeInventoryBrokerPath()
-	}
-	runner := provider.Runner
-	if runner == nil {
-		runner = runStoreInventoryBroker
-	}
-	request := storePackagedInventoryRequest{
-		ProtocolVersion: storePackagedInventoryProtocolVersion,
-		ScanID:          scan.ScanID,
-		UserSID:         scan.UserSID,
-	}
-	input, err := json.Marshal(request)
-	if err != nil {
-		result := validationCommandResult("store native inventory", err)
-		return StorePackagedAppInventory{Scan: scan, Partial: true, Errors: []string{err.Error()}}, result
-	}
-	ctx, cancel := context.WithTimeout(ctx, storePackagedInventoryTimeout)
-	defer cancel()
-	stdout, stderr, err := runner(ctx, path, input)
-	result := CommandResult{Command: path + " --inventory"}
-	if len(stderr) > 0 {
-		result.Stderr = string(stderr)
-	}
-	if err != nil {
-		result.Code = 1
-		result.Stderr = strings.TrimSpace(result.Stderr + "\n" + err.Error())
-		return StorePackagedAppInventory{Scan: scan, Partial: true, Errors: []string{result.Stderr}}, result
-	}
-	inventory, parseErr := parseStorePackagedInventoryResponse(stdout, scan)
-	if parseErr != nil {
-		result.Code = 2
-		result.Stderr = parseErr.Error()
-		return StorePackagedAppInventory{Scan: scan, Partial: true, Errors: []string{parseErr.Error()}}, result
-	}
-	result.OK = inventory.Scan.CompletionStatus == StoreScanCompleted
-	if !result.OK {
-		result.Code = 1
-		result.Stderr = strings.Join(inventory.Errors, "\n")
-	}
-	result.Stdout = fmt.Sprintf("Native Store inventory returned %d package record(s), %d product-like family group(s).", len(inventory.Records), productLikeFamilyCount(inventory.Families))
-	return inventory, result
-}
-
-func runStoreInventoryBroker(ctx context.Context, path string, input []byte) ([]byte, []byte, error) {
-	cmd := exec.CommandContext(ctx, path, "--inventory")
-	cmd.SysProcAttr = hiddenSysProcAttr()
-	cmd.Stdin = bytes.NewReader(input)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	return stdout.Bytes(), stderr.Bytes(), err
-}
-
-func parseStorePackagedInventoryResponse(data []byte, expectedScan StoreScanGeneration) (StorePackagedAppInventory, error) {
-	var response storePackagedInventoryResponse
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&response); err != nil {
-		return StorePackagedAppInventory{}, err
-	}
-	if decoder.More() {
-		return StorePackagedAppInventory{}, errors.New("native Store inventory response contains multiple JSON values")
-	}
-	if response.ProtocolVersion != storePackagedInventoryProtocolVersion {
-		return StorePackagedAppInventory{}, fmt.Errorf("unsupported native Store inventory protocol version %d", response.ProtocolVersion)
-	}
-	if response.ScanID != expectedScan.ScanID {
-		return StorePackagedAppInventory{}, errors.New("native Store inventory scan_id mismatch")
-	}
-	if !strings.EqualFold(response.UserSID, expectedScan.UserSID) {
-		return StorePackagedAppInventory{}, errors.New("native Store inventory user SID mismatch")
-	}
-	scan := expectedScan
-	if started, err := time.Parse(time.RFC3339, response.StartedAt); err == nil {
-		scan.StartedAt = started
-	}
-	if completed, err := time.Parse(time.RFC3339, response.CompletedAt); err == nil {
-		scan.CompletedAt = completed
-	}
-	if response.Complete && !response.Partial && response.Error == "" {
-		scan.CompletionStatus = StoreScanCompleted
-	} else {
-		scan.CompletionStatus = StoreScanIncomplete
-	}
-	records := make([]StorePackagedAppRecord, 0, len(response.Records))
-	for _, record := range response.Records {
-		normalized, err := normalizeStorePackagedAppRecord(record, response.UserSID)
-		if err != nil {
-			return StorePackagedAppInventory{}, err
-		}
-		records = append(records, normalized)
-	}
-	inventory := StorePackagedAppInventory{
-		Scan:     scan,
-		Records:  records,
-		Families: groupStorePackagedAppFamilies(records),
-		Partial:  response.Partial || response.Error != "",
-	}
-	if response.Error != "" {
-		inventory.Errors = append(inventory.Errors, response.Error)
-	}
-	return inventory, nil
-}
 
 func normalizeStorePackagedAppRecord(record StorePackagedAppRecord, fallbackUserSID string) (StorePackagedAppRecord, error) {
 	record.UserSID = strings.TrimSpace(record.UserSID)
@@ -331,7 +179,7 @@ func groupStorePackagedAppFamilies(records []StorePackagedAppRecord) []StorePack
 			Identity:    identity,
 			Primary:     primary,
 			Instances:   instances,
-			DisplayName: firstNonEmpty(primary.DisplayName, primary.IdentityName),
+			DisplayName: friendlyStorePackagedAppName(primary),
 			ProductLike: familyProductLike(instances),
 		})
 	}
@@ -391,6 +239,10 @@ func productLikeFamilyCount(families []StorePackagedAppFamily) int {
 	return count
 }
 
+func friendlyStorePackagedAppName(record StorePackagedAppRecord) string {
+	return friendlyAppxName(record.IdentityName, record.DisplayName)
+}
+
 func packagesFromNativeStorePackagedInventory(state State, inventory StorePackagedAppInventory) []Package {
 	var packages []Package
 	for _, family := range inventory.Families {
@@ -428,12 +280,14 @@ func firstNonEmpty(values ...string) string {
 
 func newStorePackagedAppScan(userSID string) StoreScanGeneration {
 	now := time.Now().UTC()
+	systemContext := currentStoreScanSystemContext()
 	return StoreScanGeneration{
 		ScanID:           fmt.Sprintf("store-native-%d", now.UnixNano()),
 		UserSID:          userSID,
 		StartedAt:        now,
-		WindowsVersion:   runtime.GOOS,
-		Architecture:     runtime.GOARCH,
+		WindowsVersion:   systemContext.WindowsVersion,
+		WindowsBuild:     systemContext.WindowsBuild,
+		Architecture:     systemContext.Architecture,
 		ProviderVersions: map[string]string{"store-native-inventory": "1"},
 		ProviderHealth:   map[string]StoreProviderHealth{"store-native-inventory": StoreProviderHealthy},
 		CompletionStatus: StoreScanRunning,

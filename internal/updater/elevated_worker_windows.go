@@ -395,7 +395,7 @@ func executeElevatedWorkerOperation(ctx context.Context, operation string, paylo
 }
 
 func appendWorkerResultLogs(result CommandResult) {
-	categories := logCategoriesForCommand(strings.Fields(result.Command))
+	categories := logCategoriesForCommandLine(result.Command)
 	if result.Command != "" {
 		sessionLogs.AppendCategorized("command", result.Command, categories)
 	}
@@ -432,7 +432,7 @@ func parseUint32(value string) (uint32, error) {
 }
 
 func privilegedPackageActionRequired(manager string) bool {
-	return manager == managerWinget || manager == managerChoco
+	return manager == managerChoco
 }
 
 func runPrivilegedPackageInstall(ctx context.Context, manager, id string) CommandResult {
