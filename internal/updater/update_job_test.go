@@ -286,7 +286,7 @@ func TestUpdateJobPassesPackageMetadataToRunner(t *testing.T) {
 		got = pkg
 		return CommandResult{OK: true, Command: pkg.ID}
 	}
-	refreshInventoryAfterUpdateJob = func(app *App) {}
+	refreshInventoryAfterUpdateJob = func(ctx context.Context, app *App, packages []Package) error { return nil }
 	defer func() {
 		updatePackageRunner = oldRunner
 		refreshInventoryAfterUpdateJob = oldRefresh
@@ -520,9 +520,10 @@ func TestUpdateJobKeepsRunningUntilRefreshStarts(t *testing.T) {
 		func(ctx context.Context, manager, id string) CommandResult {
 			return CommandResult{OK: true, Command: id}
 		},
-		func(app *App) {
+		func(ctx context.Context, app *App, packages []Package) error {
 			close(refreshEntered)
 			<-releaseRefresh
+			return nil
 		},
 	)
 	defer restore()
@@ -543,6 +544,69 @@ func TestUpdateJobKeepsRunningUntilRefreshStarts(t *testing.T) {
 	status := waitForUpdateJobStopped(t, app)
 	if status.Running || !status.RefreshStarted {
 		t.Fatalf("expected stopped job with refresh started, got %#v", status)
+	}
+}
+
+func TestStoreUpdateJobKeepsRunningUntilStoreScanCompletes(t *testing.T) {
+	oldGetter := inventoryGetter
+	oldRunner := updatePackageRunner
+	oldScan := runStoreTransactionalScanForInventory
+	defer func() {
+		inventoryGetter = oldGetter
+		updatePackageRunner = oldRunner
+		runStoreTransactionalScanForInventory = oldScan
+	}()
+
+	inventoryGetter = func() Inventory {
+		return Inventory{PackageLookup: PackageLookup{Packages: []Package{{
+			Key:             "store:Vendor.App_abc123",
+			Manager:         managerStore,
+			ID:              "Vendor.App_abc123",
+			Name:            "Store App",
+			Installed:       true,
+			UpdateSupported: true,
+		}}}}
+	}
+	updatePackageRunner = func(ctx context.Context, pkg Package) CommandResult {
+		return CommandResult{OK: true, Command: "update " + pkg.ID}
+	}
+
+	scanStarted := make(chan struct{})
+	releaseScan := make(chan struct{})
+	var startOnce sync.Once
+	runStoreTransactionalScanForInventory = func(ctx context.Context) (StoreScanResult, error) {
+		startOnce.Do(func() { close(scanStarted) })
+		<-releaseScan
+		return StoreScanResult{Published: true, Scan: StoreScanGeneration{ScanID: "store-refresh"}}, nil
+	}
+
+	app := &App{storeBackgroundScanEnabled: true}
+	app.startUpdatePackagesOperation(jobTypeUpdateAll, updateJobModeSelected, []Package{{
+		Key:             "store:Vendor.App_abc123",
+		Manager:         managerStore,
+		ID:              "Vendor.App_abc123",
+		Name:            "Store App",
+		Installed:       true,
+		UpdateAvailable: true,
+		UpdateSupported: true,
+	}})
+
+	select {
+	case <-scanStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Store refresh scan did not start")
+	}
+	if status := app.updateJobStatus(); !status.Running || !status.RefreshStarted || status.State != jobStateRefreshing {
+		t.Fatalf("Store update job should stay refreshing while Store scan is active, got %#v", status)
+	}
+	if !app.inventorySnapshot().StoreLoading {
+		t.Fatal("store_loading should be true while the Store refresh scan is active")
+	}
+
+	close(releaseScan)
+	status := waitForUpdateJobStopped(t, app)
+	if status.Running || status.State != jobStateSucceeded || app.inventorySnapshot().StoreLoading {
+		t.Fatalf("Store update job should finish after Store scan completes, status=%#v store_loading=%v", status, app.inventorySnapshot().StoreLoading)
 	}
 }
 

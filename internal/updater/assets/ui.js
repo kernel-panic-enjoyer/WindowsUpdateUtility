@@ -1078,8 +1078,9 @@
     }
     return '<strong>' + html(pkg.name || "Store app") + '</strong><br><span class="muted">' + html(secondary) + '</span>';
   }
-	function managerCell(pkg){
-		var backend = pkg.action_backend ? '<br><span class="muted">' + html(backendLabel(pkg.action_backend)) + '</span>' : '';
+	function managerCell(pkg, options){
+    options = options || {};
+		var backend = (!options.compact && pkg.action_backend) ? '<br><span class="muted">' + html(backendLabel(pkg.action_backend)) + '</span>' : '';
 		return '<span class="badge manager-badge">' + html(managerLabel(pkg.manager)) + '</span>' + backend;
 	}
   function autoButton(pkg){
@@ -1236,7 +1237,7 @@
 	target.innerHTML = page.items.map(function(pkg){
 		var rowStatus = pkg.manager === "store" ? stateBadge(pkg) : (pkg.update_supported === false ? '<span class="badge">Inventory only</span>' : ((pkg.unknown_version || pkg.pinned) && pkg.update_available ? '<span class="badge warn">Explicit update</span>' : (pkg.update_available ? '<span class="badge warn">Update</span>' : '<span class="badge ok">Current</span>')));
     var rowClass = rowUpdateState(pkg.key) === "active" ? ' class="updating-current"' : '';
-		return '<tr data-key="' + attr(pkg.key) + '"' + rowClass + '><td>' + packageNameCell(pkg) + '</td><td>' + managerCell(pkg) + '</td><td>' + html(pkg.version) + '</td><td>' + packageAvailableCell(pkg, {statusBadge:false, compact:true}) + '</td><td>' + rowStatus + '</td><td>' + autoButton(pkg) + '</td><td>' + installedAction(pkg) + '</td></tr>';
+		return '<tr data-key="' + attr(pkg.key) + '"' + rowClass + '><td>' + packageNameCell(pkg) + '</td><td>' + managerCell(pkg, {compact:true}) + '</td><td>' + html(pkg.version) + '</td><td>' + packageAvailableCell(pkg, {statusBadge:false, compact:true}) + '</td><td>' + rowStatus + '</td><td>' + autoButton(pkg) + '</td><td>' + installedAction(pkg) + '</td></tr>';
 	}).join("");
     renderPager(page, status, prev, next, hasFilter ? " matches" : "");
   }
@@ -1260,18 +1261,22 @@
     });
   }
   function syncManagerFilterOptions(data){
-    var managers = (data && data.managers) || {};
     [["updates-manager-filter", "updates"], ["installed-manager-filter", "installed"]].forEach(function(spec){
       var select = $(spec[0]);
       if(!select){ return; }
       var current = spec[1] === "updates" ? updatesManagerFilter : installedManagerFilter;
+      var present = {};
+      var sourcePackages = spec[1] === "updates" ? packages.filter(packageNeedsUpdateAttention) : packages;
+      sourcePackages.forEach(function(pkg){
+        if(pkg && pkg.manager){ present[pkg.manager] = true; }
+      });
       Array.prototype.forEach.call(select.options, function(opt){
         if(opt.value === "all"){ return; }
-        var available = !!(managers[opt.value] && managers[opt.value].available);
-        opt.hidden = !available;
-        opt.disabled = !available;
+        var visible = !!present[opt.value];
+        opt.hidden = !visible;
+        opt.disabled = !visible;
       });
-      if(current !== "all" && !(managers[current] && managers[current].available)){
+      if(current !== "all" && !present[current]){
         current = "all";
         if(spec[1] === "updates"){ updatesManagerFilter = "all"; } else { installedManagerFilter = "all"; }
       }
@@ -1508,7 +1513,7 @@
   }
   async function refreshPackagesAfterUpdate(refreshAlreadyStarted){
     var data = await loadPackages(!refreshAlreadyStarted);
-    while(data && data.loading){
+    while(data && (data.loading || data.store_loading)){
       await new Promise(function(resolve){ setTimeout(resolve, 900); });
       data = await loadPackages(false);
     }

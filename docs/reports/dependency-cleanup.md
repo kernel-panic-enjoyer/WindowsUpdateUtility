@@ -129,6 +129,6 @@ preservation, inapplicable results, identity mismatch, and stale evidence.
 
 ## Running everything
 
-`./Run-Tests.ps1` (or `./run-tests.sh`) runs the root and browser suites
-independently and reports each result; the browser suite is auto-skipped when no
-Chromium/Edge is present. Add `-Live` / `--live` to include the gated Store tests.
+`.\Run-Tests.ps1` runs the root and browser suites independently and reports
+each result; the browser suite is auto-skipped when no Chromium/Edge is present.
+Add `-Live` to include the gated Store tests.

@@ -10,10 +10,10 @@ import (
 )
 
 func replaceUpdateJobHooks(runner func(context.Context, string, string) CommandResult) func() {
-	return replaceUpdateJobHooksWithRefresh(runner, func(app *App) {})
+	return replaceUpdateJobHooksWithRefresh(runner, func(ctx context.Context, app *App, packages []Package) error { return nil })
 }
 
-func replaceUpdateJobHooksWithRefresh(runner func(context.Context, string, string) CommandResult, refresh func(*App)) func() {
+func replaceUpdateJobHooksWithRefresh(runner func(context.Context, string, string) CommandResult, refresh func(context.Context, *App, []Package) error) func() {
 	oldRunner := updatePackageRunner
 	oldRefresh := refreshInventoryAfterUpdateJob
 	updatePackageRunner = func(ctx context.Context, pkg Package) CommandResult {

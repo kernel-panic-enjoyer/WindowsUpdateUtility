@@ -137,6 +137,6 @@ func ReplacePackageSearchRunnersForTest(stubs []StubSearchResult) func() {
 
 // ReplaceUpdateJobHooksWithRefresh swaps the update-job runner and post-job
 // refresh hook, returning a restore function.
-func ReplaceUpdateJobHooksWithRefresh(runner func(context.Context, string, string) CommandResult, refresh func(*App)) func() {
+func ReplaceUpdateJobHooksWithRefresh(runner func(context.Context, string, string) CommandResult, refresh func(context.Context, *App, []Package) error) func() {
 	return replaceUpdateJobHooksWithRefresh(runner, refresh)
 }

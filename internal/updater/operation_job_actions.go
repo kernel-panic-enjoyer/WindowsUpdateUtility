@@ -166,11 +166,18 @@ func (app *App) startUpdatePackagesOperation(jobType, mode string, packages []Pa
 				status.Notice = "Update completed. Refreshing package status..."
 			}
 		})
+		var refreshErr error
 		if ctx.Err() == nil {
-			refreshInventoryAfterUpdateJob(app)
+			refreshErr = refreshInventoryAfterUpdateJob(ctx, app, packages)
 		}
 		app.mutateOperationJob(job, func(status *OperationJobStatus) {
 			if status.State == jobStateCancelled {
+				return
+			}
+			if ctx.Err() != nil {
+				status.CancelRequested = true
+				status.State = jobStateCancelled
+				status.Notice = "Update cancelled."
 				return
 			}
 			if updateResultsAcceptedNotVerified(status.Results) {
@@ -180,6 +187,11 @@ func (app *App) startUpdatePackagesOperation(jobType, mode string, packages []Pa
 			}
 			if notice := updateResultsFailureNotice(status.Results); notice != "" {
 				status.State = jobStateFailed
+				status.Notice = notice
+				return
+			}
+			if notice := updateRefreshNotice(refreshErr); notice != "" {
+				status.State = jobStateAcceptedNotVerified
 				status.Notice = notice
 				return
 			}

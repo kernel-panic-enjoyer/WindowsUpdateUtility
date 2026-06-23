@@ -261,7 +261,7 @@ func TestBrowserReloadDuringJobAndCancellation(t *testing.T) {
 		startedOnce.Do(func() { close(started) })
 		<-ctx.Done()
 		return updater.CommandResult{Command: "update " + id, Code: updater.CommandCancelledCode, Stderr: "Cancelled."}
-	}, func(app *updater.App) {})
+	}, func(ctx context.Context, app *updater.App, packages []updater.Package) error { return nil })
 	defer restore()
 
 	app := updater.NewBrowserTestApp()
@@ -385,6 +385,65 @@ func TestBrowserIgnoresStalePackageResponses(t *testing.T) {
 	}
 	if strings.Contains(body, "Stale Package") {
 		t.Fatalf("stale package response overwrote fresh table:\n%s", body)
+	}
+}
+
+func TestBrowserManagerFilterUsesVisiblePackages(t *testing.T) {
+	app := updater.NewBrowserTestApp()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/packages":
+			updater.SetTestSecurityHeaders(w)
+			if !app.TestSessionOK(r) {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			updater.WriteTestJSON(w, http.StatusOK, updater.InventoryResponse{Inventory: updater.Inventory{PackageLookup: updater.PackageLookup{
+				Managers: map[string]updater.ManagerStatus{
+					updater.ManagerWinget: {Available: true},
+					updater.ManagerStore:  {Available: false, InventoryAvailable: true, InventoryBackend: updater.InventoryBackendAppX, Error: "store unavailable"},
+					updater.ManagerChoco:  {Available: true},
+				},
+				Packages: []updater.Package{
+					{Key: "winget:Visible.App", Manager: updater.ManagerWinget, ID: "Visible.App", Name: "Visible Winget App", Installed: true, UpdateSupported: true},
+					{Key: "store:Visible.Store_abc123", Manager: updater.ManagerStore, ID: "Visible.Store_abc123", Name: "Visible Store App", Installed: true, UpdateSupported: false},
+				},
+			}}})
+		default:
+			app.TestHandler()(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	ctx, cancel := newBrowserContext(t)
+	defer cancel()
+
+	navigateAuthenticated(t, ctx, server.URL)
+	waitForText(t, ctx, `#installed-section`, "Visible Store App")
+	var storeOptionEnabled bool
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`(() => {
+		  const option = [...document.querySelector("#installed-manager-filter").options].find((item) => item.value === "store");
+		  return !!option && !option.hidden && !option.disabled;
+		})()`, &storeOptionEnabled),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !storeOptionEnabled {
+		t.Fatal("installed Microsoft Store filter option should stay enabled when Store inventory rows are present")
+	}
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`(() => {
+		  const select = document.querySelector("#installed-manager-filter");
+		  select.value = "store";
+		  select.dispatchEvent(new Event("change", {bubbles:true}));
+		})()`, nil),
+	); err != nil {
+		t.Fatal(err)
+	}
+	section := waitForText(t, ctx, `#installed-section`, "Visible Store App")
+	if strings.Contains(section, "Visible Winget App") {
+		t.Fatalf("installed Store filter should hide non-Store rows:\n%s", section)
 	}
 }
 

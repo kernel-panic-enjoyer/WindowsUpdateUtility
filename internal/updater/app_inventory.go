@@ -175,6 +175,31 @@ func (app *App) runStoreScan() {
 	}
 }
 
+func (app *App) waitForStoreScanIdle(ctx context.Context, timeout time.Duration) bool {
+	if timeout <= 0 {
+		timeout = 12 * time.Minute
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		app.mu.RLock()
+		loading := app.storeScanLoading
+		app.mu.RUnlock()
+		if !loading {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-timer.C:
+			return false
+		case <-ticker.C:
+		}
+	}
+}
+
 func (app *App) inventorySnapshot() InventoryResponse {
 	app.mu.RLock()
 	inventory := app.inventory
