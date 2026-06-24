@@ -35,6 +35,10 @@ import (
 const browserTestToken = updater.BrowserTestToken
 
 func newBrowserContext(t *testing.T) (context.Context, context.CancelFunc) {
+	return newBrowserContextWithTimeout(t, 25*time.Second)
+}
+
+func newBrowserContextWithTimeout(t *testing.T, timeout time.Duration) (context.Context, context.CancelFunc) {
 	t.Helper()
 	exe, ok := chromiumExecutable()
 	if !ok {
@@ -51,7 +55,7 @@ func newBrowserContext(t *testing.T) (context.Context, context.CancelFunc) {
 	)
 	allocatorContext, allocatorCancel := chromedp.NewExecAllocator(context.Background(), allocatorOptions...)
 	browserContext, browserCancel := chromedp.NewContext(allocatorContext)
-	timeoutContext, timeoutCancel := context.WithTimeout(browserContext, 25*time.Second)
+	timeoutContext, timeoutCancel := context.WithTimeout(browserContext, timeout)
 	return timeoutContext, func() {
 		timeoutCancel()
 		browserCancel()
@@ -189,6 +193,37 @@ func TestBrowserStopButtonUsesAsyncShutdownRequest(t *testing.T) {
 	}
 	if strings.Contains(body, "forbidden origin") || strings.Contains(body, `"error"`) {
 		t.Fatalf("stop button rendered JSON error instead of staying on dashboard; notice=%q body=%q", notice, body)
+	}
+}
+
+func TestBrowserConnectionBadgeExpiresWhenBackendStops(t *testing.T) {
+	app := updater.NewBrowserTestApp()
+	server := httptest.NewServer(app.TestHandler())
+	t.Cleanup(func() {
+		server.CloseClientConnections()
+		server.Close()
+	})
+	ctx, cancel := newBrowserContextWithTimeout(t, 40*time.Second)
+	defer cancel()
+
+	navigateAuthenticated(t, ctx, server.URL)
+	waitForText(t, ctx, `#log-connection-status`, "Connected")
+	server.CloseClientConnections()
+	server.Close()
+
+	var text string
+	err := chromedp.Run(ctx,
+		chromedp.Poll(`(() => {
+		  const badge = document.querySelector("#log-connection-status");
+		  return !!badge && !badge.innerText.includes("Connected");
+		})()`, nil, chromedp.WithPollingInterval(100*time.Millisecond), chromedp.WithPollingTimeout(22*time.Second)),
+		chromedp.Text(`#log-connection-status`, &text, chromedp.ByQuery),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(text, "Connected") {
+		t.Fatalf("connection badge stayed connected after backend stopped: %q", text)
 	}
 }
 

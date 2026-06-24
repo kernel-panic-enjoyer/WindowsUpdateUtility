@@ -33,6 +33,7 @@
 - 2026-06-24T22:20:17+02:00 [USER] Active objective: replace ad-hoc `state.json` load-modify-save writers with a transactional, cross-process-safe file-backed StateStore.
 - 2026-06-24T22:40:31+02:00 [USER] Active objective: make package-manager command execution and operation jobs bounded, cancellation-safe, panic-safe, and root-shutdown aware.
 - 2026-06-24T22:58:25+02:00 [USER] Active objective: diagnose failed update job logs and fix app-side causes of false WinGet update rows or misleading failure summaries.
+- 2026-06-24T23:05:05+02:00 [USER] Active objective: add a heartbeat watchdog so the top-bar backend connection badge does not stay green after the app/server stops.
 
 [DECISIONS]
 
@@ -60,6 +61,7 @@
 - 2026-06-24T22:40:31+02:00 [CODE] Mutable winget/Store/Chocolatey command execution now owns the process tree with a Windows Job Object using kill-on-close/explicit termination; manager bootstrap URL/UI handoffs are documented as intentional detached actions.
 - 2026-06-24T22:40:31+02:00 [CODE] `App` now owns a root context, shutdown flag, and background WaitGroup; operation jobs, background Store scans, and async refresh workers derive from that root and are cancelled on shutdown.
 - 2026-06-24T22:58:25+02:00 [CODE] WinGet table parsing now treats ID-shaped values in the Version column as a display-name column-shift and falls back to fixed-width header parsing; portable package refusal is reported more clearly but not auto-forced.
+- 2026-06-24T23:05:05+02:00 [CODE] The top-bar backend badge now uses the existing `/api/events` heartbeat plus successful logs/jobs contacts as freshness signals and expires `Connected` after 15s without contact.
 
 [PROGRESS]
 
@@ -143,6 +145,7 @@
 - 2026-06-24T22:40:31+02:00 [TOOL] Windows process-tree regression proved a Job Object termination kills a PowerShell child/grandchild tree after the parent is assigned to the job.
 - 2026-06-24T22:58:25+02:00 [CODE] Update-job log root cause: `winget list` output for `Microsoft Visual C++ 2010  x64/x86 Redistributable` contains a real double-space inside the display name, so whitespace splitting shifted the exact ID into `Version` and the current version into `AvailableVersion`, creating false update candidates and bad commands like `winget upgrade x64 Redistributable - 10.0.40219`.
 - 2026-06-24T22:58:25+02:00 [TOOL] `yt-dlp.FFmpeg` failure was not an app identity bug: WinGet refused to remove a modified portable package and instructed use of `--force`; the app now surfaces that actionable line instead of generic "Found package" progress output.
+- 2026-06-24T23:05:05+02:00 [CODE] Connection badge root cause: the UI marked EventSource open/log polling success as `Connected` but ignored existing heartbeat events and had no client-side freshness watchdog, so a stale page could keep showing green after backend shutdown.
 
 [OUTCOMES]
 
@@ -181,3 +184,4 @@
 - 2026-06-24T22:20:17+02:00 [TOOL] StateStore migration validation passed: focused StateStore tests including Windows helper-process update, `go test -count=1 ./...`, `go vet ./...`, `git diff --check` with CRLF warnings only, and `powershell -NoProfile -ExecutionPolicy Bypass -File dev\scripts\Build-Workspace.ps1`; rebuilt `dist\WindowsUpdaterWebUI.exe` at 14,769,152 bytes. `go.mod`/`go.sum` unchanged. Race detector remains blocked by missing `gcc`.
 - 2026-06-24T22:40:31+02:00 [TOOL] Command/job lifecycle validation passed: focused bounded-output/job/shutdown tests, Windows process-tree integration helper, `go test -count=1 ./...`, `go vet ./...`, bundled Node `--check internal/updater/assets/ui.js`, `git diff --check` with CRLF warnings only, and `powershell -NoProfile -ExecutionPolicy Bypass -File dev\scripts\Build-Workspace.ps1`; rebuilt `dist\WindowsUpdaterWebUI.exe` at 14,811,136 bytes. `go test -race` remains blocked because cgo requires `gcc` and no `gcc` is on `PATH`.
 - 2026-06-24T22:58:25+02:00 [TOOL] WinGet update-log fix validation passed: focused parser/notice tests, `go test -count=1 ./internal/updater`, `go test -count=1 ./...`, `go vet ./...`, `git diff --check` with CRLF warnings only, and `powershell -NoProfile -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1`; rebuilt `dist\WindowsUpdaterWebUI.exe` at 14,813,184 bytes.
+- 2026-06-24T23:05:05+02:00 [TOOL] Heartbeat badge validation passed: focused UI hook test, browser regression with `go test -count=1 -tags uitestsupport ./...` from `tests/browser`, `go test -count=1 ./...`, `go vet ./...`, bundled Node `--check internal/updater/assets/ui.js`, `git diff --check` with CRLF warnings only, and `powershell -NoProfile -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1`; rebuilt `dist\WindowsUpdaterWebUI.exe` at 14,815,232 bytes.

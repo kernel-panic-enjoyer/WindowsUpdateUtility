@@ -28,6 +28,10 @@
   var logPollTimer = null;
   var logPollDelay = 2500;
   var eventStream = null;
+  var heartbeatIntervalMs = 10000;
+  var connectionStaleAfterMs = heartbeatIntervalMs + 5000;
+  var lastBackendContactAt = 0;
+  var connectionWatchdogTimer = null;
   var jobsInitialized = false;
   var serverJobs = [];
   var completedJobIDs = {};
@@ -340,6 +344,43 @@
     target.classList.toggle("warn", state === "reconnecting");
     target.classList.toggle("error", state === "disconnected");
   }
+  function markBackendContact(message){
+    lastBackendContactAt = Date.now();
+    setLogConnectionState("connected", message || "Connected");
+    scheduleConnectionWatchdog();
+  }
+  function clearConnectionWatchdog(){
+    if(connectionWatchdogTimer){
+      clearTimeout(connectionWatchdogTimer);
+      connectionWatchdogTimer = null;
+    }
+  }
+  function scheduleConnectionWatchdog(){
+    clearConnectionWatchdog();
+    if(!lastBackendContactAt){ return; }
+    var age = Date.now() - lastBackendContactAt;
+    var delay = Math.max(250, connectionStaleAfterMs - age);
+    connectionWatchdogTimer = setTimeout(checkBackendConnectionFreshness, delay);
+  }
+  function checkBackendConnectionFreshness(){
+    connectionWatchdogTimer = null;
+    if(!lastBackendContactAt){ return; }
+    if(Date.now() - lastBackendContactAt >= connectionStaleAfterMs){
+      setLogConnectionState("reconnecting", "Reconnecting to backend");
+      return;
+    }
+    scheduleConnectionWatchdog();
+  }
+  function markBackendDisconnected(message){
+    lastBackendContactAt = 0;
+    clearConnectionWatchdog();
+    setLogConnectionState("disconnected", message || "Disconnected");
+  }
+  function markBackendReconnecting(message){
+    lastBackendContactAt = 0;
+    clearConnectionWatchdog();
+    setLogConnectionState("reconnecting", message || "Reconnecting to backend");
+  }
   async function loadLogs(){
     try{
       setLogConnectionState("reconnecting", "Reconnecting to backend");
@@ -350,7 +391,7 @@
       if(typeof data.latest_id === "number" && data.latest_id > lastLogID && (!data.entries || data.entries.length === 0)){
         lastLogID = data.latest_id;
       }
-      setLogConnectionState("connected", "Connected");
+      markBackendContact("Connected");
       if(data.entries && data.entries.length){
         logPollDelay = 1000;
       }else if(activeServerJobs().length > 0){
@@ -359,7 +400,7 @@
         logPollDelay = Math.min(10000, Math.round(logPollDelay * 1.35));
       }
     }catch(e){
-      setLogConnectionState("disconnected", "Reconnecting to backend");
+      markBackendReconnecting("Reconnecting to backend");
       logPollDelay = Math.min(15000, Math.round(logPollDelay * 1.6));
     }
   }
@@ -391,11 +432,12 @@
     setLogConnectionState("reconnecting", "Connecting");
     eventStream = new EventSource(api("/api/events", {since:String(lastLogID)}));
     eventStream.onopen = function(){
-      setLogConnectionState("connected", "Connected");
+      markBackendContact("Connected");
     };
     eventStream.addEventListener("logs", function(event){
       try{
         var data = JSON.parse(event.data || "{}");
+        markBackendContact("Connected");
         appendLogEntries(data.entries || []);
         if(typeof data.latest_id === "number" && data.latest_id > lastLogID && (!data.entries || data.entries.length === 0)){
           lastLogID = data.latest_id;
@@ -405,11 +447,23 @@
     eventStream.addEventListener("jobs", function(event){
       try{
         var data = JSON.parse(event.data || "{}");
+        markBackendContact("Connected");
         reconcileJobs(data.jobs || []);
       }catch(e){}
     });
+    eventStream.addEventListener("heartbeat", function(event){
+      try{
+        var data = JSON.parse(event.data || "{}");
+        markBackendContact("Connected");
+        if(typeof data.latest_id === "number" && data.latest_id > lastLogID){
+          lastLogID = data.latest_id;
+        }
+      }catch(e){
+        markBackendContact("Connected");
+      }
+    });
     eventStream.onerror = function(){
-      setLogConnectionState("disconnected", "Reconnecting to backend");
+      markBackendReconnecting("Reconnecting to backend");
       if(eventStream){
         eventStream.close();
         eventStream = null;
@@ -2311,6 +2365,7 @@
       showNotice("Stopping application...", true);
       postForm("/shutdown", {}).then(function(response){
         if(!response.ok){ throw new Error(response.statusText || "Stop request failed"); }
+        markBackendDisconnected("Disconnected");
         showNotice("Application is stopping.");
       }).catch(function(e){
         if(button){ button.disabled = false; }
