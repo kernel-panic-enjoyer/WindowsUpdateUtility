@@ -270,6 +270,7 @@ func TestBrowserReloadDuringJobAndCancellation(t *testing.T) {
 	defer cancel()
 
 	navigateAuthenticated(t, ctx, server.URL)
+	waitForText(t, ctx, `#updates-body`, "Browser Test App")
 	if err := chromedp.Run(ctx,
 		chromedp.WaitVisible(`#update-all-button`, chromedp.ByQuery),
 		chromedp.Click(`#update-all-button`, chromedp.ByQuery),
@@ -478,6 +479,9 @@ func TestBrowserKeyboardAccessibilityAndMobileLayout(t *testing.T) {
 		t.Fatal(err)
 	}
 	navigateAuthenticated(t, ctx, server.URL)
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.documentElement.dataset.theme = "light"`, nil)); err != nil {
+		t.Fatal(err)
+	}
 	if err := chromedp.Run(ctx,
 		chromedp.Focus(`#search-input`, chromedp.ByQuery),
 		chromedp.SendKeys(`#search-input`, `keyboard`+"\n", chromedp.ByQuery),
@@ -498,10 +502,12 @@ func TestBrowserKeyboardAccessibilityAndMobileLayout(t *testing.T) {
 	var selectedTab string
 	var accessibilityIssues []string
 	var hasHorizontalOverflow bool
+	var nativeColorScheme string
 	err := chromedp.Run(ctx,
 		chromedp.AttributeValue(`#log-tab-application`, `aria-selected`, &selectedTab, nil, chromedp.ByQuery),
 		chromedp.Evaluate(browserAccessibilityScanScript(), &accessibilityIssues),
 		chromedp.Evaluate(`document.documentElement.scrollWidth > document.documentElement.clientWidth + 1`, &hasHorizontalOverflow),
+		chromedp.Evaluate(`getComputedStyle(document.documentElement).colorScheme`, &nativeColorScheme),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -514,6 +520,9 @@ func TestBrowserKeyboardAccessibilityAndMobileLayout(t *testing.T) {
 	}
 	if hasHorizontalOverflow {
 		t.Fatal("mobile-width layout overflows the viewport")
+	}
+	if nativeColorScheme != "light" {
+		t.Fatalf("light theme should use light native form controls, color-scheme=%q", nativeColorScheme)
 	}
 }
 

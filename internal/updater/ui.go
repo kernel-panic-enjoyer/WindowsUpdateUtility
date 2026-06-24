@@ -34,6 +34,7 @@ var pageTemplate = template.Must(template.New("page").Funcs(template.FuncMap{
     <div class="header-actions">
       <button id="theme-toggle" class="ghost" type="button"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 1 0 6 6c0 5-4 9-9 9a6 6 0 0 0 3-15Z"/></svg></span><span>Theme</span></button>
       <button id="scan-button" class="ghost" type="button"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7V5a1 1 0 0 1 1-1h2"/><path d="M17 4h2a1 1 0 0 1 1 1v2"/><path d="M20 17v2a1 1 0 0 1-1 1h-2"/><path d="M7 20H5a1 1 0 0 1-1-1v-2"/><path d="M7 12h10"/></svg></span><span>Scan Apps</span></button>
+      <span id="log-connection-status" class="badge connection-badge" role="status" aria-live="polite">Connecting</span>
       <form id="shutdown-form" method="post" action="/shutdown"><button id="shutdown-button" class="danger" type="submit"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v8"/><path d="M7.1 6.9a8 8 0 1 0 9.8 0"/></svg></span><span>Stop</span></button></form>
     </div>
   </header>
@@ -67,7 +68,7 @@ var pageTemplate = template.Must(template.New("page").Funcs(template.FuncMap{
 
     <section class="dashboard-hero">
       <div class="hero-copy">
-        <div class="hero-topline"><span class="eyebrow">Updates first</span><span id="log-connection-status" class="badge connection-badge" role="status" aria-live="polite">Connecting</span></div>
+        <div class="hero-topline"><span class="eyebrow">Updates first</span></div>
         <h2>Keep Windows apps current without leaving the browser.</h2>
         <p class="muted">Winget, Chocolatey, and Store inventory are merged into one local control surface.</p>
       </div>

@@ -146,6 +146,7 @@ func TestRenderedHTMLContainsAsyncUpdateHooks(t *testing.T) {
 		`document.hidden`,
 		`visibilitychange`,
 		`toast-close`,
+		`icon("close")`,
 		`toast-region`,
 		`toast-progress`,
 		`--toast-progress`,
@@ -262,6 +263,9 @@ func TestRenderedHTMLContainsAsyncUpdateHooks(t *testing.T) {
 		`id="installed-page-status"`,
 		`id="updates-manager-filter"`,
 		`id="installed-manager-filter"`,
+		`color-scheme:light`,
+		`color-scheme:dark`,
+		`accent-color:var(--blue)`,
 		`class="table-filter"`,
 		`appearance:none`,
 		`background-image:linear-gradient`,
@@ -280,9 +284,10 @@ func TestRenderedHTMLContainsAsyncUpdateHooks(t *testing.T) {
 		`packages.filter(packageNeedsUpdateAttention)`,
 		`packageMatchesInstalledSearch`,
 		`packageAvailableCell`,
-		`packageAvailableCell(pkg, {diagnostics:true})`,
 		`packageAvailableCell(pkg, {statusBadge:false, compact:true})`,
-		`available-cell`,
+		`updateActionCell`,
+		`row-actions`,
+		`icon-only`,
 		`managersRendered`,
 		`renderUpdatesTable`,
 		`renderInstalledTable`,
@@ -358,7 +363,9 @@ func TestRenderedHTMLContainsAsyncUpdateHooks(t *testing.T) {
 		`name="token"`,
 		`searchParams.set("token"`,
 		`PFN:`,
+		`&times;`,
 		`packageNameCell(pkg, {diagnostics:true})`,
+		`managerCell(pkg) + '</td><td>' + html(pkg.version)`,
 		`Session log disconnected. Reconnecting`,
 		`Log disconnected; retrying`,
 	} {
@@ -370,6 +377,12 @@ func TestRenderedHTMLContainsAsyncUpdateHooks(t *testing.T) {
 		if strings.Contains(rendered, unexpectedInline) {
 			t.Fatalf("rendered page should not contain inline asset block %q", unexpectedInline)
 		}
+	}
+	scanIndex := strings.Index(rendered, `id="scan-button"`)
+	connectionIndex := strings.Index(rendered, `id="log-connection-status"`)
+	shutdownIndex := strings.Index(rendered, `id="shutdown-form"`)
+	if scanIndex < 0 || connectionIndex < 0 || shutdownIndex < 0 || !(scanIndex < connectionIndex && connectionIndex < shutdownIndex) {
+		t.Fatalf("expected connection status in header actions between scan and stop controls, scan=%d connection=%d shutdown=%d", scanIndex, connectionIndex, shutdownIndex)
 	}
 	progressIndex := strings.Index(rendered, `id="update-progress"`)
 	updatesIndex := strings.Index(rendered, `Updates Available`)

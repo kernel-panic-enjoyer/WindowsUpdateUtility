@@ -141,6 +141,7 @@
       update:'<path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/>',
       install:'<path d="M12 5v14"/><path d="M5 12h14"/>',
       check:'<path d="m5 12 4 4L19 6"/>',
+      close:'<path d="M6 6l12 12"/><path d="M18 6 6 18"/>',
       alert:'<path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 4.3 2.5 18a2 2 0 0 0 1.7 3h15.6a2 2 0 0 0 1.7-3L13.7 4.3a2 2 0 0 0-3.4 0Z"/>',
       box:'<path d="M4 7h16"/><path d="M6 7v12h12V7"/><path d="M9 11h6"/>'
     };
@@ -171,7 +172,7 @@
     var region = $("toast-region");
     if(!region){ return; }
     region.innerHTML = toasts.map(function(toast){
-      return '<article class="toast toast-' + attr(toast.kind) + '" data-toast-id="' + attr(toast.id) + '"><div><strong>' + html(toastTitle(toast.kind)) + '</strong><p>' + html(toast.message) + '</p></div><button class="toast-close ghost" type="button" aria-label="Dismiss notification">&times;</button><span class="toast-progress" aria-hidden="true"><span></span></span></article>';
+      return '<article class="toast toast-' + attr(toast.kind) + '" data-toast-id="' + attr(toast.id) + '"><div><strong>' + html(toastTitle(toast.kind)) + '</strong><p>' + html(toast.message) + '</p></div><button class="toast-close ghost" type="button" aria-label="Dismiss notification">' + icon("close") + '</button><span class="toast-progress" aria-hidden="true"><span></span></span></article>';
     }).join("");
     updateToastProgress();
   }
@@ -870,9 +871,13 @@
     }
     return null;
   }
-  function packageDiagnosticsButton(pkg){
+  function packageDiagnosticsButton(pkg, options){
+    options = options || {};
     if(!storeAssessmentActive(pkg) || (!packageReasonText(pkg) && !(pkg.provider_summaries || []).length)){ return ""; }
-    return '<button class="ghost diagnostics-button" type="button" data-package-diagnostics-open data-key="' + attr(pkg.key) + '" aria-label="Show update diagnostics for ' + attr(pkg.name || pkg.id || "package") + '">' + icon("alert") + '<span>Diagnostics</span></button>';
+    var label = "Show update diagnostics for " + (pkg.name || pkg.id || "package");
+    var text = options.iconOnly ? '<span class="sr-only">Diagnostics</span>' : '<span>Diagnostics</span>';
+    var iconOnlyClass = options.iconOnly ? " icon-only" : "";
+    return '<button class="ghost diagnostics-button' + iconOnlyClass + '" type="button" data-package-diagnostics-open data-key="' + attr(pkg.key) + '" aria-label="' + attr(label) + '" title="' + attr(label) + '">' + icon("alert") + text + '</button>';
   }
   function packageDiagnosticField(label, value){
     value = String(value || "").trim();
@@ -1096,17 +1101,12 @@
     options = options || {};
     var showStatusBadge = options.statusBadge !== false;
     var compact = options.compact === true;
-    function withDiagnostics(content){
-      var diagnostics = options.diagnostics ? packageDiagnosticsButton(pkg) : "";
-      if(!diagnostics){ return content; }
-      return '<div class="available-cell">' + content + diagnostics + '</div>';
-    }
     function withOptionalBadge(text, muted){
       var content = muted ? '<span class="muted">' + html(text) + '</span>' : html(text);
       if(!showStatusBadge){
-        return withDiagnostics(content);
+        return content;
       }
-      return withDiagnostics(stateBadge(pkg) + '<br>' + content);
+      return stateBadge(pkg) + '<br>' + content;
     }
     if(storeAssessmentActive(pkg)){
       var state = storeUpdateState(pkg);
@@ -1132,18 +1132,18 @@
         text = stateLabel(state);
       }
       if(compact && (state === "current" || state === "unknown")){
-        return withDiagnostics('<span class="muted">-</span>');
+        return '<span class="muted">-</span>';
       }
       return withOptionalBadge(text, state !== "available" || pkg.stale || !packageHasExactStoreTarget(pkg));
     }
     if(pkg.manager === "store"){
       if(compact){
-        return withDiagnostics('<span class="muted">-</span>');
+        return '<span class="muted">-</span>';
       }
       return withOptionalBadge("Unknown", true);
     }
     var available = html(pkg.available_version);
-    return withDiagnostics(available);
+    return available;
   }
 	function updateForm(pkg){
     if(storeAssessmentActive(pkg) && !packageHasExactStoreTarget(pkg)){
@@ -1175,6 +1175,12 @@
 		}
 		return '<span class="muted">-</span>';
 	}
+  function updateActionCell(pkg){
+    var diagnostics = packageDiagnosticsButton(pkg, {iconOnly:true});
+    var action = updateForm(pkg);
+    if(!diagnostics){ return action; }
+    return '<div class="row-actions">' + action + diagnostics + '</div>';
+  }
   function packageMatchesManagerFilter(pkg, manager){
     return manager === "all" || (!!pkg && pkg.manager === manager);
   }
@@ -1213,7 +1219,7 @@
     target.innerHTML = page.items.map(function(pkg){
       var selectable = packageBulkUpdateable(pkg);
       var rowClass = rowUpdateState(pkg.key) === "active" ? ' class="updating-current"' : '';
-      return '<tr data-key="' + attr(pkg.key) + '"' + rowClass + '><td><input form="update-selected-form" type="checkbox" name="package_key" value="' + attr(pkg.key) + '" aria-label="Select ' + attr(pkg.name) + ' for update"' + ((updateBusy || !selectable) ? ' disabled' : '') + '></td><td>' + packageNameCell(pkg) + '</td><td>' + managerCell(pkg) + '</td><td>' + html(pkg.version) + '</td><td>' + packageAvailableCell(pkg, {diagnostics:true}) + '</td><td>' + autoButton(pkg) + '</td><td>' + updateForm(pkg) + '</td></tr>';
+      return '<tr data-key="' + attr(pkg.key) + '"' + rowClass + '><td><input form="update-selected-form" type="checkbox" name="package_key" value="' + attr(pkg.key) + '" aria-label="Select ' + attr(pkg.name) + ' for update"' + ((updateBusy || !selectable) ? ' disabled' : '') + '></td><td>' + packageNameCell(pkg) + '</td><td>' + managerCell(pkg, {compact:true}) + '</td><td>' + html(pkg.version) + '</td><td>' + packageAvailableCell(pkg) + '</td><td>' + autoButton(pkg) + '</td><td>' + updateActionCell(pkg) + '</td></tr>';
     }).join("");
     renderPager(page, status, prev, next);
   }
