@@ -35,8 +35,8 @@ type ScanResult struct {
 }
 
 var registryAppsReader = readRegistryApps
-var wingetAppsReader = readWingetApps
-var appxAppsReader = readAppxApps
+var wingetAppsReader = readWingetAppsContext
+var appxAppsReader = readAppxAppsContext
 
 func scanInstalledApplications() ScanResult {
 	appLog("Application scan started.")
@@ -66,11 +66,11 @@ func scanInstalledApplicationsWithStore(ctx context.Context, store StateStore) S
 	}()
 	go func() {
 		defer wg.Done()
-		wingetApps, wingetResult, wingetErr = wingetAppsReader()
+		wingetApps, wingetResult, wingetErr = wingetAppsReader(ctx)
 	}()
 	go func() {
 		defer wg.Done()
-		appxApps, appxResult, appxErr = appxAppsReader()
+		appxApps, appxResult, appxErr = appxAppsReader(ctx)
 	}()
 	wg.Wait()
 	if registryErr != nil {

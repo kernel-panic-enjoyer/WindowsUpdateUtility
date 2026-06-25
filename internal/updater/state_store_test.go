@@ -293,10 +293,10 @@ func replaceScanReadersForStateStoreTest() func() {
 	registryAppsReader = func() ([]ScannedApp, error) {
 		return []ScannedApp{{Key: "registry:example", Name: "Example", Source: "registry"}}, nil
 	}
-	wingetAppsReader = func() ([]ScannedApp, *CommandResult, error) {
+	wingetAppsReader = func(ctx context.Context) ([]ScannedApp, *CommandResult, error) {
 		return nil, &CommandResult{OK: true, Command: "winget export"}, nil
 	}
-	appxAppsReader = func() ([]ScannedApp, *CommandResult, error) {
+	appxAppsReader = func(ctx context.Context) ([]ScannedApp, *CommandResult, error) {
 		return nil, &CommandResult{OK: true, Command: "Get-AppxPackage"}, nil
 	}
 	return func() {

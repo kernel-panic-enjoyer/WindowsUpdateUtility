@@ -1,15 +1,20 @@
 package updater
 
 import (
+	"context"
 	"errors"
 	"strings"
 )
 
 func readWingetApps() ([]ScannedApp, *CommandResult, error) {
-	if !detectManager("winget").Available {
+	return readWingetAppsContext(context.Background())
+}
+
+func readWingetAppsContext(ctx context.Context) ([]ScannedApp, *CommandResult, error) {
+	if !detectManagerContext(ctx, "winget").Available {
 		return nil, nil, nil
 	}
-	packages, result := wingetInstalled()
+	packages, result := wingetInstalledContext(ctx)
 	apps := []ScannedApp{}
 	for _, pkg := range packages {
 		if pkg.ID == "" {
@@ -30,7 +35,11 @@ func readWingetApps() ([]ScannedApp, *CommandResult, error) {
 }
 
 func readAppxApps() ([]ScannedApp, *CommandResult, error) {
-	inventory, result := collectNativeStorePackagedInventory()
+	return readAppxAppsContext(context.Background())
+}
+
+func readAppxAppsContext(ctx context.Context) ([]ScannedApp, *CommandResult, error) {
+	inventory, result := collectNativeStorePackagedInventoryContext(ctx)
 	if !result.OK && len(inventory.Families) == 0 {
 		errText := strings.TrimSpace(result.Stderr + result.Stdout)
 		if errText == "" {

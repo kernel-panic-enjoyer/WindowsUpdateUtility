@@ -323,7 +323,7 @@ func TestUpdatePackageWithInventoryRetryUsesFreshMetadata(t *testing.T) {
 		}
 		return CommandResult{Code: 1, Command: "update " + pkg.ID, Stderr: "No installed package found matching input criteria."}
 	}
-	updateRetryInventoryRefresher = func(app *App, reason string) Inventory {
+	updateRetryInventoryRefresher = func(ctx context.Context, app *App, reason string) Inventory {
 		return Inventory{PackageLookup: PackageLookup{Packages: []Package{{
 			Key:             "winget:Fresh.App",
 			Manager:         managerWinget,
@@ -354,7 +354,7 @@ func TestUpdatePackageWithInventoryRetryTreatsFreshNoUpdateAsCurrent(t *testing.
 		calls++
 		return CommandResult{Code: 1, Command: "update " + pkg.ID, Stderr: "No installed package found matching input criteria."}
 	}
-	updateRetryInventoryRefresher = func(app *App, reason string) Inventory {
+	updateRetryInventoryRefresher = func(ctx context.Context, app *App, reason string) Inventory {
 		return Inventory{PackageLookup: PackageLookup{Packages: []Package{{
 			Key:             "winget:Old.App",
 			Manager:         managerWinget,
@@ -384,7 +384,7 @@ func TestUpdatePackageWithInventoryRetrySkipsNonTargetFailures(t *testing.T) {
 	updatePackageRunner = func(ctx context.Context, pkg Package) CommandResult {
 		return CommandResult{Code: 5, Command: "update " + pkg.ID, Stderr: "Access is denied."}
 	}
-	updateRetryInventoryRefresher = func(app *App, reason string) Inventory {
+	updateRetryInventoryRefresher = func(ctx context.Context, app *App, reason string) Inventory {
 		refreshes++
 		return Inventory{}
 	}
@@ -409,7 +409,7 @@ func TestRefreshInventorySyncPreventsStaleAsyncOverwrite(t *testing.T) {
 	releaseFirst := make(chan struct{})
 	var callMu sync.Mutex
 	calls := 0
-	inventoryGetter = func() Inventory {
+	inventoryGetter = func(ctx context.Context) Inventory {
 		callMu.Lock()
 		calls++
 		call := calls
@@ -460,7 +460,7 @@ func TestRefreshInventorySyncRunsQueuedForcedRefresh(t *testing.T) {
 	releaseSync := make(chan struct{})
 	var callMu sync.Mutex
 	calls := 0
-	inventoryGetter = func() Inventory {
+	inventoryGetter = func(ctx context.Context) Inventory {
 		callMu.Lock()
 		calls++
 		call := calls
@@ -557,7 +557,7 @@ func TestStoreUpdateJobKeepsRunningUntilStoreScanCompletes(t *testing.T) {
 		runStoreTransactionalScanForInventory = oldScan
 	}()
 
-	inventoryGetter = func() Inventory {
+	inventoryGetter = func(ctx context.Context) Inventory {
 		return Inventory{PackageLookup: PackageLookup{Packages: []Package{{
 			Key:             "store:Vendor.App_abc123",
 			Manager:         managerStore,

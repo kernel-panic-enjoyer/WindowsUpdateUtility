@@ -16,7 +16,7 @@ var errNoUpdateCandidates = errors.New("no updateable packages found")
 var errStoreScanRefreshTimeout = errors.New("timed out waiting for Microsoft Store scan to finish")
 
 var refreshInventoryAfterUpdateJob = func(ctx context.Context, app *App, packages []Package) error {
-	app.refreshInventorySync("update job")
+	app.refreshInventorySyncContext(ctx, "update job")
 	if updateJobTouchesStore(packages) {
 		if !app.waitForStoreScanIdle(ctx, 12*time.Minute) {
 			if ctx.Err() != nil {

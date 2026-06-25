@@ -1,6 +1,7 @@
 package updater
 
 import (
+	"context"
 	"os"
 	"strings"
 	"sync"
@@ -8,6 +9,10 @@ import (
 )
 
 func wingetInstalled() ([]Package, CommandResult) {
+	return wingetInstalledContext(context.Background())
+}
+
+func wingetInstalledContext(ctx context.Context) ([]Package, CommandResult) {
 	var listResult CommandResult
 	var tablePackages []Package
 	var exportResult CommandResult
@@ -26,14 +31,14 @@ func wingetInstalled() ([]Package, CommandResult) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		listResult = runCommand(120*time.Second, managerCommand(managerWinget, "list", "--accept-source-agreements", "--disable-interactivity")...)
+		listResult = runCommandContext(ctx, 120*time.Second, managerCommand(managerWinget, "list", "--accept-source-agreements", "--disable-interactivity")...)
 		tablePackages = parseWingetTable(listResult.Stdout + "\n" + listResult.Stderr)
 	}()
 	if exportPath != "" {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			exportResult = runCommand(180*time.Second, managerCommand(managerWinget, "export", "-o", exportPath, "--include-versions", "--accept-source-agreements", "--disable-interactivity")...)
+			exportResult = runCommandContext(ctx, 180*time.Second, managerCommand(managerWinget, "export", "-o", exportPath, "--include-versions", "--accept-source-agreements", "--disable-interactivity")...)
 			exportOutput, _ := os.ReadFile(exportPath)
 			exported = parseWingetExport(string(exportOutput))
 		}()
@@ -48,11 +53,15 @@ func wingetInstalled() ([]Package, CommandResult) {
 }
 
 func wingetUpdates() (map[string]string, map[string]Package, CommandResult) {
+	return wingetUpdatesContext(context.Background())
+}
+
+func wingetUpdatesContext(ctx context.Context) (map[string]string, map[string]Package, CommandResult) {
 	updates := map[string]string{}
 	details := map[string]Package{}
-	result := runCommand(120*time.Second, managerCommand(managerWinget, "upgrade", "--accept-source-agreements", "--disable-interactivity")...)
+	result := runCommandContext(ctx, 120*time.Second, managerCommand(managerWinget, "upgrade", "--accept-source-agreements", "--disable-interactivity")...)
 	mergeWingetUpdateOutput(updates, details, result.Stdout+"\n"+result.Stderr, "")
-	storeResult := runCommand(120*time.Second, managerCommand(managerWinget, "upgrade", "--source", sourceMSStore, "--accept-source-agreements", "--disable-interactivity")...)
+	storeResult := runCommandContext(ctx, 120*time.Second, managerCommand(managerWinget, "upgrade", "--source", sourceMSStore, "--accept-source-agreements", "--disable-interactivity")...)
 	mergeWingetUpdateOutput(updates, details, storeResult.Stdout+"\n"+storeResult.Stderr, managerStore)
 	return updates, details, mergeReadOnlyCommandResults(result, storeResult, "winget msstore update check")
 }

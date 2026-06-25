@@ -56,18 +56,18 @@ func (app *App) serveAPI(w http.ResponseWriter, r *http.Request) {
 		if !requireMethod(w, r, http.MethodGet) {
 			return
 		}
-		writeJSON(w, http.StatusOK, app.statusSnapshot())
+		writeJSON(w, http.StatusOK, app.statusSnapshotContext(r.Context()))
 	case "/api/status/refresh":
 		if !requireMethod(w, r, http.MethodPost) {
 			return
 		}
 		app.refreshStatus(true)
-		writeJSON(w, http.StatusAccepted, app.statusSnapshot())
+		writeJSON(w, http.StatusAccepted, app.statusSnapshotContext(r.Context()))
 	case "/api/packages":
 		if !requireMethod(w, r, http.MethodGet) {
 			return
 		}
-		writeJSON(w, http.StatusOK, app.inventorySnapshot())
+		writeJSON(w, http.StatusOK, app.inventorySnapshotContext(r.Context()))
 	case "/api/inventory/refresh":
 		app.handleInventoryRefreshAPI(w, r)
 	case "/api/jobs/status":

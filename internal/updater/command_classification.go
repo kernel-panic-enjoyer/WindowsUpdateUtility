@@ -10,7 +10,6 @@ import (
 )
 
 var wingetCommandMu sync.Mutex
-var packageManagerMutationMu sync.Mutex
 
 func isWingetCommand(args []string) bool {
 	if len(args) == 0 {
@@ -72,6 +71,9 @@ func isPackageManagerMutationCommand(args []string) bool {
 		if verb == "upgrade" {
 			return wingetUpgradeHasMutationTarget(tail)
 		}
+		if verb == "source" {
+			return wingetSourceCommandMutates(tail)
+		}
 		return verb == "install" || verb == "uninstall" || verb == "import" || verb == "configure"
 	case "store":
 		if (verb == "update" || verb == "updates") && commandHasApplyFalse(args) {
@@ -83,6 +85,14 @@ func isPackageManagerMutationCommand(args []string) bool {
 	default:
 		return false
 	}
+}
+
+func wingetSourceCommandMutates(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	action := strings.ToLower(strings.TrimSpace(args[0]))
+	return action == "update" || action == "reset"
 }
 
 func wingetUpgradeHasMutationTarget(args []string) bool {

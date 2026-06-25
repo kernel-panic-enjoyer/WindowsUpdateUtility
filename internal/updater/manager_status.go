@@ -1,6 +1,7 @@
 package updater
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"time"
@@ -34,14 +35,24 @@ func wingetSourceUpdateCommand() []string {
 }
 
 func detectManager(manager string) ManagerStatus {
+	return detectManagerContext(context.Background(), manager)
+}
+
+func detectManagerContext(ctx context.Context, manager string) ManagerStatus {
 	if manager == managerStore {
-		return detectStoreCLIManager()
+		return detectStoreCLIManagerContext(ctx)
 	}
-	result := runCommand(managerDetectionTimeout, managerCommand(manager, "--version")...)
+	result := runCommandContext(ctx, managerDetectionTimeout, managerCommand(manager, "--version")...)
 	if manager == managerWinget && isWingetTransientFailure(result) {
 		appLog("Winget version detection failed with transient code %d; retrying once.", result.Code)
-		time.Sleep(wingetDetectionRetryGap)
-		result = runCommand(managerDetectionTimeout, managerCommand(manager, "--version")...)
+		timer := time.NewTimer(wingetDetectionRetryGap)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			result = CommandResult{Command: "detect " + manager, Code: commandCancelledCode, Stderr: ctx.Err().Error()}
+		case <-timer.C:
+			result = runCommandContext(ctx, managerDetectionTimeout, managerCommand(manager, "--version")...)
+		}
 	}
 	output := strings.TrimSpace(result.Stdout)
 	if output == "" {
@@ -59,7 +70,11 @@ func detectManager(manager string) ManagerStatus {
 }
 
 func detectStoreCLIManager() ManagerStatus {
-	result := runCommand(managerDetectionTimeout, managerCommand(managerStore, "--help")...)
+	return detectStoreCLIManagerContext(context.Background())
+}
+
+func detectStoreCLIManagerContext(ctx context.Context) ManagerStatus {
+	result := runCommandContext(ctx, managerDetectionTimeout, managerCommand(managerStore, "--help")...)
 	status := ManagerStatus{
 		Available: result.OK,
 		Path:      resolveExecutable(managerStore),
@@ -106,15 +121,26 @@ func isWingetTransientFailure(result CommandResult) bool {
 }
 
 func detectManagers() map[string]ManagerStatus {
-	return detectManagersCached(false)
+	return detectManagersContext(context.Background())
 }
 
 func detectManagersFresh() map[string]ManagerStatus {
-	return detectManagersCached(true)
+	return detectManagersFreshContext(context.Background())
 }
 
-func detectManagersCached(force bool) map[string]ManagerStatus {
+func detectManagersContext(ctx context.Context) map[string]ManagerStatus {
+	return detectManagersCached(ctx, false)
+}
+
+func detectManagersFreshContext(ctx context.Context) map[string]ManagerStatus {
+	return detectManagersCached(ctx, true)
+}
+
+func detectManagersCached(ctx context.Context, force bool) map[string]ManagerStatus {
 	for {
+		if ctx.Err() != nil {
+			return cancelledManagerStatuses(ctx.Err())
+		}
 		managerDetectionCache.mu.Lock()
 		if !force && managerDetectionCache.cached != nil && time.Since(managerDetectionCache.fetchedAt) < managerStatusCacheTTL {
 			managers := cloneManagerStatuses(managerDetectionCache.cached)
@@ -124,7 +150,11 @@ func detectManagersCached(force bool) map[string]ManagerStatus {
 		if managerDetectionCache.inFlight != nil {
 			inFlight := managerDetectionCache.inFlight
 			managerDetectionCache.mu.Unlock()
-			<-inFlight
+			select {
+			case <-inFlight:
+			case <-ctx.Done():
+				return cancelledManagerStatuses(ctx.Err())
+			}
 			force = false
 			continue
 		}
@@ -132,11 +162,13 @@ func detectManagersCached(force bool) map[string]ManagerStatus {
 		managerDetectionCache.inFlight = inFlight
 		managerDetectionCache.mu.Unlock()
 
-		managers := detectManagersUncached()
+		managers := detectManagersUncachedContext(ctx)
 
 		managerDetectionCache.mu.Lock()
-		managerDetectionCache.cached = cloneManagerStatuses(managers)
-		managerDetectionCache.fetchedAt = time.Now()
+		if ctx.Err() == nil {
+			managerDetectionCache.cached = cloneManagerStatuses(managers)
+			managerDetectionCache.fetchedAt = time.Now()
+		}
 		managerDetectionCache.inFlight = nil
 		close(inFlight)
 		managerDetectionCache.mu.Unlock()
@@ -160,6 +192,10 @@ func cloneManagerStatuses(input map[string]ManagerStatus) map[string]ManagerStat
 }
 
 func detectManagersUncached() map[string]ManagerStatus {
+	return detectManagersUncachedContext(context.Background())
+}
+
+func detectManagersUncachedContext(ctx context.Context) map[string]ManagerStatus {
 	managers := map[string]ManagerStatus{}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -168,7 +204,7 @@ func detectManagersUncached() map[string]ManagerStatus {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			status := detectManager(manager)
+			status := detectManagerContext(ctx, manager)
 			mu.Lock()
 			managers[manager] = status
 			mu.Unlock()
@@ -183,6 +219,17 @@ func detectManagersUncached() map[string]ManagerStatus {
 		}
 		store.Error += "\nStore installs and updates can fall back to winget msstore when a compatible package ID is known."
 		managers[managerStore] = store
+	}
+	return managers
+}
+
+func cancelledManagerStatuses(err error) map[string]ManagerStatus {
+	if err == nil {
+		err = context.Canceled
+	}
+	managers := map[string]ManagerStatus{}
+	for _, manager := range managedPackageManagers {
+		managers[manager] = ManagerStatus{Available: false, Error: err.Error()}
 	}
 	return managers
 }

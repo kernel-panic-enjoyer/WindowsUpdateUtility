@@ -7,21 +7,22 @@ import (
 
 type managerInventoryCollector struct {
 	manager   string
-	installed func() ([]Package, CommandResult)
-	updates   func() (map[string]string, map[string]Package, CommandResult)
+	installed func(context.Context) ([]Package, CommandResult)
+	updates   func(context.Context) (map[string]string, map[string]Package, CommandResult)
 	listKey   string
 	updateKey string
 }
 
 var managerInventoryCollectors = []managerInventoryCollector{
-	{managerWinget, wingetInstalled, wingetUpdates, "winget_list", "winget_upgrade"},
-	{managerChoco, chocoInstalled, chocoUpdates, "choco_list", "choco_outdated"},
+	{managerWinget, wingetInstalledContext, wingetUpdatesContext, "winget_list", "winget_upgrade"},
+	{managerChoco, chocoInstalledContext, chocoUpdatesContext, "choco_list", "choco_outdated"},
 }
 
 func collectManagerInventory(
+	ctx context.Context,
 	manager string,
-	installedFn func() ([]Package, CommandResult),
-	updatesFn func() (map[string]string, map[string]Package, CommandResult),
+	installedFn func(context.Context) ([]Package, CommandResult),
+	updatesFn func(context.Context) (map[string]string, map[string]Package, CommandResult),
 	listKey string,
 	updateKey string,
 ) managerInventory {
@@ -34,11 +35,11 @@ func collectManagerInventory(
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		installed, listResult = installedFn()
+		installed, listResult = installedFn(ctx)
 	}()
 	go func() {
 		defer wg.Done()
-		updates, updateDetails, updateResult = updatesFn()
+		updates, updateDetails, updateResult = updatesFn(ctx)
 	}()
 	wg.Wait()
 	return managerInventory{
@@ -53,7 +54,7 @@ func collectManagerInventory(
 	}
 }
 
-func collectInventoryInputs(managers map[string]ManagerStatus) inventoryInputs {
+func collectInventoryInputs(ctx context.Context, managers map[string]ManagerStatus) inventoryInputs {
 	inputs := inventoryInputs{}
 	inventoryCh := make(chan managerInventory, len(managedPackageManagers))
 	var wg sync.WaitGroup
@@ -61,7 +62,7 @@ func collectInventoryInputs(managers map[string]ManagerStatus) inventoryInputs {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		inputs.storePackagedInventory, inputs.storePackagedResult = collectNativeStorePackagedInventory()
+		inputs.storePackagedInventory, inputs.storePackagedResult = collectNativeStorePackagedInventoryContext(ctx)
 	}()
 	for _, collector := range managerInventoryCollectors {
 		if !managers[collector.manager].Available {
@@ -71,13 +72,13 @@ func collectInventoryInputs(managers map[string]ManagerStatus) inventoryInputs {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			inventoryCh <- collectManagerInventory(collector.manager, collector.installed, collector.updates, collector.listKey, collector.updateKey)
+			inventoryCh <- collectManagerInventory(ctx, collector.manager, collector.installed, collector.updates, collector.listKey, collector.updateKey)
 		}()
 	}
 
 	wg.Wait()
 	if inputs.storePackagedResult.OK {
-		state := loadState()
+		state := loadStateContext(ctx)
 		inputs.appxPackages = packagesFromNativeStorePackagedInventory(state, inputs.storePackagedInventory)
 		inputs.appxResult = inputs.storePackagedResult
 	} else {
@@ -92,11 +93,15 @@ func collectInventoryInputs(managers map[string]ManagerStatus) inventoryInputs {
 }
 
 func collectNativeStorePackagedInventory() (StorePackagedAppInventory, CommandResult) {
+	return collectNativeStorePackagedInventoryContext(context.Background())
+}
+
+func collectNativeStorePackagedInventoryContext(ctx context.Context) (StorePackagedAppInventory, CommandResult) {
 	userSID, err := currentUserSID()
 	if err != nil {
 		result := validationCommandResult("native Store inventory", err)
 		return StorePackagedAppInventory{Partial: true, Errors: []string{err.Error()}}, result
 	}
 	scan := newStorePackagedAppScan(userSID)
-	return storePackagedAppInventoryProvider().Inventory(context.Background(), scan)
+	return storePackagedAppInventoryProvider().Inventory(ctx, scan)
 }

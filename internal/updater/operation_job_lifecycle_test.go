@@ -106,7 +106,7 @@ func TestShutdownCancelsRunningAndQueuedJobs(t *testing.T) {
 func TestShutdownCancelsStoreScanInProgress(t *testing.T) {
 	t.Setenv("UPDATER_STATE_DIR", t.TempDir())
 	oldGetter := inventoryGetter
-	inventoryGetter = func() Inventory { return Inventory{} }
+	inventoryGetter = func(ctx context.Context) Inventory { return Inventory{} }
 	defer func() { inventoryGetter = oldGetter }()
 
 	oldScan := runStoreTransactionalScanForInventory

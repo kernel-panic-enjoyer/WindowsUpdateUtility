@@ -24,6 +24,29 @@ type StoreAutoUpdateMigrationEntry struct {
 	MigratedAt        string `json:"migrated_at"`
 }
 
+type ScheduledAutoUpdateSummary struct {
+	StoreScan       ScheduledAutoUpdateStoreScanSummary `json:"store_scan,omitempty"`
+	SkippedPackages []ScheduledAutoUpdateSkippedPackage `json:"skipped_packages,omitempty"`
+}
+
+type ScheduledAutoUpdateStoreScanSummary struct {
+	ScanID           string `json:"scan_id,omitempty"`
+	UsedGenerationID string `json:"used_generation_id,omitempty"`
+	StartedAt        string `json:"started_at,omitempty"`
+	CompletedAt      string `json:"completed_at,omitempty"`
+	Published        bool   `json:"published"`
+	CompletionStatus string `json:"completion_status,omitempty"`
+	FreshGeneration  bool   `json:"fresh_generation"`
+	Error            string `json:"error,omitempty"`
+}
+
+type ScheduledAutoUpdateSkippedPackage struct {
+	Key       string `json:"key"`
+	Manager   string `json:"manager,omitempty"`
+	PackageID string `json:"package_id,omitempty"`
+	Reason    string `json:"reason"`
+}
+
 type State struct {
 	CreatedAt                string                         `json:"created_at"`
 	UpdatedAt                string                         `json:"updated_at"`
@@ -36,6 +59,7 @@ type State struct {
 	LastScanAt               string                         `json:"last_scan_at"`
 	LastAutoUpdateAt         string                         `json:"last_auto_update_at"`
 	LastAutoUpdateResults    []UpdateResult                 `json:"last_auto_update_results"`
+	LastAutoUpdateSummary    *ScheduledAutoUpdateSummary    `json:"last_auto_update_summary,omitempty"`
 	Theme                    string                         `json:"theme"`
 }
 
@@ -135,12 +159,16 @@ func (store *FileStateStore) Update(ctx context.Context, mutate func(*State) err
 }
 
 func loadState() State {
+	return loadStateContext(context.Background())
+}
+
+func loadStateContext(ctx context.Context) State {
 	store, err := defaultStateStore()
 	if err != nil {
 		appLog("Could not open state store: %s.", err)
 		return defaultState()
 	}
-	state, err := store.Load(context.Background())
+	state, err := store.Load(ctx)
 	if err != nil {
 		appLog("Could not load state: %s.", err)
 		return defaultState()

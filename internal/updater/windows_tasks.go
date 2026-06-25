@@ -13,7 +13,11 @@ const (
 )
 
 func taskExists(name string) bool {
-	return runCommand(30*time.Second, "schtasks.exe", "/Query", "/TN", name, "/FO", "LIST").OK
+	return taskExistsContext(context.Background(), name)
+}
+
+func taskExistsContext(ctx context.Context, name string) bool {
+	return runCommandContext(ctx, 30*time.Second, "schtasks.exe", "/Query", "/TN", name, "/FO", "LIST").OK
 }
 
 func createStartupTask() CommandResult {

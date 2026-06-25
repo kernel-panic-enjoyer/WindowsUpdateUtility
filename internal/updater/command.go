@@ -47,12 +47,13 @@ func runCommandContext(parent context.Context, timeout time.Duration, args ...st
 	logCommand("command", result.Command)
 	mutationCommand := isPackageManagerMutationCommand(args)
 	if mutationCommand {
-		if !lockMutexContextWithWait(ctx, &packageManagerMutationMu, func() {
-			logCommand("app", "Waiting for another package-manager mutation to finish before running "+result.Command)
-		}) {
-			return commandContextDoneResult(ctx, result.Command, "while waiting for package manager lock", categories)
+		releasePackageOperation, err := defaultPackageMutationCoordinator.Acquire(ctx, func() {
+			logCommand("app", "Waiting for another package operation before running "+result.Command)
+		})
+		if err != nil {
+			return packageMutationLockFailureResult(ctx, result.Command, categories, err)
 		}
-		defer packageManagerMutationMu.Unlock()
+		defer releasePackageOperation()
 	}
 	if shouldAcquireWingetCommandLock(args) {
 		if !lockMutexContextWithWait(ctx, &wingetCommandMu, func() {

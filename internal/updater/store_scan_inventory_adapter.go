@@ -2,6 +2,8 @@ package updater
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -9,44 +11,103 @@ import (
 var (
 	runStoreTransactionalScanForInventory   = runDefaultStoreScanPipeline
 	openStoreTransactionalStoreForInventory = openDefaultStoreScanRepository
+	scheduledStoreScanWaitTimeout           = 2 * time.Minute
+	scheduledStoreScanPollInterval          = 250 * time.Millisecond
 )
 
+// StoreInventoryProjectionResult describes the Store scan attempted for a
+// projection and the published generation actually overlaid onto inventory.
+// ScanID/StartedAt/CompletedAt/Published/CompletionStatus describe the scan
+// attempt when one ran in this process. UsedGenerationID describes the published
+// snapshot used for the returned Inventory. FreshGeneration is true only when
+// that snapshot is acceptable for scheduled Store automation.
+type StoreInventoryProjectionResult struct {
+	Inventory        Inventory
+	ScanID           string
+	StartedAt        time.Time
+	CompletedAt      time.Time
+	Published        bool
+	CompletionStatus StoreScanCompletionStatus
+	UsedGenerationID string
+	FreshGeneration  bool
+	Error            error
+}
+
 func applyStoreTransactionalScanPipeline(ctx context.Context, state State, inventory Inventory) Inventory {
+	return applyStoreTransactionalScanPipelineResult(ctx, state, inventory, time.Time{}).Inventory
+}
+
+func applyStoreTransactionalScanPipelineResult(ctx context.Context, state State, inventory Inventory, freshAfter time.Time) StoreInventoryProjectionResult {
 	result, err := runStoreTransactionalScanForInventory(ctx)
+	projection := loadLatestPublishedStoreProjection(ctx, state, inventory, freshAfter)
+	projection.applyScanAttempt(result)
 	if err != nil {
 		appLog("Store transactional scan failed: %s", err)
+		projection.Error = err
+		if errors.Is(err, errStoreScanAlreadyRunning) && !freshAfter.IsZero() {
+			waited, waitErr := waitForFreshPublishedStoreSnapshot(ctx, freshAfter, scheduledStoreScanWaitTimeout)
+			if waitErr != nil {
+				projection.Error = waitErr
+				appLog("Timed out waiting for concurrent Store scan publication: %s", waitErr)
+				return projection
+			}
+			projection = projectionFromPublishedStoreSnapshot(state, inventory, waited, freshAfter)
+			projection.Error = nil
+		}
+		return projection
 	} else if !result.Published {
 		appLog("Store transactional scan %s completed but was not published.", result.Scan.ScanID)
+		projection.Error = fmt.Errorf("Store scan %s completed but was not published", result.Scan.ScanID)
 	}
-	return effectiveInventoryFromBase(ctx, state, inventory)
+	projection.applyScanAttempt(result)
+	return projection
+}
+
+func (result *StoreInventoryProjectionResult) applyScanAttempt(scan StoreScanResult) {
+	if scan.Scan.ScanID == "" {
+		return
+	}
+	result.ScanID = scan.Scan.ScanID
+	result.StartedAt = scan.Scan.StartedAt
+	result.CompletedAt = scan.Scan.CompletedAt
+	result.Published = scan.Published
+	result.CompletionStatus = scan.Scan.CompletionStatus
 }
 
 func applyPublishedStoreScanAssessments(ctx context.Context, state State, inventory Inventory) Inventory {
-	inventory = inventory.DeepCopy()
+	return loadLatestPublishedStoreProjection(ctx, state, inventory, time.Time{}).Inventory
+}
+
+func loadLatestPublishedStoreProjection(ctx context.Context, state State, inventory Inventory, freshAfter time.Time) StoreInventoryProjectionResult {
+	inventory = applyInventoryState(state, inventory.DeepCopy())
+	result := StoreInventoryProjectionResult{Inventory: inventory}
 	repository, openErr := openStoreTransactionalStoreForInventory()
 	if openErr != nil {
 		appLog("Could not open Store scan store: %s", openErr)
-		inventory.StoreScanHealth = StoreScanHealthSummary{Active: true, Healthy: false, Authoritative: false, Status: string(StoreScanFailed), Reason: sanitizeProviderDiagnostic(openErr.Error())}
-		return inventory
+		result.Inventory.StoreScanHealth = StoreScanHealthSummary{Active: true, Healthy: false, Authoritative: false, Status: string(StoreScanFailed), Reason: sanitizeProviderDiagnostic(openErr.Error())}
+		result.Error = openErr
+		return result
 	}
 	defer repository.Close()
 	userSID, sidErr := storeScanCurrentUserSID()
 	if sidErr != nil {
 		appLog("Could not load Store scan assessments because current user SID is unavailable: %s", sidErr)
-		inventory.StoreScanHealth = StoreScanHealthSummary{Active: true, Healthy: false, Authoritative: false, Status: string(StoreScanFailed), Reason: sanitizeProviderDiagnostic(sidErr.Error())}
-		return inventory
+		result.Inventory.StoreScanHealth = StoreScanHealthSummary{Active: true, Healthy: false, Authoritative: false, Status: string(StoreScanFailed), Reason: sanitizeProviderDiagnostic(sidErr.Error())}
+		result.Error = sidErr
+		return result
 	}
 	snapshot, ok, err := repository.LoadLatestPublishedSnapshot(ctx, userSID)
 	if err != nil {
 		appLog("Could not load published Store scan assessments: %s", err)
-		inventory.StoreScanHealth = StoreScanHealthSummary{Active: true, Healthy: false, Authoritative: false, Status: string(StoreScanFailed), Reason: sanitizeProviderDiagnostic(err.Error())}
-		return inventory
+		result.Inventory.StoreScanHealth = StoreScanHealthSummary{Active: true, Healthy: false, Authoritative: false, Status: string(StoreScanFailed), Reason: sanitizeProviderDiagnostic(err.Error())}
+		result.Error = err
+		return result
 	}
 	providerSummaries := providerSummariesFromRuns(snapshot.ProviderRuns)
 	if !ok || len(snapshot.Assessments) == 0 {
-		inventory.StoreScanHealth = buildStoreScanHealthSummary(inventory.Packages, providerSummaries)
-		if !inventory.StoreScanHealth.Active {
-			inventory.StoreScanHealth = StoreScanHealthSummary{
+		result.Inventory.StoreScanHealth = buildStoreScanHealthSummary(result.Inventory.Packages, providerSummaries)
+		if !result.Inventory.StoreScanHealth.Active {
+			result.Inventory.StoreScanHealth = StoreScanHealthSummary{
 				Active:        true,
 				Healthy:       false,
 				Authoritative: false,
@@ -55,15 +116,79 @@ func applyPublishedStoreScanAssessments(ctx context.Context, state State, invent
 				Providers:     providerSummaries,
 			}
 		}
-		return inventory
+		return result
 	}
+	return projectionFromPublishedStoreSnapshot(state, result.Inventory, snapshot, freshAfter)
+}
+
+func projectionFromPublishedStoreSnapshot(state State, inventory Inventory, snapshot StoreScanSnapshot, freshAfter time.Time) StoreInventoryProjectionResult {
+	providerSummaries := providerSummariesFromRuns(snapshot.ProviderRuns)
 	familyNames := map[string]StorePackagedAppFamily{}
 	for _, family := range snapshot.Inventory.Families {
 		familyNames[strings.ToLower(family.Identity.PackageFamilyName)] = family
 	}
 	inventory = applyPublishedStoreAssessmentsToInventory(state, inventory, snapshot, familyNames, providerSummaries)
 	inventory.StoreScanHealth = buildStoreScanHealthSummary(inventory.Packages, providerSummaries)
-	return inventory
+	return StoreInventoryProjectionResult{
+		Inventory:        inventory,
+		ScanID:           snapshot.Scan.ScanID,
+		StartedAt:        snapshot.Scan.StartedAt,
+		CompletedAt:      snapshot.Scan.CompletedAt,
+		Published:        snapshot.Published,
+		CompletionStatus: snapshot.Scan.CompletionStatus,
+		UsedGenerationID: snapshot.Scan.ScanID,
+		FreshGeneration:  publishedStoreSnapshotFreshForScheduledUse(snapshot, freshAfter),
+	}
+}
+
+func waitForFreshPublishedStoreSnapshot(ctx context.Context, freshAfter time.Time, timeout time.Duration) (StoreScanSnapshot, error) {
+	if timeout <= 0 {
+		timeout = scheduledStoreScanWaitTimeout
+	}
+	repository, openErr := openStoreTransactionalStoreForInventory()
+	if openErr != nil {
+		return StoreScanSnapshot{}, openErr
+	}
+	defer repository.Close()
+	userSID, sidErr := storeScanCurrentUserSID()
+	if sidErr != nil {
+		return StoreScanSnapshot{}, sidErr
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(scheduledStoreScanPollInterval)
+	defer ticker.Stop()
+	for {
+		snapshot, ok, err := repository.LoadLatestPublishedSnapshot(ctx, userSID)
+		if err != nil {
+			return StoreScanSnapshot{}, err
+		}
+		if ok && publishedStoreSnapshotFreshForScheduledUse(snapshot, freshAfter) {
+			return snapshot, nil
+		}
+		select {
+		case <-ctx.Done():
+			return StoreScanSnapshot{}, ctx.Err()
+		case <-timer.C:
+			return StoreScanSnapshot{}, fmt.Errorf("no fresh published Store scan completed after %s", freshAfter.UTC().Format(time.RFC3339))
+		case <-ticker.C:
+		}
+	}
+}
+
+func publishedStoreSnapshotFreshForScheduledUse(snapshot StoreScanSnapshot, freshAfter time.Time) bool {
+	if !snapshot.Published || snapshot.RecoveredFromFallback || snapshot.Scan.CompletedAt.IsZero() {
+		return false
+	}
+	switch snapshot.Scan.CompletionStatus {
+	case StoreScanCompleted, StoreScanIncomplete:
+	default:
+		return false
+	}
+	if freshAfter.IsZero() {
+		return true
+	}
+	return !snapshot.Scan.CompletedAt.Before(freshAfter.UTC())
 }
 
 func applyPublishedStoreAssessmentsToInventory(state State, inventory Inventory, snapshot StoreScanSnapshot, families map[string]StorePackagedAppFamily, scanProviders []StorePackageProviderSummary) Inventory {

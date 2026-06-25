@@ -40,7 +40,7 @@ func (app *App) startInstallJob(manager, id string) OperationJobStatus {
 			status.Notice = "Install command completed. Refreshing package status..."
 		})
 		if ctx.Err() == nil {
-			app.refreshInventorySync("install job " + jobID)
+			app.refreshInventorySyncContext(ctx, "install job "+jobID)
 		}
 		app.mutateOperationJob(job, func(status *OperationJobStatus) {
 			if status.State == jobStateCancelled {
@@ -79,8 +79,8 @@ func (app *App) startManagerInstallJob(manager string) OperationJobStatus {
 			status.Notice = "Package manager install action completed. Refreshing manager status..."
 		})
 		if ctx.Err() == nil {
-			app.refreshStatusSync("manager install job " + jobID)
-			app.refreshInventorySync("manager install job " + jobID)
+			app.refreshStatusSyncContext(ctx, "manager install job "+jobID)
+			app.refreshInventorySyncContext(ctx, "manager install job "+jobID)
 		}
 		app.mutateOperationJob(job, func(status *OperationJobStatus) {
 			if status.State == jobStateCancelled {
@@ -97,7 +97,7 @@ func (app *App) startManagerInstallJob(manager string) OperationJobStatus {
 }
 
 func (app *App) startSingleUpdateJob(manager, id string, options UpdateOptions) OperationJobStatus {
-	pkg := app.packageForUpdate(manager, id)
+	pkg := app.packageForUpdateContext(app.rootContext(), manager, id)
 	pkg.AllowUnknownVersionUpdate = options.AllowUnknownVersion
 	pkg.AllowPinnedUpdate = options.AllowPinned
 	if pkg.Key == "" {
@@ -129,7 +129,7 @@ func (app *App) startRejectedUpdateJob(pkg Package, result CommandResult) Operat
 }
 
 func (app *App) startBulkUpdateJob(packageKeys []string, options UpdateOptions) (OperationJobStatus, error) {
-	packages, mode, err := app.updateJobPackages(packageKeys, options)
+	packages, mode, err := app.updateJobPackagesContext(app.rootContext(), packageKeys, options)
 	if err != nil {
 		return OperationJobStatus{}, err
 	}
@@ -247,7 +247,13 @@ func (app *App) startScanJob() OperationJobStatus {
 			})
 			return
 		}
-		scan := scanInstalledApplications()
+		store, err := defaultStateStore()
+		var scan ScanResult
+		if err != nil {
+			scan = ScanResult{Errors: []map[string]string{{"source": "state", "error": err.Error()}}}
+		} else {
+			scan = scanInstalledApplicationsWithStore(ctx, store)
+		}
 		app.mutateOperationJob(job, func(status *OperationJobStatus) {
 			status.Scan = &scan
 			if ctx.Err() != nil {
@@ -261,7 +267,7 @@ func (app *App) startScanJob() OperationJobStatus {
 			status.Notice = "Application scan completed. Refreshing package status..."
 		})
 		if ctx.Err() == nil {
-			app.refreshInventorySync("scan job " + jobID)
+			app.refreshInventorySyncContext(ctx, "scan job "+jobID)
 		}
 		app.mutateOperationJob(job, func(status *OperationJobStatus) {
 			if status.State == jobStateCancelled {
@@ -295,7 +301,7 @@ func (app *App) startInventoryRefreshJob() OperationJobStatus {
 			status.RefreshStarted = true
 			status.Notice = "Refreshing package status..."
 		})
-		app.refreshInventorySync("inventory refresh job " + jobID)
+		app.refreshInventorySyncContext(ctx, "inventory refresh job "+jobID)
 		app.mutateOperationJob(job, func(status *OperationJobStatus) {
 			if ctx.Err() != nil {
 				status.CancelRequested = true

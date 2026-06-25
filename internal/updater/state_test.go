@@ -197,7 +197,7 @@ func TestRunAutoUpdateSkipsUnknownVersionPackages(t *testing.T) {
 	}
 
 	oldGetter := inventoryGetter
-	inventoryGetter = func() Inventory {
+	inventoryGetter = func(ctx context.Context) Inventory {
 		return Inventory{PackageLookup: PackageLookup{Packages: []Package{{
 			Key:              "winget:Vendor.Unknown",
 			Manager:          managerWinget,

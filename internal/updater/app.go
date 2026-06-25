@@ -61,12 +61,15 @@ type App struct {
 	inventoryErr       string
 	// Microsoft Store update scan runs in the background so it never blocks the
 	// fast managers. storeScanLoading reports an in-flight background scan;
-	// storeScanFetchedAt records when the last one finished (for debouncing).
+	// scan timestamps are split so successful publications use the normal
+	// cooldown while failed/unpublished scans use a shorter retry backoff.
 	// storeBackgroundScanEnabled is set only on the production App so unit tests
 	// (which stub inventoryGetter) never spawn real Store scans.
 	storeScanLoading           bool
 	storeScanQueued            bool
-	storeScanFetchedAt         time.Time
+	storeScanLastAttemptAt     time.Time
+	storeScanLastPublishedAt   time.Time
+	storeScanLastFailureAt     time.Time
 	storeBackgroundScanEnabled bool
 	status                     StatusResponse
 	statusLoading              bool
@@ -117,6 +120,12 @@ func (app *App) startBackgroundWork(name string, run func(context.Context)) bool
 		run(ctx)
 	}()
 	return true
+}
+
+func (app *App) rootContext() context.Context {
+	app.lifecycleMu.Lock()
+	defer app.lifecycleMu.Unlock()
+	return app.ensureRootContextLocked()
 }
 
 func (app *App) beginShutdown() {

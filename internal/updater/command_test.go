@@ -131,6 +131,7 @@ func TestPackageManagerMutationCommandDetection(t *testing.T) {
 		{[]string{"store", "search", "Codex"}, false},
 		{[]string{"store", "install", "OpenAI.Codex"}, true},
 		{[]string{"cmd.exe", "/d", "/c", "store", "updates"}, true},
+		{[]string{"store", "update", "OpenAI.Codex", "--apply", "false"}, false},
 		{[]string{"winget", "list"}, false},
 		{[]string{"winget", "upgrade", "--accept-source-agreements", "--disable-interactivity"}, false},
 		{[]string{"winget", "upgrade", "--source", "msstore", "--accept-source-agreements", "--disable-interactivity"}, false},
@@ -138,8 +139,11 @@ func TestPackageManagerMutationCommandDetection(t *testing.T) {
 		{[]string{"winget", "upgrade", "--id", "Proton.ProtonMail", "--exact"}, true},
 		{[]string{"winget", "upgrade", "--name", "Proton Mail", "--exact"}, true},
 		{[]string{"winget", "upgrade", "Proton.ProtonMail"}, true},
+		{[]string{"winget", "source", "update"}, true},
+		{[]string{"winget", "source", "reset", "--force"}, true},
 		{[]string{"cmd.exe", "/d", "/c", "winget", "search", "git"}, false},
 		{[]string{"choco", "outdated"}, false},
+		{[]string{"choco", "pin", "add", "-n=Git"}, true},
 		{[]string{"choco", "upgrade", "all"}, true},
 	}
 	for _, tc := range cases {
@@ -155,6 +159,9 @@ func TestWingetCommandLockOnlyForMutations(t *testing.T) {
 	}
 	if !shouldAcquireWingetCommandLock([]string{"winget", "upgrade", "--id", "Proton.ProtonMail", "--exact"}) {
 		t.Fatal("targeted winget upgrade must still use the winget mutation lock")
+	}
+	if !shouldAcquireWingetCommandLock([]string{"winget", "source", "update"}) {
+		t.Fatal("winget source maintenance must use the winget mutation lock")
 	}
 }
 
@@ -465,8 +472,8 @@ func TestRunCommandContextCancellation(t *testing.T) {
 }
 
 func TestRunCommandContextCancellationWhileWaitingForMutationLock(t *testing.T) {
-	packageManagerMutationMu.Lock()
-	defer packageManagerMutationMu.Unlock()
+	defaultPackageMutationCoordinator.mu.Lock()
+	defer defaultPackageMutationCoordinator.mu.Unlock()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -490,8 +497,8 @@ func TestRunCommandContextCancellationWhileWaitingForMutationLock(t *testing.T) 
 }
 
 func TestRunCommandContextTimeoutWhileWaitingForMutationLock(t *testing.T) {
-	packageManagerMutationMu.Lock()
-	defer packageManagerMutationMu.Unlock()
+	defaultPackageMutationCoordinator.mu.Lock()
+	defer defaultPackageMutationCoordinator.mu.Unlock()
 
 	started := time.Now()
 	result := runCommandContext(context.Background(), 50*time.Millisecond, "choco.exe", "upgrade", "example-package")
@@ -513,8 +520,8 @@ func TestRunCommandContextLogsWhileWaitingForMutationLock(t *testing.T) {
 	sessionLogs = &LogBuffer{}
 	defer func() { sessionLogs = oldLogs }()
 
-	packageManagerMutationMu.Lock()
-	defer packageManagerMutationMu.Unlock()
+	defaultPackageMutationCoordinator.mu.Lock()
+	defer defaultPackageMutationCoordinator.mu.Unlock()
 
 	result := runCommandContext(context.Background(), 50*time.Millisecond, "choco.exe", "upgrade", "example-package")
 	if result.Code != 124 {
@@ -526,7 +533,7 @@ func TestRunCommandContextLogsWhileWaitingForMutationLock(t *testing.T) {
 		if entry.Stream == "command" && strings.Contains(entry.Message, "choco.exe upgrade example-package") {
 			sawCommand = true
 		}
-		if entry.Stream == "app" && strings.Contains(entry.Message, "Waiting for another package-manager mutation") {
+		if entry.Stream == "app" && strings.Contains(entry.Message, "Waiting for another package operation") {
 			sawWait = true
 		}
 	}

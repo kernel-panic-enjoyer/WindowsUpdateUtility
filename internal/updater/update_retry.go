@@ -6,8 +6,8 @@ import (
 )
 
 var updatePackageRunner = updatePackageWithMetadataContext
-var updateRetryInventoryRefresher = func(app *App, reason string) Inventory {
-	return app.refreshInventorySync(reason)
+var updateRetryInventoryRefresher = func(ctx context.Context, app *App, reason string) Inventory {
+	return app.refreshInventorySyncContext(ctx, reason)
 }
 
 func (app *App) updatePackageWithInventoryRetry(ctx context.Context, pkg Package) CommandResult {
@@ -16,7 +16,7 @@ func (app *App) updatePackageWithInventoryRetry(ctx context.Context, pkg Package
 		return result
 	}
 
-	inventory := updateRetryInventoryRefresher(app, "update retry")
+	inventory := updateRetryInventoryRefresher(ctx, app, "update retry")
 	fresh, ok := findPackageForUpdateRetry(inventory.Packages, pkg)
 	if !ok {
 		return result

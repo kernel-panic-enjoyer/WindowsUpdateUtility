@@ -28,7 +28,7 @@ func TestBeginStoreScanLockedGating(t *testing.T) {
 	}
 
 	app.storeScanLoading = false
-	app.storeScanFetchedAt = time.Now()
+	app.storeScanLastPublishedAt = time.Now()
 	if app.beginStoreScanLocked(false) {
 		t.Fatal("a non-forced scan within the cooldown window must be skipped")
 	}
@@ -37,9 +37,71 @@ func TestBeginStoreScanLockedGating(t *testing.T) {
 	}
 
 	app.storeScanLoading = false
-	app.storeScanFetchedAt = time.Now().Add(-2 * storeScanCooldown)
+	app.storeScanLastPublishedAt = time.Now().Add(-2 * storeScanCooldown)
 	if !app.beginStoreScanLocked(false) {
 		t.Fatal("a non-forced scan after the cooldown window should start")
+	}
+}
+
+func TestBeginStoreScanLockedFailureRetryBackoff(t *testing.T) {
+	app := &App{storeBackgroundScanEnabled: true}
+	app.mu.Lock()
+	defer app.mu.Unlock()
+
+	app.storeScanLastFailureAt = time.Now()
+	if app.beginStoreScanLocked(false) {
+		t.Fatal("a non-forced scan inside the failure retry backoff must be skipped")
+	}
+
+	app.storeScanLastFailureAt = time.Now().Add(-2 * storeScanFailureRetryBackoff)
+	if !app.beginStoreScanLocked(false) {
+		t.Fatal("a non-forced scan after the failure retry backoff should start")
+	}
+}
+
+func TestBackgroundStoreScanTimestamps(t *testing.T) {
+	t.Setenv("UPDATER_STATE_DIR", t.TempDir())
+
+	oldScan := runStoreTransactionalScanForInventory
+	defer func() { runStoreTransactionalScanForInventory = oldScan }()
+
+	app := &App{storeBackgroundScanEnabled: true, storeScanLoading: true}
+	runStoreTransactionalScanForInventory = func(ctx context.Context) (StoreScanResult, error) {
+		return StoreScanResult{Published: true, Scan: StoreScanGeneration{ScanID: "published"}}, nil
+	}
+	app.runStoreScan(context.Background())
+	if app.storeScanLastAttemptAt.IsZero() {
+		t.Fatal("successful scan should record an attempt timestamp")
+	}
+	if app.storeScanLastPublishedAt.IsZero() {
+		t.Fatal("successful published scan should record a publication timestamp")
+	}
+	if !app.storeScanLastFailureAt.IsZero() {
+		t.Fatalf("successful published scan should clear failure timestamp, got %s", app.storeScanLastFailureAt)
+	}
+
+	app = &App{storeBackgroundScanEnabled: true, storeScanLoading: true}
+	runStoreTransactionalScanForInventory = func(ctx context.Context) (StoreScanResult, error) {
+		return StoreScanResult{Scan: StoreScanGeneration{ScanID: "unpublished"}}, nil
+	}
+	app.runStoreScan(context.Background())
+	if app.storeScanLastFailureAt.IsZero() {
+		t.Fatal("unpublished scan should record a failure retry timestamp")
+	}
+	if !app.storeScanLastPublishedAt.IsZero() {
+		t.Fatal("unpublished scan must not record a publication timestamp")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	app = &App{storeBackgroundScanEnabled: true, storeScanLoading: true}
+	runStoreTransactionalScanForInventory = func(ctx context.Context) (StoreScanResult, error) {
+		t.Fatal("cancelled scan should not invoke the Store pipeline")
+		return StoreScanResult{}, nil
+	}
+	app.runStoreScan(ctx)
+	if !app.storeScanLastFailureAt.IsZero() || !app.storeScanLastPublishedAt.IsZero() {
+		t.Fatalf("shutdown cancellation should not schedule retry or publication timestamps: failure=%s published=%s", app.storeScanLastFailureAt, app.storeScanLastPublishedAt)
 	}
 }
 
@@ -52,7 +114,7 @@ func TestBackgroundStoreScanRunsOffCriticalPath(t *testing.T) {
 
 	oldGetter := inventoryGetter
 	defer func() { inventoryGetter = oldGetter }()
-	inventoryGetter = func() Inventory {
+	inventoryGetter = func(ctx context.Context) Inventory {
 		return Inventory{PackageLookup: PackageLookup{Packages: []Package{
 			{Key: "winget:Fast.App", Manager: managerWinget, ID: "Fast.App", Name: "Fast App", Installed: true},
 		}}}
@@ -120,7 +182,7 @@ func TestForcedRefreshDuringScanQueuesFollowupScan(t *testing.T) {
 
 	oldGetter := inventoryGetter
 	defer func() { inventoryGetter = oldGetter }()
-	inventoryGetter = func() Inventory { return Inventory{} }
+	inventoryGetter = func(ctx context.Context) Inventory { return Inventory{} }
 
 	oldScan := runStoreTransactionalScanForInventory
 	defer func() { runStoreTransactionalScanForInventory = oldScan }()
@@ -181,7 +243,7 @@ func TestForcedRefreshDuringScanQueuesFollowupScan(t *testing.T) {
 func TestRefreshInventorySyncSkipsStoreScanWhenDisabled(t *testing.T) {
 	oldGetter := inventoryGetter
 	defer func() { inventoryGetter = oldGetter }()
-	inventoryGetter = func() Inventory { return Inventory{} }
+	inventoryGetter = func(ctx context.Context) Inventory { return Inventory{} }
 
 	oldScan := runStoreTransactionalScanForInventory
 	defer func() { runStoreTransactionalScanForInventory = oldScan }()

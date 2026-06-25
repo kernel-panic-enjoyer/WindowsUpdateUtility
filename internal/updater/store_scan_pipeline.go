@@ -61,7 +61,11 @@ type StoreScanResult struct {
 }
 
 func defaultStoreScanPipeline(repository StoreScanRepository) *StoreScanPipeline {
-	managers := detectManagers()
+	return defaultStoreScanPipelineContext(context.Background(), repository)
+}
+
+func defaultStoreScanPipelineContext(ctx context.Context, repository StoreScanRepository) *StoreScanPipeline {
+	managers := detectManagersContext(ctx)
 	storeVersion := managers[managerStore].Version
 	wingetVersion := managers[managerWinget].Version
 	return &StoreScanPipeline{
@@ -83,7 +87,7 @@ func runDefaultStoreScanPipeline(ctx context.Context) (StoreScanResult, error) {
 		return StoreScanResult{}, err
 	}
 	defer repository.Close()
-	return defaultStoreScanPipeline(repository).Run(ctx)
+	return defaultStoreScanPipelineContext(ctx, repository).Run(ctx)
 }
 
 func (pipeline *StoreScanPipeline) Run(ctx context.Context) (StoreScanResult, error) {

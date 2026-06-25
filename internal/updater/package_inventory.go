@@ -1,5 +1,7 @@
 package updater
 
+import "context"
+
 type managerInventory struct {
 	manager       string
 	installed     []Package
@@ -19,16 +21,20 @@ type inventoryInputs struct {
 	storePackagedResult    CommandResult
 }
 
-var inventoryGetter = getInventory
+var inventoryGetter = getInventoryContext
 
 func getInventory() Inventory {
-	state := loadState()
-	managers := detectManagers()
+	return getInventoryContext(context.Background())
+}
+
+func getInventoryContext(ctx context.Context) Inventory {
+	state := loadStateContext(ctx)
+	managers := detectManagersContext(ctx)
 	commandResults := map[string]CommandResult{}
 	var packages []Package
 	storeUpdateVersions := map[string]string{}
 
-	inputs := collectInventoryInputs(managers)
+	inputs := collectInventoryInputs(ctx, managers)
 	commandResults["appx_inventory"] = inputs.appxResult
 	if inputs.storePackagedResult.Command != "" {
 		commandResults["native_store_inventory"] = inputs.storePackagedResult

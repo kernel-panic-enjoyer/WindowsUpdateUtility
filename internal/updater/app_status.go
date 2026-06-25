@@ -29,7 +29,7 @@ func (app *App) refreshStatus(force bool) {
 	appLog("Status refresh started.")
 
 	if !app.startBackgroundWork("status refresh", func(ctx context.Context) {
-		app.runStatusRefresh(force)
+		app.runStatusRefresh(ctx, force)
 	}) {
 		app.mu.Lock()
 		app.statusLoading = false
@@ -38,8 +38,17 @@ func (app *App) refreshStatus(force bool) {
 	}
 }
 
-func (app *App) runStatusRefresh(force bool) {
-	status := buildStatusResponse(force)
+func (app *App) runStatusRefresh(ctx context.Context, force bool) {
+	status := buildStatusResponseContext(ctx, force)
+	if ctx.Err() != nil {
+		app.mu.Lock()
+		app.statusLoading = false
+		app.statusQueued = false
+		app.statusErr = "status refresh cancelled: " + ctx.Err().Error()
+		app.mu.Unlock()
+		appLog("Status refresh cancelled.")
+		return
+	}
 	app.mu.Lock()
 	app.status = status
 	app.statusFetchedAt = time.Now()
@@ -50,7 +59,7 @@ func (app *App) runStatusRefresh(force bool) {
 		app.mu.Unlock()
 		appLog("Status refresh completed; running queued refresh.")
 		if !app.startBackgroundWork("queued status refresh", func(ctx context.Context) {
-			app.runStatusRefresh(true)
+			app.runStatusRefresh(ctx, true)
 		}) {
 			app.mu.Lock()
 			app.statusLoading = false
@@ -65,7 +74,11 @@ func (app *App) runStatusRefresh(force bool) {
 }
 
 func buildStatusResponse(force bool) StatusResponse {
-	state := loadState()
+	return buildStatusResponseContext(context.Background(), force)
+}
+
+func buildStatusResponseContext(ctx context.Context, force bool) StatusResponse {
+	state := loadStateContext(ctx)
 	dir, _ := stateDir()
 	var startupEnabled bool
 	var autoTaskEnabled bool
@@ -73,17 +86,17 @@ func buildStatusResponse(force bool) StatusResponse {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		startupEnabled = taskExists(taskStartup)
+		startupEnabled = taskExistsContext(ctx, taskStartup)
 	}()
 	go func() {
 		defer wg.Done()
-		autoTaskEnabled = taskExists(taskAutoUpdate)
+		autoTaskEnabled = taskExistsContext(ctx, taskAutoUpdate)
 	}()
 	var managers map[string]ManagerStatus
 	if force {
-		managers = detectManagersFresh()
+		managers = detectManagersFreshContext(ctx)
 	} else {
-		managers = detectManagers()
+		managers = detectManagersContext(ctx)
 	}
 	wg.Wait()
 
@@ -98,6 +111,10 @@ func buildStatusResponse(force bool) StatusResponse {
 }
 
 func (app *App) refreshStatusSync(reason string) StatusResponse {
+	return app.refreshStatusSyncContext(context.Background(), reason)
+}
+
+func (app *App) refreshStatusSyncContext(ctx context.Context, reason string) StatusResponse {
 	appLog("Status refresh started for %s.", reason)
 	app.mu.Lock()
 	app.statusLoading = true
@@ -105,7 +122,17 @@ func (app *App) refreshStatusSync(reason string) StatusResponse {
 	app.statusErr = ""
 	app.mu.Unlock()
 
-	status := buildStatusResponse(true)
+	status := buildStatusResponseContext(ctx, true)
+	if ctx.Err() != nil {
+		app.mu.Lock()
+		cached := app.status
+		app.statusLoading = false
+		app.statusQueued = false
+		app.statusErr = "status refresh cancelled: " + ctx.Err().Error()
+		app.mu.Unlock()
+		appLog("Status refresh cancelled for %s.", reason)
+		return cached
+	}
 
 	app.mu.Lock()
 	app.status = status
@@ -117,7 +144,7 @@ func (app *App) refreshStatusSync(reason string) StatusResponse {
 		app.mu.Unlock()
 		appLog("Status refresh completed; running queued refresh.")
 		if !app.startBackgroundWork("queued status refresh", func(ctx context.Context) {
-			app.runStatusRefresh(true)
+			app.runStatusRefresh(ctx, true)
 		}) {
 			app.mu.Lock()
 			app.statusLoading = false
@@ -133,6 +160,10 @@ func (app *App) refreshStatusSync(reason string) StatusResponse {
 }
 
 func (app *App) statusSnapshot() StatusResponse {
+	return app.statusSnapshotContext(context.Background())
+}
+
+func (app *App) statusSnapshotContext(ctx context.Context) StatusResponse {
 	app.mu.RLock()
 	status := app.status
 	loading := app.statusLoading
@@ -142,7 +173,7 @@ func (app *App) statusSnapshot() StatusResponse {
 	app.mu.RUnlock()
 
 	if status.StateDir == "" {
-		status.Settings = loadState()
+		status.Settings = loadStateContext(ctx)
 		status.StateDir, _ = stateDir()
 		status.Admin = isAdmin()
 	}

@@ -365,7 +365,7 @@ func TestAPIUpdateIgnoresCanceledRequestContext(t *testing.T) {
 		observedErr = ctx.Err()
 		return CommandResult{OK: true, Command: "update " + pkg.ID}
 	}
-	inventoryGetter = func() Inventory {
+	inventoryGetter = func(ctx context.Context) Inventory {
 		return Inventory{}
 	}
 	defer func() {

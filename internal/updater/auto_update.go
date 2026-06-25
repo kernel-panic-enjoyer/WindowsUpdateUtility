@@ -63,6 +63,7 @@ func runAutoUpdate() []UpdateResult {
 }
 
 func runAutoUpdateWithStore(ctx context.Context, store StateStore) []UpdateResult {
+	taskStartedAt := storeScanNow()
 	state, err := store.Load(ctx)
 	if err != nil {
 		appLog("Scheduled auto-update could not load state: %s.", err)
@@ -83,48 +84,120 @@ func runAutoUpdateWithStore(ctx context.Context, store StateStore) []UpdateResul
 		if _, err := store.Update(ctx, func(state *State) error {
 			state.LastAutoUpdateAt = utcNow()
 			state.LastAutoUpdateResults = nil
+			state.LastAutoUpdateSummary = nil
 			return nil
 		}); err != nil {
 			appLog("Could not save scheduled auto-update skip result: %s.", err)
 		}
 		return nil
 	}
-	inventory := inventoryGetter()
+	inventory := inventoryGetter(ctx)
 	// The scheduled auto-update task runs as a standalone process with no running
 	// server, so the App's background Store scan never fires here. getInventory
 	// only overlays the last published snapshot, so run a fresh transactional
 	// Store scan inline to discover currently-available Store updates before
 	// deciding what to update (matching the pre-progressive-loading behavior).
-	inventory = applyStoreTransactionalScanPipeline(ctx, state, inventory)
+	storeProjection := applyStoreTransactionalScanPipelineResult(ctx, state, inventory, taskStartedAt)
+	inventory = storeProjection.Inventory
+	summary := scheduledAutoUpdateSummaryFromProjection(storeProjection)
 	selectedSet := map[string]bool{}
+	selectedStoreKeys := map[string]string{}
 	for _, key := range selected {
 		normalized := normalizeAutoUpdatePackageKey(key)
 		if normalized != "" {
 			selectedSet[normalized] = true
+			if manager, _, err := splitPackageKey(normalized); err == nil && manager == managerStore {
+				selectedStoreKeys[normalized] = key
+			}
 		}
 	}
 	var results []UpdateResult
 	seen := map[string]bool{}
+	seenSelected := map[string]bool{}
 	for _, pkg := range inventory.Packages {
 		key := normalizedJobPackageKey(pkg)
 		if key == "" || seen[key] || !selectedSet[normalizeAutoUpdatePackageKey(key)] {
 			continue
 		}
 		seen[key] = true
+		seenSelected[normalizeAutoUpdatePackageKey(key)] = true
+		if pkg.Manager == managerStore && !storeProjection.FreshGeneration {
+			reason := scheduledStoreAutoUpdateFreshnessSkipReason(storeProjection)
+			appLog("Scheduled auto-update skipped %s because %s.", key, reason)
+			summary.addSkippedPackage(pkg, key, reason)
+			continue
+		}
 		if !packageAllowedInBulkUpdate(pkg, UpdateOptions{}) {
 			appLog("Scheduled auto-update skipped %s because it requires explicit user confirmation or does not support updates.", key)
+			if pkg.Manager == managerStore {
+				summary.addSkippedPackage(pkg, key, "Store package is not currently actionable; it needs a fresh available assessment, exact target, and supported executor")
+			}
 			continue
 		}
 		pkg.Key = key
 		results = append(results, UpdateResult{Key: key, Result: updatePackageWithMetadataContext(ctx, pkg)})
 	}
+	for normalized, original := range selectedStoreKeys {
+		if seenSelected[normalized] {
+			continue
+		}
+		summary.SkippedPackages = append(summary.SkippedPackages, ScheduledAutoUpdateSkippedPackage{
+			Key:     original,
+			Manager: managerStore,
+			Reason:  "No installed Store package matched this auto-update preference in the effective inventory",
+		})
+	}
 	if _, err := store.Update(ctx, func(state *State) error {
 		state.LastAutoUpdateAt = utcNow()
 		state.LastAutoUpdateResults = results
+		state.LastAutoUpdateSummary = &summary
 		return nil
 	}); err != nil {
 		appLog("Could not save scheduled auto-update results: %s.", err)
 	}
 	appLog("Scheduled auto-update task finished with %d result(s).", len(results))
 	return results
+}
+
+func scheduledAutoUpdateSummaryFromProjection(projection StoreInventoryProjectionResult) ScheduledAutoUpdateSummary {
+	summary := ScheduledAutoUpdateSummary{
+		StoreScan: ScheduledAutoUpdateStoreScanSummary{
+			ScanID:           projection.ScanID,
+			UsedGenerationID: projection.UsedGenerationID,
+			StartedAt:        formatStoreScanTime(projection.StartedAt),
+			CompletedAt:      formatStoreScanTime(projection.CompletedAt),
+			Published:        projection.Published,
+			CompletionStatus: string(projection.CompletionStatus),
+			FreshGeneration:  projection.FreshGeneration,
+		},
+	}
+	if projection.Error != nil {
+		summary.StoreScan.Error = sanitizeProviderDiagnostic(projection.Error.Error())
+	}
+	return summary
+}
+
+func scheduledStoreAutoUpdateFreshnessSkipReason(projection StoreInventoryProjectionResult) string {
+	if projection.Error != nil {
+		return "Store scan did not publish fresh evidence: " + sanitizeProviderDiagnostic(projection.Error.Error())
+	}
+	if projection.UsedGenerationID == "" {
+		return "no published Store scan generation is available for this scheduled run"
+	}
+	if projection.CompletedAt.IsZero() {
+		return "published Store scan generation has no completion time"
+	}
+	return "published Store scan generation did not complete after this scheduled run started"
+}
+
+func (summary *ScheduledAutoUpdateSummary) addSkippedPackage(pkg Package, key, reason string) {
+	if summary == nil {
+		return
+	}
+	summary.SkippedPackages = append(summary.SkippedPackages, ScheduledAutoUpdateSkippedPackage{
+		Key:       key,
+		Manager:   pkg.Manager,
+		PackageID: pkg.ID,
+		Reason:    sanitizeProviderDiagnostic(reason),
+	})
 }

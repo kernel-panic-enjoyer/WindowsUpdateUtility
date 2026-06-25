@@ -7,7 +7,11 @@ import (
 )
 
 func (app *App) updateJobPackages(packageKeys []string, options UpdateOptions) ([]Package, string, error) {
-	inventory, err := app.effectiveInventorySnapshot(context.Background())
+	return app.updateJobPackagesContext(context.Background(), packageKeys, options)
+}
+
+func (app *App) updateJobPackagesContext(ctx context.Context, packageKeys []string, options UpdateOptions) ([]Package, string, error) {
+	inventory, err := app.effectiveInventorySnapshot(ctx)
 	if err != nil {
 		return nil, updateJobModeSelected, err
 	}
@@ -110,6 +114,10 @@ func applyUpdateOptions(pkg *Package, options UpdateOptions) {
 }
 
 func (app *App) packageForUpdate(manager, id string) Package {
+	return app.packageForUpdateContext(context.Background(), manager, id)
+}
+
+func (app *App) packageForUpdateContext(ctx context.Context, manager, id string) Package {
 	fallback := Package{
 		Key:             packageKey(manager, id),
 		Manager:         manager,
@@ -120,7 +128,7 @@ func (app *App) packageForUpdate(manager, id string) Package {
 	requestedKey := packageKey(manager, id)
 	normalizedRequested := normalizeAutoUpdatePackageKey(requestedKey)
 
-	inventory, err := app.effectiveInventorySnapshot(context.Background())
+	inventory, err := app.effectiveInventorySnapshot(ctx)
 	if err != nil {
 		return fallback
 	}
