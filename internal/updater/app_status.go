@@ -73,10 +73,6 @@ func (app *App) runStatusRefresh(ctx context.Context, force bool) {
 	appLog("Status refresh completed.")
 }
 
-func buildStatusResponse(force bool) StatusResponse {
-	return buildStatusResponseContext(context.Background(), force)
-}
-
 func buildStatusResponseContext(ctx context.Context, force bool) StatusResponse {
 	state := loadStateContext(ctx)
 	dir, _ := stateDir()
@@ -108,10 +104,6 @@ func buildStatusResponseContext(ctx context.Context, force bool) StatusResponse 
 		AutoTaskEnabled: autoTaskEnabled,
 		Settings:        state,
 	}
-}
-
-func (app *App) refreshStatusSync(reason string) StatusResponse {
-	return app.refreshStatusSyncContext(context.Background(), reason)
 }
 
 func (app *App) refreshStatusSyncContext(ctx context.Context, reason string) StatusResponse {

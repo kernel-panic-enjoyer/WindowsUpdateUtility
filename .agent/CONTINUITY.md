@@ -35,6 +35,7 @@
 - 2026-06-24T22:58:25+02:00 [USER] Active objective: diagnose failed update job logs and fix app-side causes of false WinGet update rows or misleading failure summaries.
 - 2026-06-24T23:05:05+02:00 [USER] Active objective: add a heartbeat watchdog so the top-bar backend connection badge does not stay green after the app/server stops.
 - 2026-06-25T13:50:15+02:00 [USER] Active objective: make inventory, status, manager detection, native Store inventory, and standalone automation context-aware end to end.
+- 2026-06-25T18:14:00+02:00 [USER] Active objective: improve architectural coherence/maintainability by removing dead/legacy code and redundancy without overengineering or behavior change.
 
 [DECISIONS]
 
@@ -119,6 +120,9 @@
 - 2026-06-24T22:40:31+02:00 [CODE] Added bounded command output retention, Windows job-object process ownership, panic-safe operation job execution/finalization, bounded completed-job retention, and root shutdown cancellation for scans/jobs/refresh waits.
 - 2026-06-25T14:09:13+02:00 [CODE] Added `StoreInventoryProjectionResult`, scheduled Store scan wait/freshness gating, `LastAutoUpdateSummary`, and split App Store scan timestamps (`storeScanLastAttemptAt`, `storeScanLastPublishedAt`, `storeScanLastFailureAt`) with failed-scan retry backoff and cancellation no-retry semantics.
 
+- 2026-06-25T18:14:00+02:00 [CODE] Removed six functions with zero callers (production and test): `buildStatusResponse`, `refreshStatusSync`, and the unused no-context wrappers `detectManagersFresh`, `detectStoreCLIManager`, `detectManagersUncached`, `installPackage`; their `*Context` variants stay in use. No-context wrappers that still have callers (e.g. `runCommand`, `loadState`, `detectManager`, `getInventory`, `refreshInventorySync`) were intentionally kept.
+- 2026-06-25T18:14:00+02:00 [CODE] `runCommandContext` now collapses its four near-identical code-127 launch-failure blocks into a local `fail127` helper and drops two redundant re-logs of the command line; the distinct empty-command early return is unchanged.
+
 [DISCOVERIES]
 
 - 2026-06-22T22:49:00+02:00 [TOOL] Live read-only VP9 harness passed with direct Go WinRT inventory and Store CLI exact catalog evidence; VP9 was current at `1.2.20.0`, so destructive update execution was not run.
@@ -154,6 +158,8 @@
 - 2026-06-25T13:50:15+02:00 [CODE] Context-propagation root cause: App root/job contexts stopped at `inventoryGetter`, manager detection cache waits, read-only package-manager probes, native Store inventory, status task checks, and scheduled auto-update inventory selection; regressions now cover those cancellation paths.
 - 2026-06-25T14:09:13+02:00 [CODE] Scheduled Store auto-update root cause: `applyStoreTransactionalScanPipeline` logged failed/unpublished scans but still returned inventory overlaid with the latest older published snapshot, so Store execution could depend on evidence that predated the scheduled run.
 - 2026-06-25T14:20:18+02:00 [CODE] Package mutation coordination root cause: `packageManagerMutationMu` was process-local and `winget source update/reset` were not classified as mutations, so a scheduled task, second WebUI instance, or elevated worker could mutate package/source state concurrently.
+
+- 2026-06-25T18:14:00+02:00 [TOOL] System Go is 1.19.4 (too old for this `go 1.26` module); provisioned Go 1.26.4 into the session scratchpad SDK to build/test. `go build ./...`, `go vet ./...`, and `go test -count=1 ./internal/updater` all pass after the cleanup; gofmt clean. Race detector still blocked (cgo/gcc absent).
 
 [OUTCOMES]
 

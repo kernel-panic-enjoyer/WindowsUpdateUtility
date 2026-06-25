@@ -33,6 +33,15 @@ func runCommandContext(parent context.Context, timeout time.Duration, args ...st
 	logCommand := func(stream, message string) {
 		sessionLogs.AppendCategorized(stream, message, categories)
 	}
+	// fail127 records an internal launch failure (code 127) consistently: the
+	// process never produced its own exit code, so we synthesize one and log it.
+	fail127 := func(message string) CommandResult {
+		result.Code = 127
+		result.Stderr = message
+		logCommand("stderr", message)
+		logCommand("exit", fmt.Sprintf("%s exited with code 127", result.Command))
+		return result
+	}
 	if len(args) == 0 {
 		result.Stderr = "empty command"
 		result.Code = 127
@@ -66,11 +75,7 @@ func runCommandContext(parent context.Context, timeout time.Duration, args ...st
 
 	owner, ownerErr := newCommandProcessOwner(shouldOwnCommandProcessTree(args))
 	if ownerErr != nil {
-		result.Code = 127
-		result.Stderr = ownerErr.Error()
-		logCommand("stderr", result.Stderr)
-		logCommand("exit", fmt.Sprintf("%s exited with code 127", result.Command))
-		return result
+		return fail127(ownerErr.Error())
 	}
 	if owner != nil {
 		defer owner.Close()
@@ -83,21 +88,11 @@ func runCommandContext(parent context.Context, timeout time.Duration, args ...st
 	stderr := newBoundedOutputTail(commandResultStreamLimitBytes)
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		result.Code = 127
-		result.Stderr = err.Error()
-		logCommand("command", result.Command)
-		logCommand("stderr", result.Stderr)
-		logCommand("exit", fmt.Sprintf("%s exited with code 127", result.Command))
-		return result
+		return fail127(err.Error())
 	}
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
-		result.Code = 127
-		result.Stderr = err.Error()
-		logCommand("command", result.Command)
-		logCommand("stderr", result.Stderr)
-		logCommand("exit", fmt.Sprintf("%s exited with code 127", result.Command))
-		return result
+		return fail127(err.Error())
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -115,11 +110,7 @@ func runCommandContext(parent context.Context, timeout time.Duration, args ...st
 			logCommand("exit", fmt.Sprintf("%s cancelled before start", result.Command))
 			return result
 		}
-		result.Code = 127
-		result.Stderr = err.Error()
-		logCommand("stderr", result.Stderr)
-		logCommand("exit", fmt.Sprintf("%s exited with code 127", result.Command))
-		return result
+		return fail127(err.Error())
 	}
 	if owner != nil {
 		ownerErr = owner.Assign(cmd)
@@ -127,11 +118,7 @@ func runCommandContext(parent context.Context, timeout time.Duration, args ...st
 	if ownerErr != nil {
 		terminateStartedCommand(cmd, owner)
 		_ = cmd.Wait()
-		result.Code = 127
-		result.Stderr = ownerErr.Error()
-		logCommand("stderr", result.Stderr)
-		logCommand("exit", fmt.Sprintf("%s exited with code 127", result.Command))
-		return result
+		return fail127(ownerErr.Error())
 	}
 
 	var wg sync.WaitGroup

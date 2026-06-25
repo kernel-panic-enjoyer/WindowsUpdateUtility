@@ -76,10 +76,6 @@ func isASCIIAlphaNumeric(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
 }
 
-func installPackage(manager, id string) CommandResult {
-	return installPackageContext(context.Background(), manager, id)
-}
-
 func installPackageContext(ctx context.Context, manager, id string) CommandResult {
 	if err := validateManagerAndID(manager, id); err != nil {
 		return validationCommandResult("install", err)

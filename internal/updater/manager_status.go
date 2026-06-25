@@ -69,10 +69,6 @@ func detectManagerContext(ctx context.Context, manager string) ManagerStatus {
 	return status
 }
 
-func detectStoreCLIManager() ManagerStatus {
-	return detectStoreCLIManagerContext(context.Background())
-}
-
 func detectStoreCLIManagerContext(ctx context.Context) ManagerStatus {
 	result := runCommandContext(ctx, managerDetectionTimeout, managerCommand(managerStore, "--help")...)
 	status := ManagerStatus{
@@ -122,10 +118,6 @@ func isWingetTransientFailure(result CommandResult) bool {
 
 func detectManagers() map[string]ManagerStatus {
 	return detectManagersContext(context.Background())
-}
-
-func detectManagersFresh() map[string]ManagerStatus {
-	return detectManagersFreshContext(context.Background())
 }
 
 func detectManagersContext(ctx context.Context) map[string]ManagerStatus {
@@ -189,10 +181,6 @@ func cloneManagerStatuses(input map[string]ManagerStatus) map[string]ManagerStat
 		cloned[key] = value
 	}
 	return cloned
-}
-
-func detectManagersUncached() map[string]ManagerStatus {
-	return detectManagersUncachedContext(context.Background())
 }
 
 func detectManagersUncachedContext(ctx context.Context) map[string]ManagerStatus {
