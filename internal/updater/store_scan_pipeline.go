@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,7 +15,12 @@ import (
 const (
 	storeProviderTimeoutEnv       = "UPDATER_STORE_PROVIDER_TIMEOUT_SECONDS"
 	defaultStoreCatalogProviderID = "store-catalog-unimplemented"
+	storeMappingReuseProviderID   = "store-mapping-reuse"
 	defaultStoreProviderTimeout   = 6 * time.Minute
+	// Store PFN-to-ProductID mappings are only reused while the installed
+	// family fingerprint and Store CLI provider version still match recent
+	// evidence. Old mappings remain diagnostics but cannot authorize updates.
+	storeMappingFreshnessWindow = 14 * 24 * time.Hour
 )
 
 var (
@@ -47,9 +53,25 @@ type StoreScanPipeline struct {
 	Now               func() time.Time
 	NewScanID         func(time.Time) string
 	BeforeCommit      func(context.Context, StoreScanSnapshot) error
+	DeepExactScan     bool
+	PlanningState     *State
 
 	mu      sync.Mutex
 	running bool
+}
+
+type storeScanProviderPlan struct {
+	aggregateProviders []StoreCatalogProvider
+	exactProvider      *storeCLIExactCatalogProvider
+}
+
+type storeExactWorkPlan struct {
+	families          []StorePackagedAppFamily
+	stateCheckPFNs    map[string]bool
+	mappingReuseRun   *StoreCatalogProviderRun
+	mappingsReused    int
+	mappingsRefreshed int
+	mappingsRejected  int
 }
 
 type StoreScanResult struct {
@@ -114,6 +136,7 @@ func (pipeline *StoreScanPipeline) Run(ctx context.Context) (StoreScanResult, er
 		ScanID:           pipeline.scanID(now),
 		UserSID:          userSID,
 		StartedAt:        now,
+		Mode:             StoreScanModeOptimized,
 		WindowsVersion:   systemContext.WindowsVersion,
 		WindowsBuild:     systemContext.WindowsBuild,
 		Architecture:     systemContext.Architecture,
@@ -121,20 +144,51 @@ func (pipeline *StoreScanPipeline) Run(ctx context.Context) (StoreScanResult, er
 		ProviderHealth:   map[string]StoreProviderHealth{},
 		CompletionStatus: StoreScanRunning,
 	}
+	if pipeline.DeepExactScan {
+		scan.Mode = StoreScanModeDeep
+	}
+	ctx = withLogMetadata(ctx, logMetadata{Activity: logCategoryStoreScan, ScanID: scan.ScanID, Manager: managerStore})
 
 	inventory, inventoryRun := pipeline.collectInventory(ctx, scan)
-	providerRuns := append([]StoreCatalogProviderRun{inventoryRun}, pipeline.runCatalogProviders(ctx, scan, inventory.Families)...)
+	previousSnapshot, previousFound, err := pipeline.previousSnapshot(ctx, userSID)
+	if err != nil {
+		scan.CompletedAt = pipeline.now()
+		scan.ProviderHealth = providerHealthMap([]StoreCatalogProviderRun{inventoryRun})
+		scan.ProviderVersions = providerVersionMap([]StoreCatalogProviderRun{inventoryRun})
+		scan.CompletionStatus = scanCompletionStatus(inventory, []StoreCatalogProviderRun{inventoryRun})
+		assessments := reconcileStoreScanAssessments(scan, inventory.Families, []StoreCatalogProviderRun{inventoryRun}, nil)
+		return StoreScanResult{Scan: scan, Inventory: inventory, ProviderRuns: []StoreCatalogProviderRun{inventoryRun}, Assessments: assessments}, fmt.Errorf("could not load previous published Store assessments for hysteresis: %w", err)
+	}
+	previous := map[StoreInstalledIdentity]StorePublishedAssessment(nil)
+	if previousFound {
+		previous = previousAssessmentsFromSnapshot(previousSnapshot)
+	}
+	plan := pipeline.planCatalogProviders()
+	aggregateStarted := pipeline.now()
+	aggregateRuns := pipeline.runCatalogProviders(ctx, scan, inventory.Families, plan.aggregateProviders)
+	aggregateDuration := pipeline.now().Sub(aggregateStarted)
+	exactProviderVersion := ""
+	if plan.exactProvider != nil {
+		exactProviderVersion = plan.exactProvider.Version
+	}
+	exactPlan := pipeline.planExactWork(ctx, scan, inventory.Families, aggregateRuns, previousSnapshot, previousFound, exactProviderVersion)
+	providerRuns := []StoreCatalogProviderRun{inventoryRun}
+	providerRuns = append(providerRuns, aggregateRuns...)
+	if exactPlan.mappingReuseRun != nil {
+		providerRuns = append(providerRuns, *exactPlan.mappingReuseRun)
+	}
+	if plan.exactProvider != nil && len(exactPlan.families) > 0 {
+		exactProvider := *plan.exactProvider
+		exactProvider.StateCheckPFNs = exactPlan.stateCheckPFNs
+		exactRuns := pipeline.runCatalogProviders(ctx, scan, exactPlan.families, []StoreCatalogProvider{exactProvider})
+		providerRuns = append(providerRuns, exactRuns...)
+	}
 	scan.CompletedAt = pipeline.now()
 	scan.ProviderHealth = providerHealthMap(providerRuns)
 	scan.ProviderVersions = providerVersionMap(providerRuns)
 	scan.CompletionStatus = scanCompletionStatus(inventory, providerRuns)
-
-	previous, err := pipeline.previousAssessments(ctx, userSID)
-	if err != nil {
-		assessments := reconcileStoreScanAssessments(scan, inventory.Families, providerRuns, nil)
-		return StoreScanResult{Scan: scan, Inventory: inventory, ProviderRuns: providerRuns, Assessments: assessments}, fmt.Errorf("could not load previous published Store assessments for hysteresis: %w", err)
-	}
 	assessments := reconcileStoreScanAssessments(scan, inventory.Families, providerRuns, previous)
+	scan.Metrics = buildStoreScanMetrics(scan, inventory.Families, providerRuns, aggregateDuration, exactPlan, assessments)
 	publish := scanShouldPublish(scan, inventory)
 	snapshot := snapshotFromScanResult(scan, inventory, providerRuns, assessments, publish)
 	if pipeline.BeforeCommit != nil {
@@ -220,10 +274,9 @@ func (pipeline *StoreScanPipeline) collectInventory(ctx context.Context, scan St
 	return inventory, run
 }
 
-func (pipeline *StoreScanPipeline) runCatalogProviders(ctx context.Context, scan StoreScanGeneration, families []StorePackagedAppFamily) []StoreCatalogProviderRun {
-	providers := pipeline.CatalogProviders
+func (pipeline *StoreScanPipeline) runCatalogProviders(ctx context.Context, scan StoreScanGeneration, families []StorePackagedAppFamily, providers []StoreCatalogProvider) []StoreCatalogProviderRun {
 	if len(providers) == 0 {
-		providers = []StoreCatalogProvider{unsupportedStoreCatalogProvider{}}
+		return nil
 	}
 	timeout := pipeline.ProviderTimeout
 	if timeout <= 0 {
@@ -253,6 +306,7 @@ func (pipeline *StoreScanPipeline) runCatalogProviders(ctx context.Context, scan
 				run.Health = StoreProviderFailed
 				run.Error = runCtx.Err().Error()
 			}
+			run = attachMappingFingerprints(scan, run, families)
 			run = sanitizeCatalogProviderRun(scan, run)
 			run = synthesizeMissingProviderObservations(scan, run, families)
 			runs[index] = sanitizeCatalogProviderRun(scan, run)
@@ -299,6 +353,263 @@ func synthesizeMissingProviderObservations(scan StoreScanGeneration, run StoreCa
 			InstalledVersion: family.Primary.Version.String(),
 			Diagnostics:      diagnostics,
 		})
+	}
+	return run
+}
+
+func (pipeline *StoreScanPipeline) planCatalogProviders() storeScanProviderPlan {
+	providers := pipeline.CatalogProviders
+	if len(providers) == 0 {
+		providers = []StoreCatalogProvider{unsupportedStoreCatalogProvider{}}
+	}
+	plan := storeScanProviderPlan{}
+	for _, provider := range providers {
+		switch typed := provider.(type) {
+		case storeCLIExactCatalogProvider:
+			copied := typed
+			plan.exactProvider = &copied
+		case *storeCLIExactCatalogProvider:
+			if typed != nil {
+				copied := *typed
+				plan.exactProvider = &copied
+			}
+		default:
+			plan.aggregateProviders = append(plan.aggregateProviders, provider)
+		}
+	}
+	return plan
+}
+
+func (pipeline *StoreScanPipeline) planExactWork(ctx context.Context, scan StoreScanGeneration, families []StorePackagedAppFamily, aggregateRuns []StoreCatalogProviderRun, previousSnapshot StoreScanSnapshot, previousFound bool, exactProviderVersion string) storeExactWorkPlan {
+	plan := storeExactWorkPlan{stateCheckPFNs: map[string]bool{}}
+	byPFN := productLikeFamiliesByPFN(scan, families)
+	if pipeline.DeepExactScan {
+		for _, family := range families {
+			if !family.ProductLike || !family.Identity.Resolved() || family.Identity.UserSID != scan.UserSID {
+				continue
+			}
+			plan.families = append(plan.families, family)
+			plan.stateCheckPFNs[strings.ToLower(family.Identity.PackageFamilyName)] = true
+		}
+		return plan
+	}
+
+	state := pipeline.planningState(ctx)
+	incompleteAggregate := aggregateCoverageIncomplete(aggregateRuns)
+	reusableMappings := reusableStoreMappings(previousSnapshot, previousFound, byPFN, scan.StartedAt, exactProviderVersion)
+	positiveNeedingTargets := positiveAggregateObservationsWithoutExactTarget(scan, aggregateRuns)
+	planned := map[string]bool{}
+	for _, observation := range positiveNeedingTargets {
+		key := strings.ToLower(observation.Identity.PackageFamilyName)
+		family, ok := byPFN[key]
+		if !ok {
+			continue
+		}
+		if mapping, ok := reusableMappings[family.Identity]; ok {
+			plan.mappingsReused++
+			plan.mappingReuseRun = appendMappingReuseObservation(scan, plan.mappingReuseRun, family, mapping, observation)
+			continue
+		}
+		if previousFound {
+			plan.mappingsRejected++
+		}
+		planned[key] = true
+		plan.stateCheckPFNs[key] = true
+	}
+	if incompleteAggregate {
+		for _, family := range byPFN {
+			if !storeFamilyAutoUpdateEnabled(state, family.Identity) {
+				continue
+			}
+			key := strings.ToLower(family.Identity.PackageFamilyName)
+			planned[key] = true
+			plan.stateCheckPFNs[key] = true
+		}
+	}
+	for key := range planned {
+		if family, ok := byPFN[key]; ok {
+			plan.families = append(plan.families, family)
+		}
+	}
+	sort.Slice(plan.families, func(i, j int) bool {
+		return strings.ToLower(plan.families[i].Identity.PackageFamilyName) < strings.ToLower(plan.families[j].Identity.PackageFamilyName)
+	})
+	plan.mappingsRefreshed = len(plan.families)
+	return plan
+}
+
+func (pipeline *StoreScanPipeline) planningState(ctx context.Context) State {
+	if pipeline.PlanningState != nil {
+		return *pipeline.PlanningState
+	}
+	store, err := defaultStateStore()
+	if err != nil {
+		return defaultState()
+	}
+	state, err := store.Load(ctx)
+	if err != nil {
+		return defaultState()
+	}
+	return state
+}
+
+func productLikeFamiliesByPFN(scan StoreScanGeneration, families []StorePackagedAppFamily) map[string]StorePackagedAppFamily {
+	byPFN := map[string]StorePackagedAppFamily{}
+	for _, family := range families {
+		if family.ProductLike && family.Identity.Resolved() && family.Identity.UserSID == scan.UserSID {
+			byPFN[strings.ToLower(family.Identity.PackageFamilyName)] = family
+		}
+	}
+	return byPFN
+}
+
+func aggregateCoverageIncomplete(runs []StoreCatalogProviderRun) bool {
+	for _, run := range runs {
+		if storeCatalogProviderRequired(run.Provider) && run.Health != StoreProviderHealthy {
+			return true
+		}
+	}
+	return false
+}
+
+func positiveAggregateObservationsWithoutExactTarget(scan StoreScanGeneration, runs []StoreCatalogProviderRun) []StoreProviderObservation {
+	var positives []StoreProviderObservation
+	for _, run := range runs {
+		for _, observation := range run.Observations {
+			if observation.ScanID != scan.ScanID || observation.Identity.UserSID != scan.UserSID || observation.Kind != StoreObservationPositiveUpdateOffer || observation.Health != StoreProviderHealthy {
+				continue
+			}
+			if observation.Target != nil && observation.Target.ExactFor(observation.Identity) {
+				continue
+			}
+			positives = append(positives, observation)
+		}
+	}
+	return positives
+}
+
+func storeFamilyAutoUpdateEnabled(state State, identity StoreInstalledIdentity) bool {
+	if !identity.Resolved() || state.AutoUpdatePackages == nil {
+		return false
+	}
+	return state.AutoUpdatePackages[canonicalStoreAutoUpdateKey(identity.UserSID, identity.PackageFamilyName)]
+}
+
+func appendMappingReuseObservation(scan StoreScanGeneration, run *StoreCatalogProviderRun, family StorePackagedAppFamily, mapping VerifiedStoreIdentityMapping, source StoreProviderObservation) *StoreCatalogProviderRun {
+	provider := StoreProviderIdentity{ID: storeMappingReuseProviderID, Name: "Verified Store mapping reuse", Backend: "snapshot"}
+	if run == nil {
+		started := source.ObservedAt
+		if started.IsZero() {
+			started = scan.StartedAt
+		}
+		run = &StoreCatalogProviderRun{
+			Provider:    provider,
+			Version:     mapping.ProviderVersion,
+			StartedAt:   started,
+			CompletedAt: started,
+			Health:      StoreProviderHealthy,
+		}
+	}
+	verifiedAt := mapping.VerifiedAt
+	if verifiedAt.IsZero() {
+		verifiedAt = source.ObservedAt
+	}
+	target := &ExactStoreUpdateTarget{
+		Identity:   family.Identity,
+		Provider:   mapping.Provider,
+		ProductID:  mapping.ProductID,
+		UpdateID:   family.Identity.PackageFamilyName,
+		Verified:   true,
+		VerifiedBy: storeProviderKey(mapping.Provider),
+		VerifiedAt: verifiedAt,
+	}
+	reusedMapping := mapping
+	reusedMapping.ScanID = scan.ScanID
+	reusedMapping.Evidence = "reused verified Store Product ID mapping for aggregate positive evidence"
+	run.Observations = append(run.Observations, StoreProviderObservation{
+		Provider:         provider,
+		Health:           StoreProviderHealthy,
+		Kind:             StoreObservationPositiveUpdateOffer,
+		Identity:         family.Identity,
+		ScanID:           scan.ScanID,
+		ObservedAt:       source.ObservedAt,
+		InstalledVersion: firstNonEmpty(source.InstalledVersion, family.Primary.Version.String()),
+		AvailableVersion: source.AvailableVersion,
+		CatalogVersion:   source.CatalogVersion,
+		Target:           target,
+		Diagnostics:      "Aggregate Store update evidence reused a fresh verified PFN/Product ID mapping.",
+	})
+	run.Mappings = append(run.Mappings, reusedMapping)
+	return run
+}
+
+func reusableStoreMappings(snapshot StoreScanSnapshot, found bool, families map[string]StorePackagedAppFamily, now time.Time, currentProviderVersion string) map[StoreInstalledIdentity]VerifiedStoreIdentityMapping {
+	reusable := map[StoreInstalledIdentity]VerifiedStoreIdentityMapping{}
+	if !found || !snapshot.Published || snapshot.RecoveredFromFallback {
+		return reusable
+	}
+	for _, run := range snapshot.ProviderRuns {
+		for _, mapping := range run.Mappings {
+			family, ok := families[strings.ToLower(mapping.InstalledIdentity.PackageFamilyName)]
+			if !ok || !mappingReusableForFamily(mapping, run.Version, family, now, currentProviderVersion) {
+				continue
+			}
+			reusable[mapping.InstalledIdentity] = mapping
+		}
+	}
+	return reusable
+}
+
+func mappingReusableForFamily(mapping VerifiedStoreIdentityMapping, runVersion string, family StorePackagedAppFamily, now time.Time, currentProviderVersion string) bool {
+	if mapping.ProductID == "" || !mapping.InstalledIdentity.Equal(family.Identity) || mapping.VerifiedAt.IsZero() {
+		return false
+	}
+	if now.IsZero() {
+		now = storeScanNow()
+	}
+	if now.Sub(mapping.VerifiedAt) > storeMappingFreshnessWindow {
+		return false
+	}
+	providerVersion := firstNonEmpty(mapping.ProviderVersion, runVersion)
+	if providerVersion == "" || strings.TrimSpace(mapping.ProviderVersion) == "" || strings.TrimSpace(currentProviderVersion) == "" || mapping.Provider.Key() == "" {
+		return false
+	}
+	if !strings.EqualFold(providerVersion, strings.TrimSpace(currentProviderVersion)) {
+		return false
+	}
+	if !strings.EqualFold(mapping.IdentityName, family.Primary.IdentityName) {
+		return false
+	}
+	if mapping.PublisherID != "" && family.Primary.PublisherID != "" && !strings.EqualFold(mapping.PublisherID, family.Primary.PublisherID) {
+		return false
+	}
+	if !strings.EqualFold(mapping.ProcessorArchitecture, family.Primary.ProcessorArchitecture) {
+		return false
+	}
+	return mapping.ProductLike == family.ProductLike
+}
+
+func attachMappingFingerprints(scan StoreScanGeneration, run StoreCatalogProviderRun, families []StorePackagedAppFamily) StoreCatalogProviderRun {
+	byPFN := productLikeFamiliesByPFN(scan, families)
+	for index := range run.Mappings {
+		mapping := &run.Mappings[index]
+		family, ok := byPFN[strings.ToLower(mapping.InstalledIdentity.PackageFamilyName)]
+		if !ok {
+			continue
+		}
+		if mapping.IdentityName == "" {
+			mapping.IdentityName = family.Primary.IdentityName
+		}
+		if mapping.PublisherID == "" {
+			mapping.PublisherID = family.Primary.PublisherID
+		}
+		if mapping.ProcessorArchitecture == "" {
+			mapping.ProcessorArchitecture = family.Primary.ProcessorArchitecture
+		}
+		mapping.ProductLike = family.ProductLike
+		if mapping.ProviderVersion == "" {
+			mapping.ProviderVersion = run.Version
+		}
 	}
 	return run
 }
@@ -438,10 +749,67 @@ func (pipeline *StoreScanPipeline) previousAssessments(ctx context.Context, user
 	return previousAssessmentsFromSnapshot(snapshot), nil
 }
 
+func (pipeline *StoreScanPipeline) previousSnapshot(ctx context.Context, userSID string) (StoreScanSnapshot, bool, error) {
+	snapshot, ok, err := pipeline.Repository.LoadLatestPublishedSnapshot(ctx, userSID)
+	if err != nil || !ok {
+		return StoreScanSnapshot{}, false, err
+	}
+	return snapshot, true, nil
+}
+
+func buildStoreScanMetrics(scan StoreScanGeneration, families []StorePackagedAppFamily, providerRuns []StoreCatalogProviderRun, aggregateDuration time.Duration, exactPlan storeExactWorkPlan, assessments []StorePublishedAssessment) StoreScanMetrics {
+	metrics := StoreScanMetrics{
+		ProductLikeFamilyCount:  productLikeFamilyCount(families),
+		AggregateDurationMillis: aggregateDuration.Milliseconds(),
+		ExactChecksPlanned:      len(exactPlan.stateCheckPFNs),
+		MappingsReused:          exactPlan.mappingsReused,
+		MappingsRefreshed:       exactPlan.mappingsRefreshed,
+		MappingsRejected:        exactPlan.mappingsRejected,
+		CommandCountByFamily:    map[string]int{},
+		ResultingStateCount:     map[string]int{},
+		TotalDurationMillis:     scan.CompletedAt.Sub(scan.StartedAt).Milliseconds(),
+	}
+	if metrics.TotalDurationMillis < 0 {
+		metrics.TotalDurationMillis = 0
+	}
+	for _, run := range providerRuns {
+		switch run.Provider.Key() {
+		case storeCLIExactProviderID:
+			metrics.ExactProviderRunCount++
+			for _, observation := range run.Observations {
+				if observation.Health == StoreProviderHealthy && (observation.Kind == StoreObservationPositiveUpdateOffer || observation.Kind == StoreObservationAuthoritativeNegative || observation.Kind == StoreObservationNewerCatalogNoApplicableInstaller) {
+					metrics.ExactChecksCompleted++
+				}
+			}
+		case storeMappingReuseProviderID:
+			metrics.MappingReuseProviderRunCount++
+		default:
+			if run.Provider.Key() != "store-current-user-inventory" {
+				metrics.AggregateProviderRunCount++
+			}
+		}
+		if run.Health == StoreProviderFailed && strings.Contains(strings.ToLower(run.Error), "timeout") {
+			metrics.TimeoutCount++
+		}
+	}
+	metrics.CommandCountByFamily["store-show"] = len(exactPlan.families)
+	metrics.CommandCountByFamily["store-update-targeted"] = len(exactPlan.stateCheckPFNs)
+	for _, assessment := range assessments {
+		metrics.ResultingStateCount[string(assessment.State)]++
+	}
+	if len(metrics.CommandCountByFamily) == 0 {
+		metrics.CommandCountByFamily = nil
+	}
+	if len(metrics.ResultingStateCount) == 0 {
+		metrics.ResultingStateCount = nil
+	}
+	return metrics
+}
+
 func reconcileStoreScanAssessments(scan StoreScanGeneration, families []StorePackagedAppFamily, providerRuns []StoreCatalogProviderRun, previous map[StoreInstalledIdentity]StorePublishedAssessment) []StorePublishedAssessment {
 	required := requiredStoreCatalogProviders(providerRuns)
 	observations := allStoreProviderObservations(providerRuns)
-	verifiedProductIDs := verifiedProductIDsByIdentity(providerRuns, scan)
+	verifiedProductIDs, verifiedProductIDConflicts := verifiedProductIDsByIdentity(providerRuns, scan)
 	assessments := make([]StorePublishedAssessment, 0, len(families))
 	for _, family := range families {
 		if !family.ProductLike {
@@ -470,6 +838,12 @@ func reconcileStoreScanAssessments(scan StoreScanGeneration, families []StorePac
 				Applicability:              previousAssessment.Applicability,
 			})
 			continue
+		}
+		if conflictReason := verifiedProductIDConflicts[identity]; conflictReason != "" && assessment.State == StoreUpdateAvailable {
+			assessment.State = StoreUpdateConflict
+			assessment.Reason = conflictReason
+			assessment.Target = nil
+			assessment.AvailableVersion = ""
 		}
 		observedAt := scan.CompletedAt
 		if observedAt.IsZero() {
@@ -517,10 +891,11 @@ func hasCurrentHealthyRetraction(scan StoreScanGeneration, identity StoreInstall
 	return false
 }
 
-func verifiedProductIDsByIdentity(providerRuns []StoreCatalogProviderRun, scan StoreScanGeneration) map[StoreInstalledIdentity]string {
+func verifiedProductIDsByIdentity(providerRuns []StoreCatalogProviderRun, scan StoreScanGeneration) (map[StoreInstalledIdentity]string, map[StoreInstalledIdentity]string) {
 	type productIDState struct {
 		productID string
 		conflict  bool
+		values    []string
 	}
 	states := map[StoreInstalledIdentity]productIDState{}
 	for _, run := range providerRuns {
@@ -531,19 +906,25 @@ func verifiedProductIDsByIdentity(providerRuns []StoreCatalogProviderRun, scan S
 			state := states[mapping.InstalledIdentity]
 			if state.productID == "" {
 				state.productID = mapping.ProductID
+				state.values = append(state.values, storeProviderKey(mapping.Provider)+"="+sanitizeProviderDiagnostic(mapping.ProductID))
 			} else if !strings.EqualFold(state.productID, mapping.ProductID) {
 				state.conflict = true
+				state.values = append(state.values, storeProviderKey(mapping.Provider)+"="+sanitizeProviderDiagnostic(mapping.ProductID))
 			}
 			states[mapping.InstalledIdentity] = state
 		}
 	}
 	verified := map[StoreInstalledIdentity]string{}
+	conflicts := map[StoreInstalledIdentity]string{}
 	for identity, state := range states {
 		if state.productID != "" && !state.conflict {
 			verified[identity] = state.productID
+		} else if state.conflict {
+			sort.Strings(state.values)
+			conflicts[identity] = "verified Store product mapping conflict: product_id " + strings.Join(state.values, ", ")
 		}
 	}
-	return verified
+	return verified, conflicts
 }
 
 func requiredStoreCatalogProviders(runs []StoreCatalogProviderRun) []StoreProviderIdentity {
@@ -562,7 +943,7 @@ func requiredStoreCatalogProviders(runs []StoreCatalogProviderRun) []StoreProvid
 
 func storeCatalogProviderRequired(provider StoreProviderIdentity) bool {
 	switch provider.Key() {
-	case storeCLIExactProviderID, wingetMSStoreExactProviderID:
+	case storeCLIExactProviderID, wingetMSStoreExactProviderID, storeMappingReuseProviderID:
 		return false
 	case storeCLIUpdatesProviderID:
 		return true

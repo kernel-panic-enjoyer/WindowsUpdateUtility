@@ -25,8 +25,19 @@ func acquireCancellableWindowsNamedMutex(ctx context.Context, name string, attri
 	runtime.LockOSThread()
 	handle, err := windows.CreateMutex(attributes, false, namePtr)
 	if err != nil && (handle == 0 || err != windows.ERROR_ALREADY_EXISTS) {
-		runtime.UnlockOSThread()
-		return nil, fmt.Errorf("could not create named mutex %s: %w", name, err)
+		if err == windows.ERROR_ACCESS_DENIED {
+			opened, openErr := windows.OpenMutex(windows.SYNCHRONIZE|windows.MUTEX_MODIFY_STATE, false, namePtr)
+			if openErr == nil {
+				handle = opened
+				err = nil
+			} else {
+				runtime.UnlockOSThread()
+				return nil, fmt.Errorf("could not create or open named mutex %s: create: %w; open: %w", name, err, openErr)
+			}
+		} else {
+			runtime.UnlockOSThread()
+			return nil, fmt.Errorf("could not create named mutex %s: %w", name, err)
+		}
 	}
 	if handle == 0 {
 		runtime.UnlockOSThread()

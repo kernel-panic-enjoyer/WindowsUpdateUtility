@@ -17,6 +17,10 @@ const (
 	// and an elevated helper may run under administrator credentials.
 	packageMutationMutexName            = `Global\WindowsUpdaterWebUIPackageMutation`
 	packageMutationMutexNameOverrideEnv = "UPDATER_PACKAGE_MUTATION_MUTEX_NAME"
+	// Authenticated Users receive only SYNCHRONIZE|MUTEX_MODIFY_STATE so a
+	// standard WebUI, scheduled task, and alternate-admin worker can wait on and
+	// release the same machine-wide lock without granting descriptor control.
+	packageMutationMutexSDDL = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x00100001;;;AU)"
 )
 
 func acquirePackageMutationProcessLock(ctx context.Context, onWait func()) (func(), error) {
@@ -37,11 +41,7 @@ func packageMutationProcessMutexName() string {
 }
 
 func packageMutationMutexSecurityAttributes() (*windows.SecurityAttributes, func(), error) {
-	userSID, err := currentUserSID()
-	if err != nil {
-		return nil, func() {}, err
-	}
-	descriptor, err := windows.SecurityDescriptorFromString("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;" + userSID + ")")
+	descriptor, err := windows.SecurityDescriptorFromString(packageMutationMutexSecurityDescriptorString())
 	if err != nil {
 		return nil, func() {}, err
 	}
@@ -50,4 +50,8 @@ func packageMutationMutexSecurityAttributes() (*windows.SecurityAttributes, func
 		SecurityDescriptor: descriptor,
 	}
 	return attributes, func() {}, nil
+}
+
+func packageMutationMutexSecurityDescriptorString() string {
+	return packageMutationMutexSDDL
 }

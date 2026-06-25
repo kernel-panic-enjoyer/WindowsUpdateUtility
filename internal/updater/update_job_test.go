@@ -70,7 +70,7 @@ func TestUpdateJobStatusReturnsIndependentSlices(t *testing.T) {
 func TestUpdateJobRejectsSelectedUnknownVersionPackage(t *testing.T) {
 	app := testUpdateJobApp(t)
 	_, err := app.startUpdateJob([]string{"winget:Vendor.Unknown"})
-	if err == nil || !strings.Contains(err.Error(), "requires an explicit global unknown-version update choice") {
+	if err == nil || !strings.Contains(err.Error(), "global unknown-version override") {
 		t.Fatalf("expected selected unknown-version package to be rejected, got %v", err)
 	}
 }
@@ -78,7 +78,7 @@ func TestUpdateJobRejectsSelectedUnknownVersionPackage(t *testing.T) {
 func TestUpdateJobRejectsSelectedStorePackageWithoutAssessment(t *testing.T) {
 	app := testUpdateJobApp(t)
 	_, _, err := app.updateJobPackages([]string{packageKey(managerStore, "Missing.Store_abc123")}, UpdateOptions{})
-	if err == nil || !strings.Contains(err.Error(), "has no exact verified Store update target") {
+	if err == nil || !strings.Contains(err.Error(), "Store state is unknown") {
 		t.Fatalf("expected selected Store package without assessment to be rejected, got %v", err)
 	}
 }

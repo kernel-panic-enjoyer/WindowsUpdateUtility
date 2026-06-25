@@ -30,6 +30,7 @@ const operationJobRecentHistoryLimit = 25
 
 type OperationJobStatus struct {
 	JobID               string         `json:"job_id,omitempty"`
+	Revision            int64          `json:"revision,omitempty"`
 	Type                string         `json:"type,omitempty"`
 	Mode                string         `json:"mode,omitempty"`
 	State               string         `json:"state"`
@@ -87,6 +88,7 @@ func (app *App) startOperationJobWithPackageSnapshot(jobType, mode string, total
 		run: run,
 		status: OperationJobStatus{
 			JobID:               fmt.Sprintf("job-%d", app.jobSeq),
+			Revision:            1,
 			Type:                jobType,
 			Mode:                mode,
 			State:               jobStateQueued,
@@ -114,7 +116,8 @@ func (app *App) startOperationJobWithPackageSnapshot(jobType, mode string, total
 			job.status.State = jobStateCancelled
 			job.status.FinishedAt = utcNow()
 			job.status.Notice = "Job cancelled by shutdown."
-			job.status.Packages = nil
+			compactTerminalOperationJobStatus(&job.status)
+			job.status.Revision++
 			app.jobsMu.Unlock()
 		}
 	}
@@ -145,7 +148,8 @@ func (app *App) runOperationJobQueue(queueCtx context.Context) {
 				candidate.status.State = jobStateCancelled
 				candidate.status.Running = false
 				candidate.status.FinishedAt = utcNow()
-				candidate.status.Packages = nil
+				compactTerminalOperationJobStatus(&candidate.status)
+				candidate.status.Revision++
 				continue
 			}
 			if queueCtx.Err() != nil {
@@ -154,7 +158,8 @@ func (app *App) runOperationJobQueue(queueCtx context.Context) {
 				candidate.status.Running = false
 				candidate.status.Notice = "Job cancelled by shutdown."
 				candidate.status.FinishedAt = utcNow()
-				candidate.status.Packages = nil
+				compactTerminalOperationJobStatus(&candidate.status)
+				candidate.status.Revision++
 				continue
 			}
 			job = candidate
@@ -170,10 +175,12 @@ func (app *App) runOperationJobQueue(queueCtx context.Context) {
 		job.status.State = jobStateRunning
 		job.status.Running = true
 		job.status.StartedAt = utcNow()
+		job.status.Revision++
 		status := cloneOperationJobStatus(job.status)
 		app.jobsMu.Unlock()
 
-		appLog("Job %s started for %s.", status.JobID, status.Type)
+		ctx = withLogMetadata(ctx, logMetadata{JobID: status.JobID, JobType: status.Type})
+		appLogContext(ctx, "Job %s started for %s.", status.JobID, status.Type)
 		recovered := runOperationJobSafely(ctx, job)
 		cancel()
 		if recovered != nil {
@@ -201,13 +208,14 @@ func (app *App) runOperationJobQueue(queueCtx context.Context) {
 		if job.status.FinishedAt == "" {
 			job.status.FinishedAt = utcNow()
 		}
-		if operationJobComplete(job.status) && job.status.Type != jobTypeUpdate && job.status.Type != jobTypeUpdateAll {
-			job.status.Packages = nil
+		if operationJobComplete(job.status) {
+			compactTerminalOperationJobStatus(&job.status)
 		}
+		job.status.Revision++
 		finished := cloneOperationJobStatus(job.status)
 		app.pruneOperationJobsLocked()
 		app.jobsMu.Unlock()
-		appLog("Job %s finished with state %s.", finished.JobID, finished.State)
+		appLogContext(ctx, "Job %s finished with state %s.", finished.JobID, finished.State)
 	}
 }
 
@@ -244,6 +252,28 @@ func operationJobHasFailures(status OperationJobStatus) bool {
 	return false
 }
 
+func compactTerminalOperationJobStatus(status *OperationJobStatus) {
+	if status == nil || !operationJobComplete(*status) {
+		return
+	}
+	status.Packages = nil
+	if status.Result != nil {
+		result := compactCommandResult(*status.Result, terminalCommandResultStreamBytes, maxCommandResultCommandBytes)
+		status.Result = &result
+	}
+	for i := range status.Results {
+		status.Results[i].Result = compactCommandResult(status.Results[i].Result, terminalCommandResultStreamBytes, maxCommandResultCommandBytes)
+	}
+	if status.Scan != nil {
+		status.Scan.NewApps = nil
+		status.Scan.RemovedApps = nil
+		if status.Scan.WingetResult != nil {
+			result := compactCommandResult(*status.Scan.WingetResult, terminalCommandResultStreamBytes, maxCommandResultCommandBytes)
+			status.Scan.WingetResult = &result
+		}
+	}
+}
+
 func cloneOperationJobStatus(status OperationJobStatus) OperationJobStatus {
 	status.PackageKeys = append([]string(nil), status.PackageKeys...)
 	status.Packages = append([]Package(nil), status.Packages...)
@@ -263,6 +293,7 @@ func (app *App) mutateOperationJob(job *OperationJob, mutate func(*OperationJobS
 	app.jobsMu.Lock()
 	defer app.jobsMu.Unlock()
 	mutate(&job.status)
+	job.status.Revision++
 	return cloneOperationJobStatus(job.status)
 }
 
@@ -345,7 +376,8 @@ func (app *App) cancelOperationJob(id string) (OperationJobStatus, bool) {
 			job.status.State = jobStateCancelled
 			job.status.Running = false
 			job.status.FinishedAt = utcNow()
-			job.status.Packages = nil
+			compactTerminalOperationJobStatus(&job.status)
+			job.status.Revision++
 			job.status.Notice = "Job cancelled."
 		}
 		appLog("Job %s cancellation requested.", job.status.JobID)
@@ -370,7 +402,8 @@ func (app *App) cancelOperationJobsForShutdown() {
 			job.status.State = jobStateCancelled
 			job.status.Running = false
 			job.status.FinishedAt = utcNow()
-			job.status.Packages = nil
+			compactTerminalOperationJobStatus(&job.status)
+			job.status.Revision++
 		}
 	}
 	app.pruneOperationJobsLocked()

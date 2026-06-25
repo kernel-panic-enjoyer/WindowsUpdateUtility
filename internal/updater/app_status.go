@@ -102,7 +102,7 @@ func buildStatusResponseContext(ctx context.Context, force bool) StatusResponse 
 		Managers:        managers,
 		StartupEnabled:  startupEnabled,
 		AutoTaskEnabled: autoTaskEnabled,
-		Settings:        state,
+		Settings:        statusSettingsFromState(state),
 	}
 }
 
@@ -165,7 +165,7 @@ func (app *App) statusSnapshotContext(ctx context.Context) StatusResponse {
 	app.mu.RUnlock()
 
 	if status.StateDir == "" {
-		status.Settings = loadStateContext(ctx)
+		status.Settings = statusSettingsFromState(loadStateContext(ctx))
 		status.StateDir, _ = stateDir()
 		status.Admin = isAdmin()
 	}
@@ -177,6 +177,18 @@ func (app *App) statusSnapshotContext(ctx context.Context) StatusResponse {
 	mergeStatusInventoryManagerDetails(&status, inventoryManagers)
 	status.AsyncSnapshot = asyncSnapshot(loading, fetchedAt, errText)
 	return status
+}
+
+func statusSettingsFromState(state State) StatusSettings {
+	return StatusSettings{
+		AutoUpdateGlobal:      state.AutoUpdateGlobal,
+		AutoUpdatePackages:    trimBoolMap(state.AutoUpdatePackages, maxStateAutoUpdatePackages),
+		Theme:                 state.Theme,
+		LastScanAt:            state.LastScanAt,
+		LastAutoUpdateAt:      state.LastAutoUpdateAt,
+		LastAutoUpdateResults: trimUpdateResultSummaries(state.LastAutoUpdateResults),
+		LastAutoUpdateSummary: state.LastAutoUpdateSummary,
+	}
 }
 
 func mergeStatusInventoryManagerDetails(status *StatusResponse, inventoryManagers map[string]ManagerStatus) {

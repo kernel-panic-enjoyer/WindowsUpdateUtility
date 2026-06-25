@@ -1,0 +1,82 @@
+name: Windows CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-smoke:
+    runs-on: windows-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Formatting check
+        shell: pwsh
+        run: |
+          $files = gofmt -l (Get-ChildItem -Recurse -Filter *.go -File | Where-Object { $_.FullName -notmatch '\\dist\\|\\.git\\' } | ForEach-Object FullName)
+          if ($files) {
+            $files
+            throw 'Go files need formatting.'
+          }
+
+      - name: Go tests
+        run: go test -count=1 ./...
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: JavaScript syntax
+        run: node --check internal/updater/assets/ui.js
+
+      - name: Windows process-tree helper test
+        run: go test -count=1 ./internal/updater -run TestWindowsCommandProcessOwnerTerminatesGrandchild
+
+      - name: StateStore helper-process test
+        run: go test -count=1 ./internal/updater -run TestStateStoreHelperProcessesUpdateDifferentFields
+
+      - name: Package mutation helper-process test
+        run: go test -count=1 ./internal/updater -run TestPackageMutationCoordinatorHelperProcess
+
+      - name: Build workspace
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1
+
+      - name: Distribution smoke
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\dev\scripts\Smoke-Distribution.ps1 -Exe .\dist\WindowsUpdaterWebUI.exe
+
+      - name: Assert no SQLite dependency
+        shell: pwsh
+        run: |
+          $deps = go list -deps ./...
+          if ($deps -match 'modernc\.org/sqlite|github\.com/mattn/go-sqlite3') {
+            throw 'SQLite dependency found in default module graph.'
+          }
+          $metadata = go version -m .\dist\WindowsUpdaterWebUI.exe
+          if ($metadata -match 'modernc\.org/sqlite|github\.com/mattn/go-sqlite3') {
+            throw 'SQLite dependency found in built executable metadata.'
+          }
+
+      - name: Upload executable and metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: WindowsUpdaterWebUI-windows
+          path: |
+            dist/WindowsUpdaterWebUI.exe
+            dist/WindowsUpdaterWebUI.metadata.json

@@ -43,7 +43,7 @@ func (app *App) serveAPI(w http.ResponseWriter, r *http.Request) {
 		if !requireMethod(w, r, http.MethodGet) {
 			return
 		}
-		data, err := buildLogArchive(sessionLogs.Snapshot())
+		data, err := buildLogArchiveFromSnapshot(sessionLogs.ExportSnapshot())
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -72,6 +72,8 @@ func (app *App) serveAPI(w http.ResponseWriter, r *http.Request) {
 		app.handleInventoryRefreshAPI(w, r)
 	case "/api/jobs/status":
 		app.handleJobStatusAPI(w, r)
+	case "/api/jobs/log":
+		app.handleJobLogAPI(w, r)
 	case "/api/jobs":
 		app.handleJobsAPI(w, r)
 	case "/api/jobs/cancel":
@@ -82,16 +84,11 @@ func (app *App) serveAPI(w http.ResponseWriter, r *http.Request) {
 		if !requireMethod(w, r, http.MethodGet) {
 			return
 		}
-		var since int64
-		if raw := r.URL.Query().Get("since"); raw != "" {
-			parsed, err := strconv.ParseInt(raw, 10, 64)
-			if err != nil {
-				writeAPIError(w, http.StatusBadRequest, "since must be an integer")
-				return
-			}
-			since = parsed
+		since, ok := parseLogSince(w, r)
+		if !ok {
+			return
 		}
-		writeJSON(w, http.StatusOK, logsAPIResponse{Entries: sessionLogs.Since(since), LatestID: sessionLogs.LatestID()})
+		writeJSON(w, http.StatusOK, logsAPIResponseFromQuery(sessionLogs.Query(since)))
 	case "/api/search":
 		if !requireMethod(w, r, http.MethodGet) {
 			return
@@ -124,6 +121,30 @@ func (app *App) serveAPI(w http.ResponseWriter, r *http.Request) {
 		app.handleThemeSettingsAPI(w, r)
 	default:
 		http.NotFound(w, r)
+	}
+}
+
+func parseLogSince(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	var since int64
+	if raw := r.URL.Query().Get("since"); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			writeAPIError(w, http.StatusBadRequest, "since must be an integer")
+			return 0, false
+		}
+		since = parsed
+	}
+	return since, true
+}
+
+func logsAPIResponseFromQuery(query LogQueryResult) logsAPIResponse {
+	return logsAPIResponse{
+		Entries:      query.Entries,
+		OldestID:     query.OldestID,
+		LatestID:     query.LatestID,
+		DroppedCount: query.DroppedCount,
+		DroppedBytes: query.DroppedBytes,
+		GapDetected:  query.GapDetected,
 	}
 }
 

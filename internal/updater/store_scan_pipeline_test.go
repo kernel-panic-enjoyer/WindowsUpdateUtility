@@ -223,6 +223,279 @@ func TestStoreScanPipelineRecordsSystemContext(t *testing.T) {
 	}
 }
 
+func TestOptimizedStoreScanHealthyAggregateNoUpdatesAvoidsExactChecks(t *testing.T) {
+	restoreAvailable := replacePackageActionManagerAvailable(func(manager string) bool {
+		return manager == managerStore
+	})
+	defer restoreAvailable()
+
+	store := newTestStoreScanRepository(t)
+	userSID := "S-1-5-21-optimized-no-updates"
+	pfns := []string{
+		"Microsoft.VP9VideoExtensions_8wekyb3d8bbwe",
+		"OpenAI.Codex_2p2nqsd0c76g0",
+	}
+	counts := map[string]int{}
+	pipeline := newMultiFamilyStoreScanPipeline(store, userSID, pfns, []StoreCatalogProvider{
+		countingStoreCLIExactProvider(t, counts, map[string]string{
+			pfns[0]: "9N4D0MSMP0PT",
+			pfns[1]: "9NCODEX",
+		}, nil),
+		storeCLIUpdatesCatalogProvider{
+			Version: "store-cli-test-v1",
+			Run: func(ctx context.Context, timeout time.Duration, args ...string) CommandResult {
+				counts["store-updates"]++
+				return CommandResult{OK: true, Command: strings.Join(args, " "), Stdout: "No updates found"}
+			},
+		},
+	})
+	restoreSID := replaceStoreScanSID(userSID)
+	defer restoreSID()
+
+	result, err := pipeline.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts["store-show"] != 0 || counts["store-update-targeted"] != 0 {
+		t.Fatalf("optimized no-update scan ran exact work: counts=%#v", counts)
+	}
+	if result.Scan.Metrics.ExactChecksPlanned != 0 || result.Scan.Metrics.CommandCountByFamily["store-show"] != 0 {
+		t.Fatalf("scan metrics reported exact work for complete no-update aggregate: %#v", result.Scan.Metrics)
+	}
+	for _, assessment := range result.Assessments {
+		if assessment.State != StoreUpdateCurrent {
+			t.Fatalf("complete aggregate no-update should project current assessments: %#v", result.Assessments)
+		}
+	}
+}
+
+func TestOptimizedStoreScanVP9AggregatePositiveReusesCachedMapping(t *testing.T) {
+	restoreAvailable := replacePackageActionManagerAvailable(func(manager string) bool {
+		return manager == managerStore
+	})
+	defer restoreAvailable()
+
+	store := newTestStoreScanRepository(t)
+	userSID := "S-1-5-21-vp9-reuse"
+	pfn := "Microsoft.VP9VideoExtensions_8wekyb3d8bbwe"
+	productID := "9N4D0MSMP0PT"
+	base := time.Date(2026, 6, 25, 8, 0, 0, 0, time.UTC)
+	persistPublishedMappingSnapshot(t, store, userSID, pfn, productID, "store-cli-test-v1", base)
+	counts := map[string]int{}
+	pipeline := newMultiFamilyStoreScanPipeline(store, userSID, []string{pfn}, []StoreCatalogProvider{
+		countingStoreCLIExactProvider(t, counts, map[string]string{pfn: productID}, map[string]string{pfn: "Update available"}),
+		positiveAggregateWithoutTargetProvider(pfn, "1.2.13.0", "1.2.20.0"),
+	})
+	pipeline.Now = fixedPipelineTimes(base.Add(time.Hour), base.Add(time.Hour+time.Second), base.Add(time.Hour+2*time.Second), base.Add(time.Hour+3*time.Second))
+	restoreSID := replaceStoreScanSID(userSID)
+	defer restoreSID()
+
+	result, err := pipeline.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts["store-show"] != 0 || counts["store-update-targeted"] != 0 {
+		t.Fatalf("valid cached mapping should avoid exact Store CLI refresh: counts=%#v", counts)
+	}
+	got := result.Assessments[0]
+	if got.State != StoreUpdateAvailable || got.StoreProductID != productID || !got.ExactActionTargetAvailable {
+		t.Fatalf("cached mapping was not reused to make aggregate positive actionable: %#v", got)
+	}
+	if result.Scan.Metrics.MappingsReused != 1 || result.Scan.Metrics.MappingsRefreshed != 0 {
+		t.Fatalf("unexpected mapping reuse metrics: %#v", result.Scan.Metrics)
+	}
+}
+
+func TestOptimizedStoreScanVP9AggregatePositiveRefreshesExpiredMapping(t *testing.T) {
+	restoreAvailable := replacePackageActionManagerAvailable(func(manager string) bool {
+		return manager == managerStore
+	})
+	defer restoreAvailable()
+
+	store := newTestStoreScanRepository(t)
+	userSID := "S-1-5-21-vp9-expired"
+	pfn := "Microsoft.VP9VideoExtensions_8wekyb3d8bbwe"
+	productID := "9N4D0MSMP0PT"
+	base := time.Date(2026, 6, 25, 8, 0, 0, 0, time.UTC)
+	persistPublishedMappingSnapshot(t, store, userSID, pfn, productID, "store-cli-test-v1", base.Add(-storeMappingFreshnessWindow-24*time.Hour))
+	counts := map[string]int{}
+	pipeline := newMultiFamilyStoreScanPipeline(store, userSID, []string{pfn}, []StoreCatalogProvider{
+		countingStoreCLIExactProvider(t, counts, map[string]string{pfn: productID}, map[string]string{pfn: "Update available"}),
+		positiveAggregateWithoutTargetProvider(pfn, "1.2.13.0", "1.2.20.0"),
+	})
+	pipeline.Now = fixedPipelineTimes(base, base.Add(time.Second), base.Add(2*time.Second), base.Add(3*time.Second))
+	restoreSID := replaceStoreScanSID(userSID)
+	defer restoreSID()
+
+	result, err := pipeline.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts["store-show"] != 1 || counts["store-update-targeted"] != 1 {
+		t.Fatalf("expired cached mapping should force one exact refresh and state check: counts=%#v", counts)
+	}
+	got := result.Assessments[0]
+	if got.State != StoreUpdateAvailable || got.StoreProductID != productID || !got.ExactActionTargetAvailable {
+		t.Fatalf("refreshed mapping did not produce actionable positive: %#v", got)
+	}
+	if result.Scan.Metrics.MappingsRejected == 0 || result.Scan.Metrics.MappingsRefreshed != 1 {
+		t.Fatalf("expired mapping rejection/refresh metrics missing: %#v", result.Scan.Metrics)
+	}
+}
+
+func TestOptimizedStoreScanProviderVersionInvalidatesCachedMapping(t *testing.T) {
+	restoreAvailable := replacePackageActionManagerAvailable(func(manager string) bool {
+		return manager == managerStore
+	})
+	defer restoreAvailable()
+
+	store := newTestStoreScanRepository(t)
+	userSID := "S-1-5-21-vp9-version-change"
+	pfn := "Microsoft.VP9VideoExtensions_8wekyb3d8bbwe"
+	productID := "9N4D0MSMP0PT"
+	base := time.Date(2026, 6, 25, 8, 0, 0, 0, time.UTC)
+	persistPublishedMappingSnapshot(t, store, userSID, pfn, productID, "store-cli-test-v1", base)
+	counts := map[string]int{}
+	pipeline := newMultiFamilyStoreScanPipeline(store, userSID, []string{pfn}, []StoreCatalogProvider{
+		countingStoreCLIExactProviderWithVersion(t, counts, "store-cli-test-v2", map[string]string{pfn: productID}, map[string]string{pfn: "Update available"}),
+		positiveAggregateWithoutTargetProvider(pfn, "1.2.13.0", "1.2.20.0"),
+	})
+	pipeline.Now = fixedPipelineTimes(base.Add(time.Hour), base.Add(time.Hour+time.Second), base.Add(time.Hour+2*time.Second), base.Add(time.Hour+3*time.Second))
+	restoreSID := replaceStoreScanSID(userSID)
+	defer restoreSID()
+
+	result, err := pipeline.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts["store-show"] != 1 || counts["store-update-targeted"] != 1 {
+		t.Fatalf("provider version change should invalidate cached mapping and refresh exact evidence: counts=%#v", counts)
+	}
+	if result.Assessments[0].State != StoreUpdateAvailable || result.Scan.Metrics.MappingsRejected == 0 {
+		t.Fatalf("provider-version refresh did not preserve positive with rejection metric: assessment=%#v metrics=%#v", result.Assessments[0], result.Scan.Metrics)
+	}
+}
+
+func TestCachedStoreMappingCannotManufactureCurrentOrAvailable(t *testing.T) {
+	restoreAvailable := replacePackageActionManagerAvailable(func(manager string) bool {
+		return manager == managerStore
+	})
+	defer restoreAvailable()
+
+	store := newTestStoreScanRepository(t)
+	userSID := "S-1-5-21-mapping-alone"
+	pfn := "Microsoft.VP9VideoExtensions_8wekyb3d8bbwe"
+	productID := "9N4D0MSMP0PT"
+	base := time.Date(2026, 6, 25, 8, 0, 0, 0, time.UTC)
+	persistPublishedMappingSnapshot(t, store, userSID, pfn, productID, "store-cli-test-v1", base)
+	counts := map[string]int{}
+	pipeline := newMultiFamilyStoreScanPipeline(store, userSID, []string{pfn}, []StoreCatalogProvider{
+		countingStoreCLIExactProvider(t, counts, map[string]string{pfn: productID}, nil),
+		incompleteAggregateProvider("aggregate coverage incomplete"),
+	})
+	pipeline.Now = fixedPipelineTimes(base.Add(time.Hour), base.Add(time.Hour+time.Second), base.Add(time.Hour+2*time.Second))
+	restoreSID := replaceStoreScanSID(userSID)
+	defer restoreSID()
+
+	result, err := pipeline.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts["store-show"] != 0 || counts["store-update-targeted"] != 0 {
+		t.Fatalf("cached mapping without aggregate positive or opted-in state should not schedule exact work: counts=%#v", counts)
+	}
+	got := result.Assessments[0]
+	if got.State != StoreUpdateUnknown || got.StoreProductID != "" || got.ExactActionTargetAvailable {
+		t.Fatalf("cached mapping alone manufactured actionable or current state: %#v", got)
+	}
+}
+
+func TestOptimizedStoreScanIncompleteAggregateTargetsOnlyOptedInPackage(t *testing.T) {
+	restoreAvailable := replacePackageActionManagerAvailable(func(manager string) bool {
+		return manager == managerStore
+	})
+	defer restoreAvailable()
+
+	store := newTestStoreScanRepository(t)
+	userSID := "S-1-5-21-incomplete-targeted"
+	optedPFN := "OpenAI.Codex_2p2nqsd0c76g0"
+	otherPFN := "Microsoft.GamingApp_8wekyb3d8bbwe"
+	counts := map[string]int{}
+	pipeline := newMultiFamilyStoreScanPipeline(store, userSID, []string{optedPFN, otherPFN}, []StoreCatalogProvider{
+		countingStoreCLIExactProvider(t, counts, map[string]string{
+			optedPFN: "9NCODEX",
+			otherPFN: "9MV0B5HZVK9Z",
+		}, map[string]string{optedPFN: "No updates found"}),
+		incompleteAggregateProvider("Store CLI aggregate update coverage was incomplete"),
+	})
+	pipeline.PlanningState = &State{AutoUpdatePackages: map[string]bool{
+		canonicalStoreAutoUpdateKey(userSID, optedPFN): true,
+	}}
+	restoreSID := replaceStoreScanSID(userSID)
+	defer restoreSID()
+
+	result, err := pipeline.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts["store-show"] != 1 || counts["store-update-targeted"] != 1 || counts["show:"+otherPFN] != 0 || counts["update:"+otherPFN] != 0 {
+		t.Fatalf("incomplete aggregate should target only opted-in package: counts=%#v", counts)
+	}
+	byPFN := assessmentsByPFN(result.Assessments)
+	if got := byPFN[optedPFN]; got.State != StoreUpdateUnknown || !strings.Contains(got.Reason, storeCLIUpdatesProviderID) {
+		t.Fatalf("negative targeted check under incomplete required aggregate should remain fail-closed unknown: %#v", got)
+	}
+	if got := byPFN[otherPFN]; got.State != StoreUpdateUnknown || got.StoreProductID != "" {
+		t.Fatalf("non-opted package under incomplete aggregate should remain unknown without mapping/actionability: %#v", got)
+	}
+	if result.Scan.Metrics.ExactChecksPlanned != 1 || result.Scan.Metrics.CommandCountByFamily["store-show"] != 1 {
+		t.Fatalf("unexpected exact planning metrics: %#v", result.Scan.Metrics)
+	}
+}
+
+func TestDeepStoreScanChecksEveryProductFamily(t *testing.T) {
+	restoreAvailable := replacePackageActionManagerAvailable(func(manager string) bool {
+		return manager == managerStore
+	})
+	defer restoreAvailable()
+
+	store := newTestStoreScanRepository(t)
+	userSID := "S-1-5-21-deep-scan"
+	pfns := []string{
+		"Microsoft.VP9VideoExtensions_8wekyb3d8bbwe",
+		"OpenAI.Codex_2p2nqsd0c76g0",
+		"Microsoft.GamingApp_8wekyb3d8bbwe",
+	}
+	counts := map[string]int{}
+	pipeline := newMultiFamilyStoreScanPipeline(store, userSID, pfns, []StoreCatalogProvider{
+		countingStoreCLIExactProvider(t, counts, map[string]string{
+			pfns[0]: "9N4D0MSMP0PT",
+			pfns[1]: "9NCODEX",
+			pfns[2]: "9MV0B5HZVK9Z",
+		}, nil),
+		storeCLIUpdatesCatalogProvider{
+			Version: "store-cli-test-v1",
+			Run: func(ctx context.Context, timeout time.Duration, args ...string) CommandResult {
+				return CommandResult{OK: true, Command: strings.Join(args, " "), Stdout: "No updates found"}
+			},
+		},
+	})
+	pipeline.DeepExactScan = true
+	restoreSID := replaceStoreScanSID(userSID)
+	defer restoreSID()
+
+	result, err := pipeline.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts["store-show"] != len(pfns) || counts["store-update-targeted"] != len(pfns) {
+		t.Fatalf("deep scan should inspect every product-like family: counts=%#v", counts)
+	}
+	if result.Scan.Mode != StoreScanModeDeep || result.Scan.Metrics.ExactChecksPlanned != len(pfns) {
+		t.Fatalf("deep scan mode/metrics not recorded: scan=%#v metrics=%#v", result.Scan, result.Scan.Metrics)
+	}
+}
+
 func TestStoreScanRetentionPrunesOldGenerationsForUser(t *testing.T) {
 	store := newTestStoreScanRepository(t)
 	userSID := "S-1-5-21-retention"
@@ -1144,6 +1417,104 @@ func TestStoreTransactionalScanInventoryAdapter(t *testing.T) {
 	}
 }
 
+func TestStoreTransactionalScanInventoryAdapterProjectsCapabilities(t *testing.T) {
+	state := defaultState()
+	pfn := "OpenAI.Codex_abc123"
+	now := storeScanNow()
+	inventory := Inventory{PackageLookup: PackageLookup{Packages: []Package{{
+		Key:             packageKey(managerStore, pfn),
+		Manager:         managerStore,
+		ID:              pfn,
+		Name:            "Codex",
+		Version:         "1.0.0",
+		Source:          sourceNativeAppX,
+		UpdateSupported: false,
+	}}}}
+	assessment := StorePublishedAssessment{
+		StoreUpdateAssessment: StoreUpdateAssessment{
+			State:            StoreUpdateAvailable,
+			Identity:         StoreInstalledIdentity{UserSID: "S-1-5-21-adapter", PackageFamilyName: pfn},
+			ScanID:           "scan-adapter-kind",
+			Reason:           "fresh exact positive update evidence",
+			InstalledVersion: "1.0.0",
+			AvailableVersion: "1.1.0",
+			Target: &ExactStoreUpdateTarget{
+				Identity:   StoreInstalledIdentity{UserSID: "S-1-5-21-adapter", PackageFamilyName: pfn},
+				Provider:   StoreProviderIdentity{ID: managerStore, Backend: backendStoreCLI},
+				UpdateID:   pfn,
+				Verified:   true,
+				VerifiedBy: "test",
+				VerifiedAt: now,
+			},
+		},
+		ObservedAt:                 now,
+		UpdateID:                   pfn,
+		ExactActionTargetAvailable: true,
+		Applicability:              "applicable",
+	}
+	snapshot := StoreScanSnapshot{
+		SchemaVersion: storeScanSchemaVersion,
+		Published:     true,
+		Scan: StoreScanGeneration{
+			ScanID:           "scan-adapter-kind",
+			UserSID:          "S-1-5-21-adapter",
+			StartedAt:        now.Add(-time.Second),
+			CompletedAt:      now,
+			CompletionStatus: StoreScanCompleted,
+		},
+		Assessments: []StorePublishedAssessment{assessment},
+	}
+	adapted := applyPublishedStoreAssessmentsToInventory(state, inventory, snapshot, nil, nil)
+	got := adapted.Packages[0]
+	if !got.PreferenceEligible || !got.CanUpdateNow || got.CannotUpdateReason != "" || got.ExactTargetKind != "update_id" {
+		t.Fatalf("capabilities were not projected for update-ID-only Store target: %#v", got)
+	}
+}
+
+func TestStoreTransactionalScanInventoryAdapterProjectsConflictAsNonActionable(t *testing.T) {
+	state := defaultState()
+	pfn := "OpenAI.Codex_abc123"
+	now := storeScanNow()
+	inventory := Inventory{PackageLookup: PackageLookup{Packages: []Package{{
+		Key:             packageKey(managerStore, pfn),
+		Manager:         managerStore,
+		ID:              pfn,
+		Name:            "Codex",
+		Version:         "1.0.0",
+		Source:          sourceNativeAppX,
+		UpdateSupported: true,
+	}}}}
+	assessment := StorePublishedAssessment{
+		StoreUpdateAssessment: StoreUpdateAssessment{
+			State:            StoreUpdateConflict,
+			Identity:         StoreInstalledIdentity{UserSID: "S-1-5-21-adapter", PackageFamilyName: pfn},
+			ScanID:           "scan-conflict",
+			Reason:           "healthy providers returned conflicting product_id values",
+			InstalledVersion: "1.0.0",
+			AvailableVersion: "1.1.0",
+		},
+		ObservedAt:    now,
+		Applicability: "unknown",
+	}
+	snapshot := StoreScanSnapshot{
+		SchemaVersion: storeScanSchemaVersion,
+		Published:     true,
+		Scan: StoreScanGeneration{
+			ScanID:           "scan-conflict",
+			UserSID:          "S-1-5-21-adapter",
+			StartedAt:        now.Add(-time.Second),
+			CompletedAt:      now,
+			CompletionStatus: StoreScanCompleted,
+		},
+		Assessments: []StorePublishedAssessment{assessment},
+	}
+	adapted := applyPublishedStoreAssessmentsToInventory(state, inventory, snapshot, nil, nil)
+	got := adapted.Packages[0]
+	if !got.PreferenceEligible || got.CanUpdateNow || got.ExactTargetKind != "none" || !strings.Contains(got.CannotUpdateReason, "conflict") {
+		t.Fatalf("conflict capabilities should be preference-only and non-actionable: %#v", got)
+	}
+}
+
 func TestPublishedStoreAssessmentStalePositiveIsDiagnosticOnly(t *testing.T) {
 	state := defaultState()
 	pfn := "OpenAI.Codex_abc123"
@@ -1234,6 +1605,26 @@ func newTestStoreScanPipeline(store StoreScanRepository, userSID, pfn string, pr
 		Now:               fixedPipelineTimes(time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC), time.Date(2026, 6, 21, 12, 0, 1, 0, time.UTC), time.Date(2026, 6, 21, 12, 0, 2, 0, time.UTC)),
 		NewScanID: func(now time.Time) string {
 			return fmt.Sprintf("scan-%s%s-%06d", strings.ReplaceAll(pfn, ".", "-"), fmtTimeForID(now), atomic.AddInt64(&testStoreScanIDCounter, 1))
+		},
+	}
+}
+
+func newMultiFamilyStoreScanPipeline(store StoreScanRepository, userSID string, pfns []string, providers []StoreCatalogProvider) *StoreScanPipeline {
+	scan := StoreScanGeneration{ScanID: "placeholder", UserSID: userSID, StartedAt: time.Now().UTC(), CompletedAt: time.Now().UTC(), CompletionStatus: StoreScanCompleted}
+	inventory := StorePackagedAppInventory{Scan: scan}
+	for _, pfn := range pfns {
+		next := testStoreInventory(scan, pfn, "1.0.0")
+		inventory.Records = append(inventory.Records, next.Records...)
+	}
+	inventory.Families = groupStorePackagedAppFamilies(inventory.Records)
+	return &StoreScanPipeline{
+		Repository:        store,
+		InventoryProvider: fakeInventoryProvider{inventory: inventory},
+		CatalogProviders:  providers,
+		ProviderTimeout:   500 * time.Millisecond,
+		Now:               fixedPipelineTimes(time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC), time.Date(2026, 6, 21, 12, 0, 1, 0, time.UTC), time.Date(2026, 6, 21, 12, 0, 2, 0, time.UTC), time.Date(2026, 6, 21, 12, 0, 3, 0, time.UTC), time.Date(2026, 6, 21, 12, 0, 4, 0, time.UTC)),
+		NewScanID: func(now time.Time) string {
+			return fmt.Sprintf("scan-multi-%s-%06d", fmtTimeForID(now), atomic.AddInt64(&testStoreScanIDCounter, 1))
 		},
 	}
 }
@@ -1333,6 +1724,146 @@ func testStoreInventory(scan StoreScanGeneration, pfn, version string) StorePack
 	}
 	inventory.Families = groupStorePackagedAppFamilies(inventory.Records)
 	return inventory
+}
+
+func countingStoreCLIExactProvider(t *testing.T, counts map[string]int, productIDs map[string]string, updateOutputs map[string]string) StoreCatalogProvider {
+	return countingStoreCLIExactProviderWithVersion(t, counts, "store-cli-test-v1", productIDs, updateOutputs)
+}
+
+func countingStoreCLIExactProviderWithVersion(t *testing.T, counts map[string]int, version string, productIDs map[string]string, updateOutputs map[string]string) StoreCatalogProvider {
+	t.Helper()
+	return storeCLIExactCatalogProvider{
+		Version:     version,
+		Concurrency: 1,
+		Run: func(ctx context.Context, timeout time.Duration, args ...string) CommandResult {
+			command := strings.Join(args, " ")
+			switch {
+			case storeCLICommandContains(args, "show"):
+				pfn := storeCommandTargetFromArgs(args)
+				counts["store-show"]++
+				counts["show:"+pfn]++
+				productID := productIDs[pfn]
+				if productID == "" {
+					t.Fatalf("unexpected store show target %q in command %q", pfn, command)
+				}
+				return CommandResult{OK: true, Command: command, Stdout: "Product ID : " + productID + "\nPFN : " + pfn}
+			case storeCLICommandContains(args, "update"):
+				pfn := storeCommandTargetFromArgs(args)
+				counts["store-update-targeted"]++
+				counts["update:"+pfn]++
+				output := updateOutputs[pfn]
+				if output == "" {
+					output = "Already up to date"
+				}
+				return CommandResult{OK: true, Command: command, Stdout: output}
+			default:
+				t.Fatalf("unexpected Store CLI exact command: %q", command)
+			}
+			return CommandResult{Command: command, Code: 1, Stderr: "unexpected command"}
+		},
+	}
+}
+
+func storeCLICommandContains(args []string, verb string) bool {
+	for _, arg := range args {
+		if strings.EqualFold(arg, verb) {
+			return true
+		}
+	}
+	return false
+}
+
+func storeCommandTargetFromArgs(args []string) string {
+	for i, arg := range args {
+		if (strings.EqualFold(arg, "show") || strings.EqualFold(arg, "update") || strings.EqualFold(arg, "upgrade")) && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return packageActionTargetFromArgs(args)
+}
+
+func positiveAggregateWithoutTargetProvider(pfn, installed, available string) StoreCatalogProvider {
+	provider := StoreProviderIdentity{ID: storeCLIUpdatesProviderID, Name: "Store CLI aggregate updates", Backend: backendStoreCLI}
+	return fakeCatalogProvider{id: provider.ID, fn: func(ctx context.Context, scan StoreScanGeneration, families []StorePackagedAppFamily) StoreCatalogProviderRun {
+		identity := StoreInstalledIdentity{UserSID: scan.UserSID, PackageFamilyName: pfn}
+		return StoreCatalogProviderRun{
+			Provider:    provider,
+			Version:     "store-cli-test-v1",
+			StartedAt:   scan.StartedAt,
+			CompletedAt: scan.StartedAt.Add(time.Second),
+			Health:      StoreProviderHealthy,
+			Observations: []StoreProviderObservation{
+				storeObservation(identity, scan, provider, StoreProviderHealthy, StoreObservationPositiveUpdateOffer, installed, available, nil),
+			},
+		}
+	}}
+}
+
+func incompleteAggregateProvider(message string) StoreCatalogProvider {
+	provider := StoreProviderIdentity{ID: storeCLIUpdatesProviderID, Name: "Store CLI aggregate updates", Backend: backendStoreCLI}
+	return fakeCatalogProvider{id: provider.ID, fn: func(ctx context.Context, scan StoreScanGeneration, families []StorePackagedAppFamily) StoreCatalogProviderRun {
+		return StoreCatalogProviderRun{
+			Provider:    provider,
+			Version:     "store-cli-test-v1",
+			StartedAt:   scan.StartedAt,
+			CompletedAt: scan.StartedAt.Add(time.Second),
+			Health:      StoreProviderIncomplete,
+			Error:       message,
+		}
+	}}
+}
+
+func persistPublishedMappingSnapshot(t *testing.T, store StoreScanRepository, userSID, pfn, productID, providerVersion string, verifiedAt time.Time) {
+	t.Helper()
+	scan := StoreScanGeneration{
+		ScanID:           "mapping-seed-" + shortHash(userSID+pfn+verifiedAt.String()),
+		UserSID:          userSID,
+		StartedAt:        verifiedAt.Add(-time.Second),
+		CompletedAt:      verifiedAt,
+		ProviderVersions: map[string]string{storeCLIExactProviderID: providerVersion},
+		ProviderHealth:   map[string]StoreProviderHealth{storeCLIExactProviderID: StoreProviderHealthy},
+		CompletionStatus: StoreScanCompleted,
+	}
+	inventory := testStoreInventory(scan, pfn, "1.0.0")
+	family := inventory.Families[0]
+	mapping := VerifiedStoreIdentityMapping{
+		InstalledIdentity:     family.Identity,
+		ProductID:             productID,
+		Provider:              StoreProviderIdentity{ID: storeCLIExactProviderID, Name: "Store CLI exact catalog", Backend: backendStoreCLI},
+		ScanID:                scan.ScanID,
+		VerifiedAt:            verifiedAt,
+		Evidence:              "store show exact PFN/Product ID association",
+		IdentityName:          family.Primary.IdentityName,
+		PublisherID:           family.Primary.PublisherID,
+		ProcessorArchitecture: family.Primary.ProcessorArchitecture,
+		ProductLike:           family.ProductLike,
+		ProviderVersion:       providerVersion,
+	}
+	snapshot := StoreScanSnapshot{
+		SchemaVersion: storeScanSchemaVersion,
+		Published:     true,
+		Scan:          scan,
+		Inventory:     inventory,
+		ProviderRuns: []StoreCatalogProviderRun{{
+			Provider:    mapping.Provider,
+			Version:     providerVersion,
+			StartedAt:   scan.StartedAt,
+			CompletedAt: scan.CompletedAt,
+			Health:      StoreProviderHealthy,
+			Mappings:    []VerifiedStoreIdentityMapping{mapping},
+		}},
+	}
+	if _, err := store.PersistCompletedScanSnapshot(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assessmentsByPFN(assessments []StorePublishedAssessment) map[string]StorePublishedAssessment {
+	byPFN := map[string]StorePublishedAssessment{}
+	for _, assessment := range assessments {
+		byPFN[assessment.Identity.PackageFamilyName] = assessment
+	}
+	return byPFN
 }
 
 func parseTestStoreVersion(value string) StorePackageVersion {

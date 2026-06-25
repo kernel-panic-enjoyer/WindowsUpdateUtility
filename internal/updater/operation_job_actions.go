@@ -19,6 +19,7 @@ func commandJobNotice(action string, result CommandResult) string {
 func (app *App) startInstallJob(manager, id string) OperationJobStatus {
 	key := packageKey(manager, id)
 	return app.startOperationJob(jobTypeInstall, "", 1, []string{key}, func(ctx context.Context, job *OperationJob) {
+		ctx = withLogMetadata(ctx, logMetadata{PackageKey: key, Manager: manager})
 		started := app.mutateOperationJob(job, func(status *OperationJobStatus) {
 			status.CurrentIndex = 1
 			status.CurrentKey = key
@@ -58,6 +59,7 @@ func (app *App) startInstallJob(manager, id string) OperationJobStatus {
 
 func (app *App) startManagerInstallJob(manager string) OperationJobStatus {
 	return app.startOperationJob(jobTypeManagerInstall, "", 1, []string{manager}, func(ctx context.Context, job *OperationJob) {
+		ctx = withLogMetadata(ctx, logMetadata{PackageKey: manager, Manager: manager})
 		started := app.mutateOperationJob(job, func(status *OperationJobStatus) {
 			status.CurrentIndex = 1
 			status.CurrentKey = manager
@@ -140,12 +142,13 @@ func (app *App) startUpdatePackagesOperation(jobType, mode string, packages []Pa
 	keys := updateJobPackageKeys(packages)
 	return app.startOperationJobWithPackageSnapshot(jobType, mode, len(packages), keys, packages, func(ctx context.Context, job *OperationJob) {
 		for index, pkg := range packages {
+			packageCtx := withLogMetadata(ctx, logMetadata{PackageKey: pkg.Key, Manager: pkg.Manager})
 			app.mutateOperationJob(job, func(status *OperationJobStatus) {
 				status.CurrentIndex = index + 1
 				status.CurrentKey = pkg.Key
 				status.CurrentPackage = updateJobPackageName(pkg)
 			})
-			if ctx.Err() != nil {
+			if packageCtx.Err() != nil {
 				app.mutateOperationJob(job, func(status *OperationJobStatus) {
 					status.CancelRequested = true
 					status.State = jobStateCancelled
@@ -153,17 +156,17 @@ func (app *App) startUpdatePackagesOperation(jobType, mode string, packages []Pa
 				})
 				break
 			}
-			result := app.updatePackageForJob(ctx, job, pkg)
+			result := app.updatePackageForJob(packageCtx, job, pkg)
 			app.mutateOperationJob(job, func(status *OperationJobStatus) {
 				status.Results = append(status.Results, UpdateResult{Key: pkg.Key, Result: result})
 				status.Result = &result
-				if ctx.Err() != nil || result.Code == commandCancelledCode {
+				if packageCtx.Err() != nil || result.Code == commandCancelledCode {
 					status.CancelRequested = true
 					status.State = jobStateCancelled
 					status.Notice = "Update cancelled."
 				}
 			})
-			if ctx.Err() != nil || result.Code == commandCancelledCode {
+			if packageCtx.Err() != nil || result.Code == commandCancelledCode {
 				break
 			}
 		}

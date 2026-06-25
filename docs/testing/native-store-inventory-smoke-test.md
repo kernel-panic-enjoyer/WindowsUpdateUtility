@@ -8,14 +8,17 @@ Scope: manual validation for the current-user packaged-application inventory pro
 powershell -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1
 ```
 
-The app uses in-process Go WinRT/AppModel calls for current-user packaged-app
-inventory. It should not build, extract, or launch
-`WindowsUpdater.StoreInventoryBroker.exe`.
+The app uses direct Go WinRT/AppModel calls for current-user packaged-app
+inventory through the same executable's internal `--store-inventory-worker`
+mode. It should not build, extract, or launch a separate
+`WindowsUpdater.StoreInventoryBroker.exe` sidecar.
 
 ## Native Inventory
 
 1. Start the app without elevation.
-2. Confirm no PowerShell AppX inventory command and no Store inventory sidecar process is run for normal Store inventory.
+2. Confirm no PowerShell AppX inventory command and no separate Store inventory
+   sidecar binary is run for normal Store inventory. A short-lived hidden
+   `WindowsUpdaterWebUI.exe --store-inventory-worker` child process is expected.
 3. Refresh inventory.
 4. Confirm Store packages are grouped by package family name and framework/resource/optional-only families are not shown as independent Store products.
 5. Confirm Store update state comes from the Store scan-health providers, not from display-name searches.

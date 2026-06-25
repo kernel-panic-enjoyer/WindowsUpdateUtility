@@ -35,6 +35,22 @@ func TestPackageMutationCoordinatorCancelsWhileWaitingInProcess(t *testing.T) {
 	}
 }
 
+func TestPackageMutationMutexDescriptorIsCreatorIndependent(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows named mutex security descriptor test")
+	}
+	sddl := packageMutationMutexSecurityDescriptorString()
+	if !strings.Contains(sddl, ";;;SY") || !strings.Contains(sddl, ";;;BA") || !strings.Contains(sddl, ";;;AU") {
+		t.Fatalf("package mutation mutex descriptor does not name the expected stable principals: %q", sddl)
+	}
+	if strings.Contains(sddl, "(A;;GA;;;AU)") {
+		t.Fatalf("package mutation mutex descriptor grants Authenticated Users full control: %q", sddl)
+	}
+	if userSID, err := currentUserSID(); err == nil && userSID != "" && strings.Contains(sddl, userSID) {
+		t.Fatalf("package mutation mutex descriptor depends on current creator SID %s: %q", userSID, sddl)
+	}
+}
+
 func TestPackageMutationCoordinatorSerializesWebUIScheduledAndWorkerHelpers(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows named mutex integration test")

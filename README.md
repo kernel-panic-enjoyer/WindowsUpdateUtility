@@ -2,8 +2,8 @@
 
 A single distributed Go Windows updater with a browser UI for winget,
 Chocolatey, and Microsoft Store apps. Microsoft Store packaged-app inventory is
-enumerated in-process through Go WinRT/AppModel calls in the interactive user's
-session.
+enumerated in the interactive user's session through an internal same-binary
+WinRT worker so blocked Store APIs can be cancelled without orphaning helpers.
 
 ## Features
 
@@ -22,9 +22,11 @@ session.
 - Installs packages from winget, Chocolatey, or Store after an explicit button click.
 - Updates individual packages, selected packages, or all packages.
 - Supports Start with Windows through Windows Task Scheduler.
-- Supports opt-in daily auto-update for individual packages or all packages.
+- Supports opt-in daily auto-update for individual packages or all packages
+  through Windows Task Scheduler.
 - Scans Windows uninstall registry plus managed package inventory and reports apps newly detected since the previous scan.
 - Exports Store diagnostics from the WebUI scan-health panel without raw user SIDs, tokens, credentials, or personal install paths.
+- Retains bounded session logs and exports category-specific log archives.
 - Includes a dark/light WebUI theme with no separate frontend JavaScript dependency.
 
 ## Project Layout
@@ -44,15 +46,26 @@ session.
 
 ## Build
 
-Use Go 1.22+ on Windows:
+Use the Go version declared in `go.mod` on Windows. This repository currently
+declares Go 1.26.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1
 ```
 
-`dev\scripts\Build-Workspace.ps1` runs formatting, tests, vet, the WebUI
-JavaScript syntax check, and the Windows GUI build. Toolchain caches and
-temporary files use the normal Go, PowerShell, and Windows defaults.
+`dev\scripts\Build-Workspace.ps1` is read-only with respect to tracked source.
+It checks formatting with `gofmt -l`, runs tests, vet, the WebUI JavaScript
+syntax check, and the Windows GUI build. If formatting is needed, run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\dev\scripts\Format-Workspace.ps1
+```
+
+Build output is written under `dist\`. The production executable is unstripped;
+the build script intentionally uses only `-H=windowsgui` and does not use
+`-s`, `-w`, UPX, or packing. Each build writes a sibling `.metadata.json` file
+with commit, dirty-worktree flag, Go version, target platform, byte count, and
+SHA-256.
 
 ## Run
 
@@ -66,8 +79,23 @@ For development without UAC:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-go run . --no-elevate
+go run . --no-browser
 ```
+
+Supported user-facing CLI options are:
+
+- `--no-browser`: start the local WebUI and print the tokenized URL instead of
+  opening a browser.
+- `--port <port>`: bind the local WebUI to an explicit port; startup fails if
+  it is unavailable.
+- `--token <token>`: use a caller-provided bootstrap token.
+- `--task auto-update`: run the scheduled auto-update task once and print JSON
+  results.
+- `--help`: print usage.
+
+`--no-elevate` is not supported. The executable manifest is already
+`asInvoker`; the WebUI runs unelevated and only individual privileged actions
+use the typed elevated worker.
 
 For automated distribution smoke tests, use:
 
@@ -77,8 +105,26 @@ powershell -ExecutionPolicy Bypass -File .\dev\scripts\Smoke-Distribution.ps1 -E
 
 ## Notes
 
+- Supported OS floor: Windows 10 or newer with the App Installer/WinGet stack
+  available. Windows 11 is the primary validation target.
+- Architecture policy: x64 is the primary release target. ARM64 is supported by
+  Go builds and must be smoke-tested on ARM64 Windows hardware before release.
 - Package install/update actions may download software and require administrator rights.
 - Missing winget opens Microsoft App Installer.
-- Missing Store CLI opens Microsoft Store and Windows Update surfaces.
+- Missing Store CLI opens Microsoft Store and Windows Update surfaces. Store CLI
+  is required for exact Store fallback evidence and execution when WinGet
+  msstore cannot provide a verified Product ID path.
+- WinGet msstore Product ID execution is attempted before verified Store CLI
+  exact targets.
 - Missing Chocolatey installs through winget when winget is available; otherwise the app opens the Chocolatey install page.
-- State is stored under `%LOCALAPPDATA%\WindowsUpdaterWebUI` by default.
+- State is stored under `%LOCALAPPDATA%\WindowsUpdaterWebUI\state.json` by default.
+- Store scan snapshots are stored under `%LOCALAPPDATA%\WindowsUpdaterWebUI\store-scans\user-<hash>\`, with `current.json` pointing at immutable generation files.
+- Log retention is bounded in memory by category and job. Exported logs include
+  retained tails, not an unbounded complete history.
+- Internal unsupported modes such as `--elevated-worker` and
+  `--store-inventory-worker` are same-binary implementation details for typed
+  privilege isolation and killable current-user Store inventory. They are not a
+  public automation interface.
+- Hosted CI does not perform real Microsoft Store live validation. Store live
+  tests are opt-in and must run on controlled Windows hardware with explicit
+  environment gates.

@@ -75,6 +75,34 @@ func TestStoreCLIExactUpdateRunnerFallsBackToVerifiedUpdateID(t *testing.T) {
 	}
 }
 
+func TestExactStoreUpdateRequestAllowsUpdateIDOnlyTarget(t *testing.T) {
+	t.Setenv("UPDATER_STATE_DIR", t.TempDir())
+	restoreSID := replaceStoreScanSID("S-1-5-21-exec")
+	defer restoreSID()
+	restoreAvailability := replacePackageActionManagerAvailable(func(manager string) bool { return manager == managerStore })
+	defer restoreAvailability()
+
+	pkg := testExactStorePackage()
+	pkg.ID = pkg.InstalledPackageFamilyName
+	pkg.Key = packageKey(managerStore, pkg.InstalledPackageFamilyName)
+	pkg.StoreProductID = ""
+	pkg.StoreUpdateID = pkg.InstalledPackageFamilyName
+	pkg.ExactTargetKind = exactTargetKindUpdateID
+	pkg = applyPackageCapabilities(pkg)
+	writePublishedExactStoreAssessment(t, pkg, storeScanNow(), nil)
+
+	request, err := exactStoreUpdateRequestFromPackage(context.Background(), pkg)
+	if err != nil {
+		t.Fatalf("update-ID-only Store target should authorize request creation: %v", err)
+	}
+	if request.ProductID != "" || request.UpdateID != pkg.StoreUpdateID || request.Target != pkg.StoreUpdateID {
+		t.Fatalf("unexpected update-ID-only request: %#v", request)
+	}
+	if request.Provider.ID != managerStore || request.Provider.Backend != backendStoreCLI {
+		t.Fatalf("update-ID-only execution should use Store CLI provider, got %#v", request.Provider)
+	}
+}
+
 func TestStoreProductIDFirstExactUpdateRunnerUsesWingetProductID(t *testing.T) {
 	var commands []string
 	var targets []string
@@ -431,6 +459,7 @@ func TestStoreProductIDFirstExactCatalogQueryProviderFallsBackToStoreCLI(t *test
 }
 
 func TestStoreExactUpdateIgnoresWrongUserAndUnrelatedEvents(t *testing.T) {
+	eventTime := time.Now().UTC().Add(time.Second)
 	executor := testStoreExactExecutor(
 		fakeStoreExactRunner{result: CommandResult{OK: true, Command: "store update 9NCODEX", Stdout: "accepted"}},
 		&fakeStoreExactInventory{snapshots: []StoreExactPackageSnapshot{
@@ -439,13 +468,201 @@ func TestStoreExactUpdateIgnoresWrongUserAndUnrelatedEvents(t *testing.T) {
 		}},
 		fakeStoreExactCatalog{},
 		fakeStoreEvents{events: []StorePackageChangeEvent{
-			{Identity: StoreInstalledIdentity{UserSID: "S-1-5-21-other", PackageFamilyName: "OpenAI.Codex_abc123"}, Version: "1.1.0", PackageFullName: "OpenAI.Codex_1.1.0_x64__abc123", Healthy: true},
-			{Identity: StoreInstalledIdentity{UserSID: "S-1-5-21-exec", PackageFamilyName: "Other.App_abc123"}, Version: "1.1.0", PackageFullName: "Other.App_1.1.0_x64__abc123", Healthy: true},
+			{Identity: StoreInstalledIdentity{UserSID: "S-1-5-21-other", PackageFamilyName: "OpenAI.Codex_abc123"}, Version: "1.1.0", PackageFullName: "OpenAI.Codex_1.1.0_x64__abc123", Healthy: true, Exists: true, ObservedAt: eventTime},
+			{Identity: StoreInstalledIdentity{UserSID: "S-1-5-21-exec", PackageFamilyName: "Other.App_abc123"}, Version: "1.1.0", PackageFullName: "Other.App_1.1.0_x64__abc123", Healthy: true, Exists: true, ObservedAt: eventTime},
 		}},
 	)
 	result := executeStoreExactUpdateForTest(t, executor, testExactStorePackage())
 	if result.OK || result.Code != storeUpdateAcceptedNotVerifiedCode {
 		t.Fatalf("wrong-user and unrelated events must not verify update, got %#v", result)
+	}
+}
+
+func TestStoreExactUpdateExactEventAcceleratesVersionVerification(t *testing.T) {
+	request := testExactStoreRequest()
+	pre := testStoreExactSnapshot("1.0.0", "OpenAI.Codex_1.0.0_x64__abc123", true)
+	actionStartedAt := time.Now().UTC()
+	inventory := &fakeStoreExactInventory{snapshots: []StoreExactPackageSnapshot{
+		testStoreExactSnapshot("1.0.0", "OpenAI.Codex_1.0.0_x64__abc123", true),
+		testStoreExactSnapshot("1.1.0", "OpenAI.Codex_1.1.0_x64__abc123", true),
+	}}
+	executor := testStoreExactExecutor(fakeStoreExactRunner{}, inventory, fakeStoreExactCatalog{}, fakeStoreEvents{})
+	verification := executor.verifyAcceptedActionWithEvents(context.Background(), request, pre, time.Hour, actionStartedAt, storePackageEventSubscription{
+		events: fakeStoreEventChannel([]StorePackageChangeEvent{{
+			Identity:        request.Identity,
+			PackageFullName: "OpenAI.Codex_1.1.0_x64__abc123",
+			Version:         "1.1.0",
+			Healthy:         true,
+			Exists:          true,
+			ObservedAt:      actionStartedAt.Add(time.Millisecond),
+		}}),
+	})
+	if !verification.Verified || inventory.calls != 2 {
+		t.Fatalf("expected exact event to accelerate inventory verification, calls=%d verification=%#v", inventory.calls, verification)
+	}
+	if !strings.Contains(verification.Result.Stdout, "PackageCatalog event received") {
+		t.Fatalf("expected event wake diagnostic, got %q", verification.Result.Stdout)
+	}
+}
+
+func TestStoreExactUpdatePreActionEventIgnored(t *testing.T) {
+	request := testExactStoreRequest()
+	pre := testStoreExactSnapshot("1.0.0", "OpenAI.Codex_1.0.0_x64__abc123", true)
+	actionStartedAt := time.Now().UTC()
+	executor := testStoreExactExecutor(fakeStoreExactRunner{}, &fakeStoreExactInventory{snapshots: []StoreExactPackageSnapshot{
+		testStoreExactSnapshot("1.0.0", "OpenAI.Codex_1.0.0_x64__abc123", true),
+	}}, fakeStoreExactCatalog{}, fakeStoreEvents{})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	verification := executor.verifyAcceptedActionWithEvents(ctx, request, pre, time.Hour, actionStartedAt, storePackageEventSubscription{
+		events: fakeStoreEventChannel([]StorePackageChangeEvent{{
+			Identity:        request.Identity,
+			PackageFullName: "OpenAI.Codex_1.1.0_x64__abc123",
+			Version:         "1.1.0",
+			Healthy:         true,
+			Exists:          true,
+			ObservedAt:      actionStartedAt.Add(-time.Millisecond),
+		}}),
+	})
+	if verification.Verified || !strings.Contains(verification.Result.Stdout, "predates") {
+		t.Fatalf("pre-action event should be ignored, got %#v stdout=%q", verification, verification.Result.Stdout)
+	}
+}
+
+func TestStoreExactUpdateDuplicateEventHarmless(t *testing.T) {
+	request := testExactStoreRequest()
+	pre := testStoreExactSnapshot("1.0.0", "OpenAI.Codex_1.0.0_x64__abc123", true)
+	actionStartedAt := time.Now().UTC()
+	event := StorePackageChangeEvent{
+		Identity:        request.Identity,
+		PackageFullName: "OpenAI.Codex_1.1.0_x64__abc123",
+		Version:         "1.1.0",
+		Healthy:         true,
+		Exists:          true,
+		ObservedAt:      actionStartedAt.Add(time.Millisecond),
+	}
+	executor := testStoreExactExecutor(fakeStoreExactRunner{}, &fakeStoreExactInventory{snapshots: []StoreExactPackageSnapshot{
+		testStoreExactSnapshot("1.0.0", "OpenAI.Codex_1.0.0_x64__abc123", true),
+		testStoreExactSnapshot("1.0.0", "OpenAI.Codex_1.0.0_x64__abc123", true),
+	}}, fakeStoreExactCatalog{}, fakeStoreEvents{})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	duplicate := event
+	duplicate.ObservedAt = duplicate.ObservedAt.Add(time.Millisecond)
+	verification := executor.verifyAcceptedActionWithEvents(ctx, request, pre, time.Hour, actionStartedAt, storePackageEventSubscription{events: fakeStoreEventChannel([]StorePackageChangeEvent{event, duplicate})})
+	if verification.Verified || !strings.Contains(verification.Result.Stdout, "duplicate") {
+		t.Fatalf("duplicate event should be harmless, got %#v stdout=%q", verification, verification.Result.Stdout)
+	}
+}
+
+func TestStoreExactUpdateEventWithNoInventoryOrCatalogProofDoesNotSucceed(t *testing.T) {
+	request := testExactStoreRequest()
+	pre := testStoreExactSnapshot("1.0.0", "OpenAI.Codex_1.0.0_x64__abc123", true)
+	actionStartedAt := time.Now().UTC()
+	executor := testStoreExactExecutor(fakeStoreExactRunner{}, &fakeStoreExactInventory{snapshots: []StoreExactPackageSnapshot{
+		testStoreExactSnapshot("1.0.0", "OpenAI.Codex_1.0.0_x64__abc123", true),
+		testStoreExactSnapshot("1.0.0", "OpenAI.Codex_1.0.0_x64__abc123", true),
+	}}, fakeStoreExactCatalog{}, fakeStoreEvents{})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	verification := executor.verifyAcceptedActionWithEvents(ctx, request, pre, time.Hour, actionStartedAt, storePackageEventSubscription{events: fakeStoreEventChannel([]StorePackageChangeEvent{{
+		Identity:        request.Identity,
+		PackageFullName: "OpenAI.Codex_1.1.0_x64__abc123",
+		Version:         "1.1.0",
+		Healthy:         true,
+		Exists:          true,
+		ObservedAt:      actionStartedAt.Add(time.Millisecond),
+	}})})
+	if verification.Verified {
+		t.Fatalf("event alone must not verify update, got %#v", verification)
+	}
+}
+
+func TestStoreExactUpdatePackageRemovalEventDoesNotSucceed(t *testing.T) {
+	request := testExactStoreRequest()
+	reason := validateStorePackageChangeEvent(request, time.Now().UTC(), StorePackageChangeEvent{
+		Identity:        request.Identity,
+		PackageFullName: "OpenAI.Codex_1.1.0_x64__abc123",
+		Version:         "1.1.0",
+		Healthy:         true,
+		Exists:          false,
+		ObservedAt:      time.Now().UTC().Add(time.Second),
+	})
+	if !strings.Contains(reason, "removal") {
+		t.Fatalf("package removal event should be rejected, got %q", reason)
+	}
+}
+
+func TestStoreExactUpdateFullNameOnlyEventDoesNotSucceedWithoutCatalogProof(t *testing.T) {
+	request := testExactStoreRequest()
+	pre := testStoreExactSnapshot("1.0.0", "OpenAI.Codex_1.0.0_x64__abc123", true)
+	actionStartedAt := time.Now().UTC()
+	executor := testStoreExactExecutor(fakeStoreExactRunner{}, &fakeStoreExactInventory{snapshots: []StoreExactPackageSnapshot{
+		testStoreExactSnapshot("1.0.0", "OpenAI.Codex_1.0.0_x64__abc123", true),
+		testStoreExactSnapshot("1.0.0", "OpenAI.Codex_1.0.0_x64__def456", true),
+	}}, fakeStoreExactCatalog{}, fakeStoreEvents{})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	verification := executor.verifyAcceptedActionWithEvents(ctx, request, pre, time.Hour, actionStartedAt, storePackageEventSubscription{events: fakeStoreEventChannel([]StorePackageChangeEvent{{
+		Identity:        request.Identity,
+		PackageFullName: "OpenAI.Codex_1.0.0_x64__def456",
+		Version:         "1.0.0",
+		Healthy:         true,
+		Exists:          true,
+		ObservedAt:      actionStartedAt.Add(time.Millisecond),
+	}})})
+	if verification.Verified {
+		t.Fatalf("full-name-only event must not verify without catalog proof, got %#v", verification)
+	}
+}
+
+func TestStoreExactUpdateSubscriptionFailureAndClosureFallBack(t *testing.T) {
+	request := testExactStoreRequest()
+	pre := testStoreExactSnapshot("1.0.0", "OpenAI.Codex_1.0.0_x64__abc123", true)
+	executor := testStoreExactExecutor(fakeStoreExactRunner{}, &fakeStoreExactInventory{snapshots: []StoreExactPackageSnapshot{
+		testStoreExactSnapshot("1.1.0", "OpenAI.Codex_1.1.0_x64__abc123", true),
+	}}, fakeStoreExactCatalog{}, fakeStoreEvents{})
+	verification := executor.verifyAcceptedActionWithEvents(context.Background(), request, pre, time.Hour, time.Now().UTC(), storePackageEventSubscription{
+		events: fakeStoreEventChannel(nil),
+		err:    context.Canceled,
+	})
+	if !verification.Verified || !strings.Contains(verification.Result.Command, "PackageCatalog events unavailable") {
+		t.Fatalf("subscription failure should fall back to inventory verification, got %#v", verification)
+	}
+}
+
+func TestStoreExactUpdateCancellationCleansSubscriptionAndIgnoresLateEvent(t *testing.T) {
+	cleaned := false
+	ctx, cancel := context.WithCancel(context.Background())
+	executor := testStoreExactExecutor(fakeStoreExactRunner{}, &fakeStoreExactInventory{snapshots: []StoreExactPackageSnapshot{
+		testStoreExactSnapshot("1.0.0", "OpenAI.Codex_1.0.0_x64__abc123", true),
+		testStoreExactSnapshot("1.0.0", "OpenAI.Codex_1.0.0_x64__abc123", true),
+	}}, fakeStoreExactCatalog{}, fakeStoreEvents{cleanup: func() { cleaned = true }})
+	executor.Runner = fakeStoreExactRunner{after: cancel, result: CommandResult{OK: true, Command: "store update 9NCODEX", Stdout: "accepted"}}
+	result := executeStoreExactUpdateForTestWithContext(t, ctx, executor, testExactStorePackage())
+	if result.Code != commandCancelledCode {
+		t.Fatalf("expected cancellation, got %#v", result)
+	}
+	if !cleaned {
+		t.Fatal("subscription cleanup was not called")
+	}
+}
+
+func TestStoreExactUpdateResourceFrameworkEventIgnored(t *testing.T) {
+	request := testExactStoreRequest()
+	for _, classification := range []string{storePackageClassResource, storePackageClassFramework} {
+		reason := validateStorePackageChangeEvent(request, time.Now().UTC(), StorePackageChangeEvent{
+			Identity:        request.Identity,
+			PackageFullName: "OpenAI.Codex_1.1.0_x64__abc123",
+			Version:         "1.1.0",
+			Healthy:         true,
+			Exists:          true,
+			ObservedAt:      time.Now().UTC().Add(time.Second),
+			Classification:  classification,
+		})
+		if !strings.Contains(reason, "framework or resource") {
+			t.Fatalf("expected %s event to be ignored, got %q", classification, reason)
+		}
 	}
 }
 
@@ -772,15 +989,25 @@ func (fn storeExactCatalogFunc) QueryExact(ctx context.Context, request StoreExa
 }
 
 type fakeStoreEvents struct {
-	events []StorePackageChangeEvent
-	err    error
+	events  []StorePackageChangeEvent
+	err     error
+	cleanup func()
 }
 
 func (events fakeStoreEvents) Subscribe(context.Context, StoreInstalledIdentity) (<-chan StorePackageChangeEvent, func(), error) {
-	ch := make(chan StorePackageChangeEvent, len(events.events))
-	for _, event := range events.events {
+	ch := fakeStoreEventChannel(events.events)
+	cleanup := events.cleanup
+	if cleanup == nil {
+		cleanup = func() {}
+	}
+	return ch, cleanup, events.err
+}
+
+func fakeStoreEventChannel(events []StorePackageChangeEvent) <-chan StorePackageChangeEvent {
+	ch := make(chan StorePackageChangeEvent, len(events))
+	for _, event := range events {
 		ch <- event
 	}
 	close(ch)
-	return ch, nil, events.err
+	return ch
 }

@@ -309,7 +309,7 @@ func replaceScanReadersForStateStoreTest() func() {
 func persistAutoUpdateResultsForTest(ctx context.Context, store StateStore, results []UpdateResult) error {
 	_, err := store.Update(ctx, func(state *State) error {
 		state.LastAutoUpdateAt = utcNow()
-		state.LastAutoUpdateResults = results
+		state.LastAutoUpdateResults = summarizeUpdateResults(results, state.LastAutoUpdateAt)
 		return nil
 	})
 	return err

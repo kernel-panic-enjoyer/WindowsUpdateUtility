@@ -28,6 +28,7 @@ var (
 	procRoInitialize              = combaseDLL.NewProc("RoInitialize")
 	procRoUninitialize            = combaseDLL.NewProc("RoUninitialize")
 	procRoActivateInstance        = combaseDLL.NewProc("RoActivateInstance")
+	procRoGetActivationFactory    = combaseDLL.NewProc("RoGetActivationFactory")
 	procWindowsCreateString       = combaseDLL.NewProc("WindowsCreateString")
 	procWindowsDeleteString       = combaseDLL.NewProc("WindowsDeleteString")
 	procWindowsGetStringRawBuffer = combaseDLL.NewProc("WindowsGetStringRawBuffer")
@@ -49,7 +50,7 @@ type winrtStorePackagedAppInventoryProvider struct {
 }
 
 func defaultStorePackagedAppInventoryProvider() StorePackagedAppInventoryProvider {
-	return winrtStorePackagedAppInventoryProvider{}
+	return storeInventoryWorkerProvider{}
 }
 
 func (provider winrtStorePackagedAppInventoryProvider) Inventory(ctx context.Context, scan StoreScanGeneration) (StorePackagedAppInventory, CommandResult) {

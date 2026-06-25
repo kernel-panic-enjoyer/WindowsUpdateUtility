@@ -1,13 +1,32 @@
 package updater
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
+)
+
+const (
+	maxStateFileBytes                 = 2 * 1024 * 1024
+	maxStateAutoUpdatePackages        = 2000
+	maxStateScannedAppsPerBucket      = 5000
+	maxStateMigrationEntries          = 1000
+	maxStateSkippedPackageSummaries   = 500
+	maxStateDurableUpdateSummaries    = 100
+	maxStateDurableUpdateHistoryBytes = 128 * 1024
+	maxStateSummaryMessageBytes       = 512
+	maxStateStringBytes               = 4096
+	maxCommandResultCommandBytes      = 16 * 1024
+	terminalCommandResultStreamBytes  = 16 * 1024
 )
 
 type StoreAutoUpdateMigrationReport struct {
@@ -58,7 +77,7 @@ type State struct {
 	StoreAutoUpdateMigration StoreAutoUpdateMigrationReport `json:"store_auto_update_migration,omitempty"`
 	LastScanAt               string                         `json:"last_scan_at"`
 	LastAutoUpdateAt         string                         `json:"last_auto_update_at"`
-	LastAutoUpdateResults    []UpdateResult                 `json:"last_auto_update_results"`
+	LastAutoUpdateResults    []UpdateResultSummary          `json:"last_auto_update_results"`
 	LastAutoUpdateSummary    *ScheduledAutoUpdateSummary    `json:"last_auto_update_summary,omitempty"`
 	Theme                    string                         `json:"theme"`
 }
@@ -196,19 +215,42 @@ func (store *FileStateStore) loadLocked(ctx context.Context, dir string) (State,
 			return backupState, nil
 		}
 		appLog("State primary and backup could not be loaded; using defaults. primary=%s backup=%s.", err, backupErr)
-		return defaultState(), nil
+		return defaultState(), fmt.Errorf("state primary and backup could not be loaded: primary=%w backup=%v", err, backupErr)
 	}
 	return defaultState(), nil
 }
 
 func readStateFile(path string) (State, []byte, error) {
-	data, err := os.ReadFile(path)
+	info, err := os.Stat(path)
 	if err != nil {
 		return State{}, nil, err
 	}
+	if info.Size() > maxStateFileBytes {
+		return State{}, nil, fmt.Errorf("state file exceeds %d bytes", maxStateFileBytes)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return State{}, nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxStateFileBytes+1))
+	if err != nil {
+		return State{}, nil, err
+	}
+	if len(data) > maxStateFileBytes {
+		return State{}, nil, fmt.Errorf("state file exceeds %d bytes", maxStateFileBytes)
+	}
 	state := defaultState()
 	legacy := readLegacyStateFields(data)
-	if err := json.Unmarshal(data, &state); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	if err := decoder.Decode(&state); err != nil {
+		return State{}, data, err
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			err = errors.New("state file contains trailing JSON data")
+		}
 		return State{}, data, err
 	}
 	normalizeState(&state, legacy.AssessmentCache)
@@ -238,6 +280,22 @@ func normalizeState(state *State, legacyAssessments map[string]legacyAssessmentC
 	migrateStoreScanApps(state)
 	if state.Theme == "" {
 		state.Theme = "dark"
+	}
+	state.CreatedAt = clampStateString(state.CreatedAt)
+	state.UpdatedAt = clampStateString(state.UpdatedAt)
+	state.LastScanAt = clampStateString(state.LastScanAt)
+	state.LastAutoUpdateAt = clampStateString(state.LastAutoUpdateAt)
+	state.Theme = clampStateString(state.Theme)
+	state.AutoUpdatePackages = trimBoolMap(state.AutoUpdatePackages, maxStateAutoUpdatePackages)
+	state.RegistryApps = trimScannedAppMap(state.RegistryApps, maxStateScannedAppsPerBucket)
+	state.WingetApps = trimScannedAppMap(state.WingetApps, maxStateScannedAppsPerBucket)
+	state.StoreApps = trimScannedAppMap(state.StoreApps, maxStateScannedAppsPerBucket)
+	state.StoreAutoUpdateMigration.Migrated = trimMigrationEntries(state.StoreAutoUpdateMigration.Migrated)
+	state.StoreAutoUpdateMigration.Disabled = trimMigrationEntries(state.StoreAutoUpdateMigration.Disabled)
+	state.LastAutoUpdateResults = trimUpdateResultSummaries(state.LastAutoUpdateResults)
+	if state.LastAutoUpdateSummary != nil {
+		state.LastAutoUpdateSummary.SkippedPackages = trimSkippedPackageSummaries(state.LastAutoUpdateSummary.SkippedPackages)
+		state.LastAutoUpdateSummary.StoreScan.Error = truncateUTF8String(state.LastAutoUpdateSummary.StoreScan.Error, maxStateSummaryMessageBytes)
 	}
 }
 
@@ -294,11 +352,181 @@ func (store *FileStateStore) writeBytesLocked(ctx context.Context, dir string, d
 }
 
 func marshalState(state State) ([]byte, error) {
+	normalizeState(&state, nil)
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return nil, err
 	}
+	for len(data) > maxStateFileBytes && len(state.LastAutoUpdateResults) > 0 {
+		state.LastAutoUpdateResults = state.LastAutoUpdateResults[1:]
+		data, err = json.MarshalIndent(state, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(data) > maxStateFileBytes {
+		return nil, fmt.Errorf("state exceeds %d bytes after normalization", maxStateFileBytes)
+	}
 	return append(data, '\n'), nil
+}
+
+func summarizeUpdateResults(results []UpdateResult, finishedAt string) []UpdateResultSummary {
+	summaries := make([]UpdateResultSummary, 0, len(results))
+	for _, result := range results {
+		summaries = append(summaries, summarizeUpdateResult(result, finishedAt))
+	}
+	return trimUpdateResultSummaries(summaries)
+}
+
+func summarizeUpdateResult(result UpdateResult, finishedAt string) UpdateResultSummary {
+	manager, packageID, _ := splitPackageKey(result.Key)
+	if manager == "" {
+		manager = managerFromCommand(result.Result.Command)
+	}
+	message := ""
+	if result.Result.OK {
+		message = "Command succeeded."
+	} else {
+		message = fmt.Sprintf("Command failed with code %d. See Session Log for full output.", result.Result.Code)
+	}
+	return UpdateResultSummary{
+		Key:             truncateUTF8String(result.Key, maxStateStringBytes),
+		Manager:         truncateUTF8String(manager, maxStateStringBytes),
+		PackageID:       truncateUTF8String(packageID, maxStateStringBytes),
+		Success:         result.Result.OK,
+		Code:            result.Result.Code,
+		FinishedAt:      truncateUTF8String(finishedAt, maxStateStringBytes),
+		RestartRequired: result.Result.Code == 3010,
+		Message:         truncateUTF8String(sanitizeProviderDiagnostic(message), maxStateSummaryMessageBytes),
+	}
+}
+
+func managerFromCommand(command string) string {
+	command = strings.ToLower(strings.TrimSpace(command))
+	switch {
+	case strings.Contains(command, "winget"):
+		return managerWinget
+	case strings.Contains(command, "choco"):
+		return managerChoco
+	case strings.Contains(command, "store"):
+		return managerStore
+	default:
+		return ""
+	}
+}
+
+func trimUpdateResultSummaries(results []UpdateResultSummary) []UpdateResultSummary {
+	if len(results) == 0 {
+		return nil
+	}
+	if len(results) > maxStateDurableUpdateSummaries {
+		results = append([]UpdateResultSummary(nil), results[len(results)-maxStateDurableUpdateSummaries:]...)
+	} else {
+		results = append([]UpdateResultSummary(nil), results...)
+	}
+	for i := range results {
+		results[i].Key = truncateUTF8String(results[i].Key, maxStateStringBytes)
+		results[i].Manager = truncateUTF8String(results[i].Manager, maxStateStringBytes)
+		results[i].PackageID = truncateUTF8String(results[i].PackageID, maxStateStringBytes)
+		results[i].FinishedAt = truncateUTF8String(results[i].FinishedAt, maxStateStringBytes)
+		results[i].Message = truncateUTF8String(results[i].Message, maxStateSummaryMessageBytes)
+	}
+	for len(results) > 0 {
+		data, err := json.Marshal(results)
+		if err != nil || len(data) <= maxStateDurableUpdateHistoryBytes {
+			break
+		}
+		results = results[1:]
+	}
+	return results
+}
+
+func trimBoolMap(values map[string]bool, limit int) map[string]bool {
+	if values == nil {
+		return map[string]bool{}
+	}
+	keys := sortedMapKeys(values)
+	out := map[string]bool{}
+	for _, key := range trimKeysToLimit(keys, limit) {
+		out[truncateUTF8String(key, maxStateStringBytes)] = values[key]
+	}
+	return out
+}
+
+func trimScannedAppMap(values map[string]ScannedApp, limit int) map[string]ScannedApp {
+	if values == nil {
+		return map[string]ScannedApp{}
+	}
+	keys := sortedMapKeys(values)
+	out := map[string]ScannedApp{}
+	for _, key := range trimKeysToLimit(keys, limit) {
+		app := values[key]
+		app.Key = truncateUTF8String(app.Key, maxStateStringBytes)
+		app.Name = truncateUTF8String(app.Name, maxStateStringBytes)
+		app.Source = truncateUTF8String(app.Source, maxStateStringBytes)
+		app.Manager = truncateUTF8String(app.Manager, maxStateStringBytes)
+		app.PackageID = truncateUTF8String(app.PackageID, maxStateStringBytes)
+		app.FirstSeen = truncateUTF8String(app.FirstSeen, maxStateStringBytes)
+		out[truncateUTF8String(key, maxStateStringBytes)] = app
+	}
+	return out
+}
+
+func sortedMapKeys[V any](values map[string]V) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func trimKeysToLimit(keys []string, limit int) []string {
+	if limit <= 0 || len(keys) <= limit {
+		return keys
+	}
+	return keys[len(keys)-limit:]
+}
+
+func trimMigrationEntries(entries []StoreAutoUpdateMigrationEntry) []StoreAutoUpdateMigrationEntry {
+	if len(entries) > maxStateMigrationEntries {
+		entries = entries[len(entries)-maxStateMigrationEntries:]
+	}
+	out := append([]StoreAutoUpdateMigrationEntry(nil), entries...)
+	for i := range out {
+		out[i].LegacyKey = truncateUTF8String(out[i].LegacyKey, maxStateStringBytes)
+		out[i].CanonicalKey = truncateUTF8String(out[i].CanonicalKey, maxStateStringBytes)
+		out[i].PackageFamilyName = truncateUTF8String(out[i].PackageFamilyName, maxStateStringBytes)
+		out[i].Reason = truncateUTF8String(out[i].Reason, maxStateSummaryMessageBytes)
+		out[i].MigratedAt = truncateUTF8String(out[i].MigratedAt, maxStateStringBytes)
+	}
+	return out
+}
+
+func trimSkippedPackageSummaries(entries []ScheduledAutoUpdateSkippedPackage) []ScheduledAutoUpdateSkippedPackage {
+	if len(entries) > maxStateSkippedPackageSummaries {
+		entries = entries[len(entries)-maxStateSkippedPackageSummaries:]
+	}
+	out := append([]ScheduledAutoUpdateSkippedPackage(nil), entries...)
+	for i := range out {
+		out[i].Key = truncateUTF8String(out[i].Key, maxStateStringBytes)
+		out[i].Manager = truncateUTF8String(out[i].Manager, maxStateStringBytes)
+		out[i].PackageID = truncateUTF8String(out[i].PackageID, maxStateStringBytes)
+		out[i].Reason = truncateUTF8String(out[i].Reason, maxStateSummaryMessageBytes)
+	}
+	return out
+}
+
+func clampStateString(value string) string {
+	return truncateUTF8String(value, maxStateStringBytes)
+}
+
+func truncateUTF8String(value string, limit int) string {
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	tail := []byte(value[:limit])
+	return strings.ToValidUTF8(string(tail), "")
 }
 
 func (store *FileStateStore) stateDir() (string, error) {

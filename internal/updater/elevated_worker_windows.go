@@ -96,7 +96,7 @@ func runElevatedWorkerOperation(ctx context.Context, invocation elevatedWorkerIn
 		process.Terminate()
 		return workerCommandResultError(invocation.Operation, err)
 	}
-	appendWorkerResultLogs(result)
+	appendWorkerResultLogsContext(ctx, result)
 	return result
 }
 
@@ -395,22 +395,26 @@ func executeElevatedWorkerOperation(ctx context.Context, operation string, paylo
 }
 
 func appendWorkerResultLogs(result CommandResult) {
+	appendWorkerResultLogsContext(context.Background(), result)
+}
+
+func appendWorkerResultLogsContext(ctx context.Context, result CommandResult) {
 	categories := logCategoriesForCommandLine(result.Command)
 	if result.Command != "" {
-		sessionLogs.AppendCategorized("command", result.Command, categories)
+		sessionLogs.AppendContext(ctx, "command", result.Command, categories)
 	}
 	for _, line := range strings.Split(strings.TrimRight(result.Stdout, "\r\n"), "\n") {
 		if strings.TrimSpace(line) != "" {
-			appendLogLineCategorized("stdout", line, categories)
+			appendLogLineContext(ctx, "stdout", line, categories)
 		}
 	}
 	for _, line := range strings.Split(strings.TrimRight(result.Stderr, "\r\n"), "\n") {
 		if strings.TrimSpace(line) != "" {
-			appendLogLineCategorized("stderr", line, categories)
+			appendLogLineContext(ctx, "stderr", line, categories)
 		}
 	}
 	if result.Command != "" {
-		sessionLogs.AppendCategorized("exit", fmt.Sprintf("%s exited with code %d", result.Command, result.Code), categories)
+		sessionLogs.AppendContext(ctx, "exit", fmt.Sprintf("%s exited with code %d", result.Command, result.Code), categories)
 	}
 }
 

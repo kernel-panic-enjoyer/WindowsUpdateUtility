@@ -3,9 +3,12 @@ package updater
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -231,9 +234,6 @@ func TestStoreScanFileRepositoryFailureInjection(t *testing.T) {
 	if loaded, ok, err := reopened.LoadLatestPublishedSnapshot(context.Background(), userSID); err != nil || !ok || loaded.Scan.ScanID != first.Scan.ScanID {
 		t.Fatalf("corrupt newest generation should be skipped: ok=%t err=%v snapshot=%#v", ok, err, loaded)
 	}
-	if len(reopened.Diagnostics()) == 0 {
-		t.Fatal("corrupt snapshot should be reported through diagnostics")
-	}
 
 	future := testStoreScanSnapshot(userSID, pfn, "file-future-schema", base.Add(time.Second), StoreUpdateAvailable)
 	future.SchemaVersion = storeScanSchemaVersion + 99
@@ -299,6 +299,331 @@ func TestStoreScanFileRepositoryFailureInjection(t *testing.T) {
 	writeRawStoreSnapshotFile(t, reopened, malformed, mustMarshalJSON(t, malformed))
 	if loaded, ok, err := reopened.LoadLatestPublishedSnapshot(context.Background(), userSID); err != nil || !ok || loaded.Scan.ScanID == malformed.Scan.ScanID {
 		t.Fatalf("malformed nested evidence should not load: ok=%t err=%v snapshot=%#v", ok, err, loaded)
+	}
+}
+
+func TestStoreScanFileRepositoryPointerReadOpensOneGeneration(t *testing.T) {
+	root := t.TempDir()
+	repo, err := openStoreScanFileRepository(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userSID := "S-1-5-21-pointer-read"
+	pfn := "OpenAI.Codex_abc123"
+	base := time.Date(2026, 6, 25, 18, 0, 0, 0, time.UTC)
+	for index := 0; index < 10; index++ {
+		snapshot := testStoreScanSnapshot(userSID, pfn, "pointer-read-"+fmtTimeForID(base.Add(time.Duration(index)*time.Second)), base.Add(time.Duration(index)*time.Second), StoreUpdateCurrent)
+		if _, err := repo.PersistCompletedScanSnapshot(context.Background(), snapshot); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reopened, err := openStoreScanFileRepository(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var generationReads int
+	reopened.readFile = func(path string) ([]byte, error) {
+		if strings.Contains(path, string(filepath.Separator)+"generations"+string(filepath.Separator)) {
+			generationReads++
+		}
+		return os.ReadFile(path)
+	}
+	loaded, ok, err := reopened.LoadLatestPublishedSnapshot(context.Background(), userSID)
+	if err != nil || !ok {
+		t.Fatalf("pointer read failed: ok=%t err=%v", ok, err)
+	}
+	if loaded.Scan.ScanID != "pointer-read-180009" {
+		t.Fatalf("loaded wrong generation: %#v", loaded.Scan)
+	}
+	if generationReads != 1 {
+		t.Fatalf("healthy pointer read opened %d generation files, want 1", generationReads)
+	}
+}
+
+func TestStoreScanFileRepositoryPointerReplacementFailureLeavesGenerationUnauthoritative(t *testing.T) {
+	repo, err := openStoreScanFileRepository(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo.replaceFile = func(_, _ string) error {
+		return storeScanRepositoryError{Kind: storeScanRepositoryErrorPermission, Err: errors.New("denied")}
+	}
+	userSID := "S-1-5-21-pointer-fail"
+	snapshot := testStoreScanSnapshot(userSID, "OpenAI.Codex_abc123", "pointer-fail", time.Date(2026, 6, 25, 18, 1, 0, 0, time.UTC), StoreUpdateAvailable)
+	if published, err := repo.PersistCompletedScanSnapshot(context.Background(), snapshot); err == nil || published {
+		t.Fatalf("pointer failure should not publish: published=%t err=%v", published, err)
+	}
+	if loaded, ok, err := repo.LoadLatestPublishedSnapshot(context.Background(), userSID); err != nil || ok {
+		t.Fatalf("uncommitted generation became authoritative: ok=%t err=%v snapshot=%#v", ok, err, loaded)
+	}
+}
+
+func TestStoreScanFileRepositoryGenerationWithoutPointerIsFallbackOnly(t *testing.T) {
+	repo, err := openStoreScanFileRepository(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	userSID := "S-1-5-21-uncommitted-generation"
+	snapshot := testStoreScanSnapshot(userSID, "OpenAI.Codex_abc123", "uncommitted-generation", time.Date(2026, 6, 25, 18, 1, 30, 0, time.UTC), StoreUpdateAvailable)
+	writeRawStoreSnapshotFile(t, repo, snapshot, mustMarshalJSON(t, snapshot))
+
+	loaded, ok, err := repo.LoadLatestPublishedSnapshot(context.Background(), userSID)
+	if err != nil || !ok {
+		t.Fatalf("fallback diagnostic snapshot should remain readable: ok=%t err=%v", ok, err)
+	}
+	if loaded.Scan.ScanID != snapshot.Scan.ScanID || !loaded.RecoveredFromFallback {
+		t.Fatalf("uncommitted generation was not marked fallback-only: %#v", loaded)
+	}
+	if _, err := os.Stat(repo.currentPointerPath(userSID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fallback recovery wrote current pointer: %v", err)
+	}
+}
+
+func TestStoreScanFileRepositoryPointerRecoveryClassifiesRepairableFailures(t *testing.T) {
+	base := time.Date(2026, 6, 25, 18, 1, 45, 0, time.UTC)
+	for _, tc := range []struct {
+		name          string
+		mutatePointer func(t *testing.T, repo *StoreScanFileRepository, userSID string, snapshot StoreScanSnapshot)
+	}{
+		{
+			name: "corrupt pointer",
+			mutatePointer: func(t *testing.T, repo *StoreScanFileRepository, userSID string, snapshot StoreScanSnapshot) {
+				t.Helper()
+				if err := os.WriteFile(repo.currentPointerPath(userSID), []byte(`{"schema_version":`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "missing target generation",
+			mutatePointer: func(t *testing.T, repo *StoreScanFileRepository, userSID string, snapshot StoreScanSnapshot) {
+				t.Helper()
+				data, err := os.ReadFile(repo.snapshotPath(snapshot))
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeRawStorePointer(t, repo, userSID, StoreScanCurrentPointer{
+					SchemaVersion:      storeScanCurrentPointerSchemaVersion,
+					GenerationFilename: "missing-generation.json",
+					ScanID:             snapshot.Scan.ScanID,
+					StartedAt:          snapshot.Scan.StartedAt,
+					CompletedAt:        snapshot.Scan.CompletedAt,
+					SHA256:             storeScanSHA256Hex(data),
+				})
+			},
+		},
+		{
+			name: "checksum mismatch",
+			mutatePointer: func(t *testing.T, repo *StoreScanFileRepository, userSID string, snapshot StoreScanSnapshot) {
+				t.Helper()
+				writeRawStorePointer(t, repo, userSID, StoreScanCurrentPointer{
+					SchemaVersion:      storeScanCurrentPointerSchemaVersion,
+					GenerationFilename: filepath.Base(repo.snapshotPath(snapshot)),
+					ScanID:             snapshot.Scan.ScanID,
+					StartedAt:          snapshot.Scan.StartedAt,
+					CompletedAt:        snapshot.Scan.CompletedAt,
+					SHA256:             strings.Repeat("0", 64),
+				})
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, err := openStoreScanFileRepository(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			userSID := "S-1-5-21-pointer-recovery-" + strings.ReplaceAll(tc.name, " ", "-")
+			snapshot := testStoreScanSnapshot(userSID, "OpenAI.Codex_abc123", tc.name, base, StoreUpdateAvailable)
+			if published, err := repo.PersistCompletedScanSnapshot(context.Background(), snapshot); err != nil || !published {
+				t.Fatalf("publish=%t err=%v", published, err)
+			}
+			tc.mutatePointer(t, repo, userSID, snapshot)
+			loaded, ok, err := repo.LoadLatestPublishedSnapshot(context.Background(), userSID)
+			if err != nil || !ok {
+				t.Fatalf("repairable pointer failure should recover: ok=%t err=%v", ok, err)
+			}
+			if loaded.Scan.ScanID != snapshot.Scan.ScanID || !loaded.RecoveredFromFallback {
+				t.Fatalf("recovered snapshot missing fallback marker: %#v", loaded)
+			}
+		})
+	}
+}
+
+func TestStoreScanFileRepositoryPointerReadReturnsTypedHardFailures(t *testing.T) {
+	base := time.Date(2026, 6, 25, 18, 1, 50, 0, time.UTC)
+	t.Run("permission error", func(t *testing.T) {
+		repo, snapshot := persistPointerFailureFixture(t, "S-1-5-21-pointer-permission", base)
+		repo.readFile = func(path string) ([]byte, error) {
+			if path == repo.currentPointerPath(snapshot.Scan.UserSID) {
+				return nil, os.ErrPermission
+			}
+			return os.ReadFile(path)
+		}
+		if _, ok, err := repo.LoadLatestPublishedSnapshot(context.Background(), snapshot.Scan.UserSID); err == nil || ok || !errors.Is(err, errStoreScanRepositoryPermission) {
+			t.Fatalf("permission error not preserved: ok=%t err=%v", ok, err)
+		}
+	})
+	t.Run("transient io error", func(t *testing.T) {
+		repo, snapshot := persistPointerFailureFixture(t, "S-1-5-21-pointer-transient", base.Add(time.Second))
+		repo.readFile = func(path string) ([]byte, error) {
+			if path == repo.currentPointerPath(snapshot.Scan.UserSID) {
+				return nil, errors.New("temporary read failure")
+			}
+			return os.ReadFile(path)
+		}
+		if _, ok, err := repo.LoadLatestPublishedSnapshot(context.Background(), snapshot.Scan.UserSID); err == nil || ok || !errors.Is(err, errStoreScanRepositoryTransientIO) {
+			t.Fatalf("transient error not preserved: ok=%t err=%v", ok, err)
+		}
+	})
+	t.Run("wrong user generation", func(t *testing.T) {
+		repo, err := openStoreScanFileRepository(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		requestedUser := "S-1-5-21-pointer-wrong-user"
+		otherUser := "S-1-5-21-pointer-wrong-user-other"
+		snapshot := testStoreScanSnapshot(otherUser, "OpenAI.Codex_abc123", "wrong-user-pointer", base.Add(2*time.Second), StoreUpdateAvailable)
+		data := mustMarshalJSON(t, snapshot)
+		filename := snapshotFileName(snapshot)
+		path := filepath.Join(repo.generationsDir(requestedUser), filename)
+		writeRawStoreSnapshotPath(t, path, data)
+		writeRawStorePointer(t, repo, requestedUser, StoreScanCurrentPointer{
+			SchemaVersion:      storeScanCurrentPointerSchemaVersion,
+			GenerationFilename: filename,
+			ScanID:             snapshot.Scan.ScanID,
+			StartedAt:          snapshot.Scan.StartedAt,
+			CompletedAt:        snapshot.Scan.CompletedAt,
+			SHA256:             storeScanSHA256Hex(data),
+		})
+		if _, ok, err := repo.LoadLatestPublishedSnapshot(context.Background(), requestedUser); err == nil || ok || !errors.Is(err, errStoreScanRepositoryWrongUser) {
+			t.Fatalf("wrong-user generation not preserved: ok=%t err=%v", ok, err)
+		}
+	})
+}
+
+func TestStoreScanFileRepositoryFutureSchemaRemainsUntouched(t *testing.T) {
+	root := t.TempDir()
+	repo, err := openStoreScanFileRepository(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userSID := "S-1-5-21-future-pointer"
+	userDir := repo.userDir(userSID)
+	generationDir := filepath.Join(userDir, storeScanGenerationsDirName)
+	if err := os.MkdirAll(generationDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	futureName := "future-schema.json"
+	futurePath := filepath.Join(generationDir, futureName)
+	futureData := []byte(`{"schema_version":999,"scan":{"scan_id":"future","user_sid":"` + userSID + `","started_at":"2026-06-25T18:02:00Z","completion_status":"completed"}}
+`)
+	if err := os.WriteFile(futurePath, futureData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pointer := StoreScanCurrentPointer{
+		SchemaVersion:      storeScanCurrentPointerSchemaVersion,
+		GenerationFilename: futureName,
+		ScanID:             "future",
+		StartedAt:          time.Date(2026, 6, 25, 18, 2, 0, 0, time.UTC),
+		SHA256:             storeScanSHA256Hex(futureData),
+	}
+	writeRawStorePointer(t, repo, userSID, pointer)
+	if _, ok, err := repo.LoadLatestPublishedSnapshot(context.Background(), userSID); err == nil || ok || !errors.Is(err, errStoreScanRepositoryFutureSchema) {
+		t.Fatalf("future schema should return typed error without loading: ok=%t err=%v", ok, err)
+	}
+	if _, err := os.Stat(futurePath); err != nil {
+		t.Fatalf("future schema file was touched/quarantined: %v", err)
+	}
+}
+
+func TestStoreScanFileRepositoryMigratesOldLayoutIdempotently(t *testing.T) {
+	root := t.TempDir()
+	repo, err := openStoreScanFileRepository(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userSID := "S-1-5-21-old-layout"
+	pfn := "OpenAI.Codex_abc123"
+	base := time.Date(2026, 6, 25, 18, 3, 0, 0, time.UTC)
+	old := testStoreScanSnapshot(userSID, pfn, "old-layout-current", base, StoreUpdateAvailable)
+	writeRawStoreSnapshotPath(t, filepath.Join(repo.userDir(userSID), snapshotFileName(old)), mustMarshalJSON(t, old))
+	loaded, ok, err := repo.LoadLatestPublishedSnapshot(context.Background(), userSID)
+	if err != nil || !ok || loaded.Scan.ScanID != old.Scan.ScanID {
+		t.Fatalf("old layout migration failed: ok=%t err=%v snapshot=%#v", ok, err, loaded)
+	}
+	pointerPath := repo.currentPointerPath(userSID)
+	firstInfo, err := os.Stat(pointerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, ok, err = repo.LoadLatestPublishedSnapshot(context.Background(), userSID)
+	if err != nil || !ok || loaded.Scan.ScanID != old.Scan.ScanID {
+		t.Fatalf("idempotent migrated read failed: ok=%t err=%v snapshot=%#v", ok, err, loaded)
+	}
+	secondInfo, err := os.Stat(pointerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !firstInfo.ModTime().Equal(secondInfo.ModTime()) {
+		t.Fatalf("migration rewrote current pointer on idempotent read: first=%s second=%s", firstInfo.ModTime(), secondInfo.ModTime())
+	}
+}
+
+func TestStoreScanFileRepositorySharedRootSynchronization(t *testing.T) {
+	root := t.TempDir()
+	first, err := openStoreScanFileRepository(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := openStoreScanFileRepository(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userSID := "S-1-5-21-shared-root"
+	pfn := "OpenAI.Codex_abc123"
+	base := time.Date(2026, 6, 25, 18, 4, 0, 0, time.UTC)
+	var wg sync.WaitGroup
+	for index := 0; index < 6; index++ {
+		index := index
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			snapshot := testStoreScanSnapshot(userSID, pfn, "shared-root-"+fmtTimeForID(base.Add(time.Duration(index)*time.Second)), base.Add(time.Duration(index)*time.Second), StoreUpdateCurrent)
+			_, _ = first.PersistCompletedScanSnapshot(context.Background(), snapshot)
+			_, _, _ = second.LoadLatestPublishedSnapshot(context.Background(), userSID)
+		}()
+	}
+	wg.Wait()
+	loaded, ok, err := second.LoadLatestPublishedSnapshot(context.Background(), userSID)
+	if err != nil || !ok || loaded.Scan.ScanID != "shared-root-180405" {
+		t.Fatalf("shared-root synchronization lost latest pointer: ok=%t err=%v snapshot=%#v", ok, err, loaded)
+	}
+}
+
+func BenchmarkStoreScanFileRepositoryLoadLatestPublishedSnapshot(b *testing.B) {
+	for _, generations := range []int{1, 10, 50} {
+		b.Run(fmt.Sprintf("generations_%d", generations), func(b *testing.B) {
+			root := b.TempDir()
+			repo, err := openStoreScanFileRepository(root)
+			if err != nil {
+				b.Fatal(err)
+			}
+			userSID := "S-1-5-21-benchmark"
+			pfn := "OpenAI.Codex_abc123"
+			base := time.Date(2026, 6, 25, 18, 5, 0, 0, time.UTC)
+			for index := 0; index < generations; index++ {
+				snapshot := testStoreScanSnapshot(userSID, pfn, fmt.Sprintf("bench-%02d", index), base.Add(time.Duration(index)*time.Second), StoreUpdateCurrent)
+				if _, err := repo.PersistCompletedScanSnapshot(context.Background(), snapshot); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.ResetTimer()
+			for index := 0; index < b.N; index++ {
+				if _, ok, err := repo.LoadLatestPublishedSnapshot(context.Background(), userSID); err != nil || !ok {
+					b.Fatalf("load latest failed: ok=%t err=%v", ok, err)
+				}
+			}
+		})
 	}
 }
 
@@ -517,6 +842,34 @@ func writeRawStoreSnapshotPath(t *testing.T, path string, data []byte) {
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func writeRawStorePointer(t *testing.T, repo *StoreScanFileRepository, userSID string, pointer StoreScanCurrentPointer) {
+	t.Helper()
+	data, err := json.MarshalIndent(pointer, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, '\n')
+	if err := os.MkdirAll(repo.userDir(userSID), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(repo.currentPointerPath(userSID), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func persistPointerFailureFixture(t *testing.T, userSID string, startedAt time.Time) (*StoreScanFileRepository, StoreScanSnapshot) {
+	t.Helper()
+	repo, err := openStoreScanFileRepository(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := testStoreScanSnapshot(userSID, "OpenAI.Codex_abc123", userSID, startedAt, StoreUpdateAvailable)
+	if published, err := repo.PersistCompletedScanSnapshot(context.Background(), snapshot); err != nil || !published {
+		t.Fatalf("publish=%t err=%v", published, err)
+	}
+	return repo, snapshot
 }
 
 func assertSnapshotFilePublished(t *testing.T, repo *StoreScanFileRepository, snapshot StoreScanSnapshot, want bool) {

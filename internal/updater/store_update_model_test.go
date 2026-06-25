@@ -1,6 +1,7 @@
 package updater
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -267,6 +268,185 @@ func TestReconcileStoreUpdate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReconcileStoreUpdatePositiveTargetConsensus(t *testing.T) {
+	identity := StoreInstalledIdentity{UserSID: "S-1-5-21-consensus", PackageFamilyName: "OpenAI.Codex_123abc"}
+	storeProvider := StoreProviderIdentity{ID: "store-cli-exact", Name: "Store CLI", Backend: backendStoreCLI}
+	wingetProvider := StoreProviderIdentity{ID: "winget-msstore-exact", Name: "WinGet msstore", Backend: backendWingetMSStoreFallback}
+	scan := completedStoreScan("scan-consensus", identity.UserSID, storeProvider, wingetProvider)
+	productTarget := exactStoreTarget(identity, storeProvider)
+	productTarget.ProductID = "9NCODEX"
+	productTarget.UpdateID = ""
+	updateIDTarget := exactStoreTarget(identity, wingetProvider)
+	updateIDTarget.ProductID = ""
+	updateIDTarget.UpdateID = identity.PackageFamilyName
+	targetProductA := exactStoreTarget(identity, storeProvider)
+	targetProductA.ProductID = "9NA"
+	targetProductA.UpdateID = ""
+	targetProductB := exactStoreTarget(identity, wingetProvider)
+	targetProductB.ProductID = "9NB"
+	targetProductB.UpdateID = ""
+	targetUpdateA := exactStoreTarget(identity, storeProvider)
+	targetUpdateA.ProductID = ""
+	targetUpdateA.UpdateID = "provider-a-target"
+	targetUpdateB := exactStoreTarget(identity, wingetProvider)
+	targetUpdateB.ProductID = ""
+	targetUpdateB.UpdateID = "provider-b-target"
+
+	tests := []struct {
+		name       string
+		targets    []*ExactStoreUpdateTarget
+		versions   []string
+		wantState  StoreUpdateState
+		wantKind   string
+		wantReason string
+	}{
+		{
+			name:      "same Product ID from two providers",
+			targets:   []*ExactStoreUpdateTarget{productTarget, cloneStoreTarget(productTarget, wingetProvider)},
+			versions:  []string{"1.1.0", "1.1.0"},
+			wantState: StoreUpdateAvailable,
+			wantKind:  "product_id",
+		},
+		{
+			name:      "Product ID plus PFN update ID is complementary",
+			targets:   []*ExactStoreUpdateTarget{productTarget, updateIDTarget},
+			versions:  []string{"1.1.0", "1.1.0"},
+			wantState: StoreUpdateAvailable,
+			wantKind:  "product_and_update_id",
+		},
+		{
+			name:       "differing Product IDs conflict",
+			targets:    []*ExactStoreUpdateTarget{targetProductA, targetProductB},
+			versions:   []string{"1.1.0", "1.1.0"},
+			wantState:  StoreUpdateConflict,
+			wantReason: "product_id",
+		},
+		{
+			name:       "differing provider update IDs conflict",
+			targets:    []*ExactStoreUpdateTarget{targetUpdateA, targetUpdateB},
+			versions:   []string{"1.1.0", "1.1.0"},
+			wantState:  StoreUpdateConflict,
+			wantReason: "update_id",
+		},
+		{
+			name:       "differing known offered versions conflict",
+			targets:    []*ExactStoreUpdateTarget{productTarget, cloneStoreTarget(productTarget, wingetProvider)},
+			versions:   []string{"1.1.0", "2.0.0"},
+			wantState:  StoreUpdateConflict,
+			wantReason: "offered_version",
+		},
+		{
+			name:      "known and unknown offered versions are compatible",
+			targets:   []*ExactStoreUpdateTarget{productTarget, cloneStoreTarget(productTarget, wingetProvider)},
+			versions:  []string{"1.1.0", ""},
+			wantState: StoreUpdateAvailable,
+			wantKind:  "product_id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			observations := make([]StoreProviderObservation, 0, len(tt.targets))
+			providers := []StoreProviderIdentity{storeProvider, wingetProvider}
+			for index, target := range tt.targets {
+				provider := providers[index%len(providers)]
+				observations = append(observations, storeObservation(identity, scan, provider, StoreProviderHealthy, StoreObservationPositiveUpdateOffer, "1.0.0", tt.versions[index], target))
+			}
+			got := ReconcileStoreUpdate(StoreReconciliationInput{
+				Identity:          identity,
+				Scan:              scan,
+				RequiredProviders: []StoreProviderIdentity{storeProvider},
+				Observations:      observations,
+			})
+			if got.State != tt.wantState {
+				t.Fatalf("state=%s want %s assessment=%#v", got.State, tt.wantState, got)
+			}
+			if tt.wantState == StoreUpdateConflict {
+				if got.Target != nil || !containsFold(got.Reason, tt.wantReason) {
+					t.Fatalf("conflict should clear target and cite %q: %#v", tt.wantReason, got)
+				}
+				return
+			}
+			if got.Target == nil || exactTargetKind(got.Target.ProductID, got.Target.UpdateID) != tt.wantKind {
+				t.Fatalf("canonical target kind=%q want %q target=%#v", exactTargetKind(got.Target.ProductID, got.Target.UpdateID), tt.wantKind, got.Target)
+			}
+		})
+	}
+}
+
+func TestReconcileStoreUpdatePositiveWithAndWithoutTargetKeepsExactTarget(t *testing.T) {
+	identity := StoreInstalledIdentity{UserSID: "S-1-5-21-consensus", PackageFamilyName: "OpenAI.Codex_123abc"}
+	storeProvider := StoreProviderIdentity{ID: "store-cli-exact", Name: "Store CLI", Backend: backendStoreCLI}
+	wingetProvider := StoreProviderIdentity{ID: "winget-msstore-exact", Name: "WinGet msstore", Backend: backendWingetMSStoreFallback}
+	scan := completedStoreScan("scan-no-target", identity.UserSID, storeProvider, wingetProvider)
+	target := exactStoreTarget(identity, storeProvider)
+	target.ProductID = "9NCODEX"
+	target.UpdateID = ""
+	got := ReconcileStoreUpdate(StoreReconciliationInput{
+		Identity:          identity,
+		Scan:              scan,
+		RequiredProviders: []StoreProviderIdentity{storeProvider},
+		Observations: []StoreProviderObservation{
+			storeObservation(identity, scan, wingetProvider, StoreProviderHealthy, StoreObservationPositiveUpdateOffer, "1.0.0", "1.1.0", nil),
+			storeObservation(identity, scan, storeProvider, StoreProviderHealthy, StoreObservationPositiveUpdateOffer, "1.0.0", "1.1.0", target),
+		},
+	})
+	if got.State != StoreUpdateAvailable || got.Target == nil || got.Target.ProductID != "9NCODEX" {
+		t.Fatalf("targetless positive should not override exact target: %#v", got)
+	}
+}
+
+func TestReconcileStoreUpdatePositiveConsensusIgnoresProviderOrder(t *testing.T) {
+	identity := StoreInstalledIdentity{UserSID: "S-1-5-21-consensus", PackageFamilyName: "OpenAI.Codex_123abc"}
+	storeProvider := StoreProviderIdentity{ID: "store-cli-exact", Name: "Store CLI", Backend: backendStoreCLI}
+	wingetProvider := StoreProviderIdentity{ID: "winget-msstore-exact", Name: "WinGet msstore", Backend: backendWingetMSStoreFallback}
+	scan := completedStoreScan("scan-order", identity.UserSID, storeProvider, wingetProvider)
+	productTarget := exactStoreTarget(identity, storeProvider)
+	productTarget.ProductID = "9NCODEX"
+	productTarget.UpdateID = ""
+	updateIDTarget := exactStoreTarget(identity, wingetProvider)
+	updateIDTarget.ProductID = ""
+	updateIDTarget.UpdateID = identity.PackageFamilyName
+
+	for _, observations := range [][]StoreProviderObservation{
+		{
+			storeObservation(identity, scan, storeProvider, StoreProviderHealthy, StoreObservationPositiveUpdateOffer, "1.0.0", "1.1.0", productTarget),
+			storeObservation(identity, scan, wingetProvider, StoreProviderHealthy, StoreObservationPositiveUpdateOffer, "1.0.0", "", updateIDTarget),
+		},
+		{
+			storeObservation(identity, scan, wingetProvider, StoreProviderHealthy, StoreObservationPositiveUpdateOffer, "1.0.0", "", updateIDTarget),
+			storeObservation(identity, scan, storeProvider, StoreProviderHealthy, StoreObservationPositiveUpdateOffer, "1.0.0", "1.1.0", productTarget),
+		},
+	} {
+		got := ReconcileStoreUpdate(StoreReconciliationInput{
+			Identity:          identity,
+			Scan:              scan,
+			RequiredProviders: []StoreProviderIdentity{storeProvider},
+			Observations:      observations,
+		})
+		if got.State != StoreUpdateAvailable || got.Target == nil {
+			t.Fatalf("expected available consensus regardless of provider order, got %#v", got)
+		}
+		if got.Target.ProductID != "9NCODEX" || got.Target.UpdateID != identity.PackageFamilyName || got.AvailableVersion != "1.1.0" {
+			t.Fatalf("provider order changed canonical target/version: %#v", got)
+		}
+	}
+}
+
+func cloneStoreTarget(target *ExactStoreUpdateTarget, provider StoreProviderIdentity) *ExactStoreUpdateTarget {
+	if target == nil {
+		return nil
+	}
+	copy := *target
+	copy.Provider = provider
+	copy.VerifiedBy = provider.Key()
+	return &copy
+}
+
+func containsFold(value, want string) bool {
+	return strings.Contains(strings.ToLower(value), strings.ToLower(want))
 }
 
 func completedStoreScan(scanID, userSID string, providers ...StoreProviderIdentity) StoreScanGeneration {

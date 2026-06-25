@@ -231,6 +231,151 @@ func TestLogBufferRetainsNewestEntriesByBytes(t *testing.T) {
 	}
 }
 
+func TestStoreScanFloodDoesNotEvictWingetOrJobDiagnostics(t *testing.T) {
+	buffer := &LogBuffer{maxEntries: 25, maxBytes: 6 * 1024}
+	jobCtx := withLogMetadata(context.Background(), logMetadata{
+		JobID:      "job-winget-failed",
+		JobType:    jobTypeUpdate,
+		PackageKey: packageKey(managerWinget, "yt-dlp.FFmpeg"),
+		Manager:    managerWinget,
+		CommandID:  "cmd-winget-failed",
+	})
+	categories := logCategoriesForCommand([]string{"winget", "upgrade", "--id", "yt-dlp.FFmpeg", "--exact"})
+	buffer.AppendContext(jobCtx, "command", "winget upgrade --id yt-dlp.FFmpeg --exact", categories)
+	buffer.AppendContext(jobCtx, "stderr", "portable package was modified; use --force to continue", categories)
+	buffer.AppendContext(jobCtx, "exit", "winget upgrade --id yt-dlp.FFmpeg --exact exited with code 2316632151", categories)
+
+	storeCtx := withLogMetadata(context.Background(), logMetadata{
+		Activity:  logCategoryStoreScan,
+		Manager:   managerStore,
+		ScanID:    "scan-flood",
+		CommandID: "cmd-store-scan",
+	})
+	storeCategories := logCategoriesForCommand(managerCommand(managerStore, "show", "OpenAI.Codex_2p2nqsd0c76g0"))
+	for i := 0; i < 10000; i++ {
+		buffer.AppendContext(storeCtx, "stdout", "store marketing description screenshot rating category filler line", storeCategories)
+	}
+
+	if len(buffer.Query(0).Entries) >= 10000 {
+		t.Fatal("global log retained unbounded Store flood")
+	}
+	if buffer.totalBytes > buffer.maxBytes {
+		t.Fatalf("global byte bound exceeded: got %d max %d", buffer.totalBytes, buffer.maxBytes)
+	}
+
+	winget := buffer.CategoryQuery(logCategoryWinget, 0)
+	joinedWinget := joinLogMessages(winget.Entries)
+	for _, want := range []string{"winget upgrade --id yt-dlp.FFmpeg --exact", "portable package was modified", "2316632151"} {
+		if !strings.Contains(joinedWinget, want) {
+			t.Fatalf("winget diagnostics missing %q after Store flood: %q", want, joinedWinget)
+		}
+	}
+	if got := retainedLogBytes(winget.Entries); got > defaultCategoryLogMaxBytes {
+		t.Fatalf("winget category byte bound exceeded: got %d max %d", got, defaultCategoryLogMaxBytes)
+	}
+
+	jobLog := buffer.JobQuery("job-winget-failed", 0)
+	joinedJob := joinLogMessages(jobLog.Entries)
+	for _, want := range []string{"yt-dlp.FFmpeg", "portable package was modified", "cmd-winget-failed"} {
+		if !strings.Contains(joinedJob, want) {
+			t.Fatalf("job diagnostics missing %q after Store flood: %q", want, joinedJob)
+		}
+	}
+	if got := retainedLogBytes(jobLog.Entries); got > defaultJobLogMaxBytes {
+		t.Fatalf("job byte bound exceeded: got %d max %d", got, defaultJobLogMaxBytes)
+	}
+}
+
+func TestLogArchiveUsesSegmentedBuffersAfterStoreFlood(t *testing.T) {
+	buffer := &LogBuffer{maxEntries: 5, maxBytes: 2 * 1024}
+	ctx := withLogMetadata(context.Background(), logMetadata{
+		JobID:      "job-archive",
+		JobType:    jobTypeUpdate,
+		PackageKey: packageKey(managerWinget, "Git.Git"),
+		Manager:    managerWinget,
+		CommandID:  "cmd-archive",
+	})
+	buffer.AppendContext(ctx, "command", `winget upgrade --id Git.Git --exact token=secret C:\Users\User\AppData\Local\Temp`, logCategoriesForCommand([]string{"winget", "upgrade", "--id", "Git.Git", "--exact"}))
+	buffer.AppendContext(ctx, "stderr", "upgrade failed with code 42 for S-1-5-21-1000", logCategoriesForCommand([]string{"winget", "upgrade", "--id", "Git.Git", "--exact"}))
+	storeCtx := withLogMetadata(context.Background(), logMetadata{Activity: logCategoryStoreScan, Manager: managerStore, ScanID: "scan-archive"})
+	for i := 0; i < 500; i++ {
+		buffer.AppendContext(storeCtx, "stdout", strings.Repeat("store flood ", 20), logCategoriesForCommand(managerCommand(managerStore, "show", "Microsoft.Store")))
+	}
+
+	data, err := buildLogArchiveFromSnapshot(buffer.ExportSnapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := readZipTextFiles(t, data)
+	for _, file := range []string{"manifest.json", "winget.txt", "store-scan.txt", "jobs/job-archive.txt"} {
+		if _, ok := files[file]; !ok {
+			t.Fatalf("missing %s in exported files %#v", file, files)
+		}
+	}
+	if !strings.Contains(files["winget.txt"], "Git.Git") || !strings.Contains(files["jobs/job-archive.txt"], "upgrade failed with code 42") {
+		t.Fatalf("export missed winget/job diagnostics after flood: %#v", files)
+	}
+	for _, file := range []string{"winget.txt", "jobs/job-archive.txt"} {
+		for _, leaked := range []string{`C:\Users\User`, "token=secret", "S-1-5-21-1000"} {
+			if strings.Contains(files[file], leaked) {
+				t.Fatalf("export %s leaked %q: %q", file, leaked, files[file])
+			}
+		}
+	}
+}
+
+func TestLogQueryReportsGapWhenClientFallsBehind(t *testing.T) {
+	buffer := &LogBuffer{maxEntries: 3, maxBytes: 64 * 1024}
+	for _, message := range []string{"one", "two", "three", "four", "five"} {
+		buffer.Append("app", message)
+	}
+	query := buffer.Query(1)
+	if !query.GapDetected {
+		t.Fatalf("expected gap when since is older than retained history: %#v", query)
+	}
+	if query.DroppedCount == 0 || query.OldestID != 3 || query.LatestID != 5 {
+		t.Fatalf("unexpected gap metadata: %#v", query)
+	}
+}
+
+func TestStoreDetectionSummaryOmitsMarketingOutput(t *testing.T) {
+	oldLogs := sessionLogs
+	sessionLogs = &LogBuffer{}
+	defer func() { sessionLogs = oldLogs }()
+
+	result := CommandResult{
+		Command: strings.Join(managerCommand(managerStore, "show", "OpenAI.Codex_2p2nqsd0c76g0"), " "),
+		Stdout:  "Description: a very long marketing description\nRatings: five stars\nScreenshots: https://example.invalid/shot.png\n",
+	}
+	logStoreDetectionCommandSummary(context.Background(), managerCommand(managerStore, "show", "OpenAI.Codex_2p2nqsd0c76g0"), result, logCategoriesForCommand(managerCommand(managerStore, "show", "OpenAI.Codex_2p2nqsd0c76g0")), time.Second)
+
+	joined := joinLogMessages(sessionLogs.Snapshot())
+	for _, forbidden := range []string{"very long marketing description", "Ratings:", "Screenshots:"} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("summary leaked marketing output %q: %q", forbidden, joined)
+		}
+	}
+	if !strings.Contains(joined, "Store scan show") || !strings.Contains(joined, "OpenAI.Codex_2p2nqsd0c76g0") {
+		t.Fatalf("summary missing concise scan details: %q", joined)
+	}
+}
+
+func retainedLogBytes(entries []LogEntry) int {
+	total := 0
+	for _, entry := range entries {
+		total += logEntrySize(entry)
+	}
+	return total
+}
+
+func joinLogMessages(entries []LogEntry) string {
+	var builder strings.Builder
+	for _, entry := range entries {
+		builder.WriteString(formatLogEntryText(entry))
+	}
+	return builder.String()
+}
+
 func TestLogEntryCategoryMetadata(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -256,6 +401,26 @@ func TestLogEntryCategoryMetadata(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDetectionCommandsAreNotUpdateLogCategory(t *testing.T) {
+	cases := [][]string{
+		managerCommand(managerStore, "show", "OpenAI.Codex_2p2nqsd0c76g0"),
+		storeUpdateCommand("OpenAI.Codex_2p2nqsd0c76g0", false),
+		managerCommand(managerStore, "updates", "--apply", "false"),
+		managerCommand(managerWinget, "upgrade", "--accept-source-agreements", "--disable-interactivity"),
+		managerCommand(managerWinget, "upgrade", "--source", sourceMSStore, "--accept-source-agreements", "--disable-interactivity"),
+		managerCommand(managerWinget, "list", "--upgrade-available", "--id", "9N4D0MSMP0PT", "--exact", "--source", sourceMSStore),
+	}
+	for _, args := range cases {
+		entry := LogEntry{Stream: "command", Categories: logCategoriesForCommand(args)}
+		if logEntryInCategory(entry, logCategoryUpdates) {
+			t.Fatalf("detection command must not be in update category: args=%#v categories=%#v", args, entry.Categories)
+		}
+		if logEntryInCategory(entry, logCategoryMutations) {
+			t.Fatalf("detection command must not be in mutation category: args=%#v categories=%#v", args, entry.Categories)
+		}
 	}
 }
 

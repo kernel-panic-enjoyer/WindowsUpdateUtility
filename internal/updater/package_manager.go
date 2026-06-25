@@ -1,6 +1,7 @@
 package updater
 
 import (
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -48,6 +49,10 @@ type Package struct {
 	InstalledVersion           string                        `json:"installed_version,omitempty"`
 	OfferedVersion             string                        `json:"offered_version,omitempty"`
 	Applicability              string                        `json:"applicability,omitempty"`
+	PreferenceEligible         bool                          `json:"preference_eligible"`
+	CanUpdateNow               bool                          `json:"can_update_now"`
+	CannotUpdateReason         string                        `json:"cannot_update_reason,omitempty"`
+	ExactTargetKind            string                        `json:"exact_target_kind,omitempty"`
 
 	AllowUnknownVersionUpdate bool `json:"-"`
 	AllowPinnedUpdate         bool `json:"-"`
@@ -89,6 +94,42 @@ type Inventory struct {
 type UpdateResult struct {
 	Key    string        `json:"key"`
 	Result CommandResult `json:"result"`
+}
+
+type UpdateResultSummary struct {
+	Key             string `json:"key"`
+	Manager         string `json:"manager,omitempty"`
+	PackageID       string `json:"package_id,omitempty"`
+	Success         bool   `json:"success"`
+	Code            int    `json:"code"`
+	FinishedAt      string `json:"finished_at,omitempty"`
+	RestartRequired bool   `json:"restart_required,omitempty"`
+	Message         string `json:"message,omitempty"`
+}
+
+func (summary *UpdateResultSummary) UnmarshalJSON(data []byte) error {
+	var probe struct {
+		Result *CommandResult `json:"result"`
+	}
+	if err := json.Unmarshal(data, &probe); err == nil && probe.Result != nil {
+		var legacy UpdateResult
+		if err := json.Unmarshal(data, &legacy); err != nil {
+			return err
+		}
+		*summary = summarizeUpdateResult(legacy, "")
+		return nil
+	}
+	type alias UpdateResultSummary
+	var direct alias
+	if err := json.Unmarshal(data, &direct); err != nil {
+		return err
+	}
+	if direct.Key != "" || direct.Manager != "" || direct.PackageID != "" || direct.Message != "" || direct.Code != 0 || direct.Success || direct.RestartRequired {
+		*summary = UpdateResultSummary(direct)
+		return nil
+	}
+	*summary = UpdateResultSummary(direct)
+	return nil
 }
 
 type InventoryScanSummary struct {

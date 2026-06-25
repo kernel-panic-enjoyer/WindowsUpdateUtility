@@ -1,0 +1,46 @@
+name: Browser UI CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  browser:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: tests/browser
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: tests/browser/go.mod
+          cache-dependency-path: tests/browser/go.sum
+
+      - name: Report browser availability
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
+            "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
+            "$env:LOCALAPPDATA\Microsoft\Edge\Application\msedge.exe",
+            "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
+            "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
+            "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
+          )
+          $found = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if ($found) {
+            "Browser found: $found"
+          } else {
+            "No Edge/Chrome executable found; browser tests are expected to skip through their own discovery guard."
+          }
+
+      - name: Browser tests
+        run: go test -count=1 -tags uitestsupport ./...

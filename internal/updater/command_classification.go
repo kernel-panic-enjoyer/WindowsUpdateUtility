@@ -173,7 +173,7 @@ func lockMutexContextWithWait(ctx context.Context, mu *sync.Mutex, onWait func()
 func commandContextDoneResult(ctx context.Context, command, action string, categories []string) CommandResult {
 	result := CommandResult{Command: command}
 	logCommand := func(stream, message string) {
-		sessionLogs.AppendCategorized(stream, message, categories)
+		sessionLogs.AppendContext(ctx, stream, message, categories)
 	}
 	verb := "cancelled"
 	switch ctx.Err() {

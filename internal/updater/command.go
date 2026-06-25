@@ -30,8 +30,9 @@ func runCommand(timeout time.Duration, args ...string) CommandResult {
 func runCommandContext(parent context.Context, timeout time.Duration, args ...string) CommandResult {
 	result := CommandResult{Command: strings.Join(args, " ")}
 	categories := logCategoriesForCommand(args)
+	parent = withLogMetadata(parent, logMetadata{CommandID: nextCommandLogID()})
 	logCommand := func(stream, message string) {
-		sessionLogs.AppendCategorized(stream, message, categories)
+		sessionLogs.AppendContext(parent, stream, message, categories)
 	}
 	// fail127 records an internal launch failure (code 127) consistently: the
 	// process never produced its own exit code, so we synthesize one and log it.
@@ -53,6 +54,7 @@ func runCommandContext(parent context.Context, timeout time.Duration, args ...st
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
+	startedAt := time.Now()
 	logCommand("command", result.Command)
 	mutationCommand := isPackageManagerMutationCommand(args)
 	if mutationCommand {
@@ -122,14 +124,18 @@ func runCommandContext(parent context.Context, timeout time.Duration, args ...st
 	}
 
 	var wg sync.WaitGroup
+	suppressDetectionOutput := suppressCommandStdoutInSessionLog(args)
 	wg.Add(2)
-	go streamCommandOutputCategorized(stdoutPipe, "stdout", stdout, &wg, categories)
-	go streamCommandOutputCategorized(stderrPipe, "stderr", stderr, &wg, categories)
+	go streamCommandOutputContext(ctx, stdoutPipe, "stdout", stdout, &wg, categories, !suppressDetectionOutput)
+	go streamCommandOutputContext(ctx, stderrPipe, "stderr", stderr, &wg, categories, true)
 	err = waitForStartedCommand(ctx, cmd, owner)
 	wg.Wait()
 
 	result.Stdout = stdout.String()
 	result.Stderr = stderr.String()
+	if suppressDetectionOutput {
+		logStoreDetectionCommandSummary(ctx, args, result, categories, time.Since(startedAt))
+	}
 	if ctx.Err() == context.DeadlineExceeded {
 		result.Code = 124
 		result.Stderr += "\nTimed out."

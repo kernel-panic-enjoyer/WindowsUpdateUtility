@@ -296,6 +296,7 @@ func applyPublishedStoreAssessmentToPackage(pkg Package, assessment StorePublish
 		pkg.ActionBackend = backendStoreCLI
 	}
 	pkg.Key = storePackagePublicKey(pkg)
+	pkg = applyPackageCapabilities(pkg)
 	return pkg
 }
 

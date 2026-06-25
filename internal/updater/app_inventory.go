@@ -338,6 +338,7 @@ func effectiveInventoryFromBase(ctx context.Context, state State, inventory Inve
 func applyInventoryState(state State, inventory Inventory) Inventory {
 	for index := range inventory.Packages {
 		inventory.Packages[index].AutoUpdate = packageAutoUpdateEnabled(state, inventory.Packages[index])
+		inventory.Packages[index] = applyPackageCapabilities(inventory.Packages[index])
 	}
 	return inventory
 }

@@ -9,7 +9,8 @@ import (
 )
 
 type jobsAPIResponse struct {
-	Jobs []OperationJobStatus `json:"jobs"`
+	Jobs     []OperationJobStatus `json:"jobs"`
+	Revision int64                `json:"revision,omitempty"`
 }
 
 func parseJobID(r *http.Request) string {
@@ -46,7 +47,24 @@ func (app *App) handleJobsAPI(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodGet) {
 		return
 	}
-	writeJSON(w, http.StatusOK, jobsAPIResponse{Jobs: app.operationJobsSnapshot()})
+	jobs := app.operationJobsSnapshot()
+	writeJSON(w, http.StatusOK, jobsAPIResponse{Jobs: jobs, Revision: maxJobRevision(jobs)})
+}
+
+func (app *App) handleJobLogAPI(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+	id := parseJobID(r)
+	if _, ok := app.operationJobStatus(id); !ok {
+		writeAPIError(w, http.StatusNotFound, jobNotFoundError(id))
+		return
+	}
+	since, ok := parseLogSince(w, r)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, logsAPIResponseFromQuery(sessionLogs.JobQuery(id, since)))
 }
 
 func (app *App) handleJobCancelAPI(w http.ResponseWriter, r *http.Request) {
@@ -111,9 +129,12 @@ func (app *App) handleEventsAPI(w http.ResponseWriter, r *http.Request) {
 		return true
 	}
 
-	send("jobs", jobsAPIResponse{Jobs: app.operationJobsSnapshot()})
-	initialLogs := sessionLogs.Since(since)
-	if !send("logs", logsAPIResponse{Entries: initialLogs, LatestID: sessionLogs.LatestID()}) {
+	initialJobs := app.operationJobsSnapshot()
+	lastJobRevision := maxJobRevision(initialJobs)
+	send("jobs", jobsAPIResponse{Jobs: initialJobs, Revision: lastJobRevision})
+	initialQuery := sessionLogs.Query(since)
+	initialLogs := initialQuery.Entries
+	if !send("logs", logsAPIResponseFromQuery(initialQuery)) {
 		return
 	}
 	for _, entry := range initialLogs {
@@ -150,12 +171,15 @@ func (app *App) handleEventsAPI(w http.ResponseWriter, r *http.Request) {
 					break
 				}
 			}
-			entries := sessionLogs.Since(since)
-			latestID := sessionLogs.LatestID()
-			if active || len(entries) > 0 {
-				if !send("jobs", jobsAPIResponse{Jobs: jobs}) {
+			query := sessionLogs.Query(since)
+			entries := query.Entries
+			latestID := query.LatestID
+			revision := maxJobRevision(jobs)
+			if revision != lastJobRevision {
+				if !send("jobs", jobsAPIResponse{Jobs: jobs, Revision: revision}) {
 					return
 				}
+				lastJobRevision = revision
 			}
 			if len(entries) == 0 {
 				if time.Now().After(heartbeatDue) {
@@ -166,7 +190,7 @@ func (app *App) handleEventsAPI(w http.ResponseWriter, r *http.Request) {
 				}
 				continue
 			}
-			if !send("logs", logsAPIResponse{Entries: entries, LatestID: latestID}) {
+			if !send("logs", logsAPIResponseFromQuery(query)) {
 				return
 			}
 			for _, entry := range entries {
@@ -176,4 +200,14 @@ func (app *App) handleEventsAPI(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+func maxJobRevision(jobs []OperationJobStatus) int64 {
+	var revision int64
+	for _, job := range jobs {
+		if job.Revision > revision {
+			revision = job.Revision
+		}
+	}
+	return revision
 }

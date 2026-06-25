@@ -115,12 +115,115 @@ func TestTransactionalStoreAssessmentAPIStalePositiveAndBrowserReload(t *testing
 	}
 }
 
+func TestPackageCapabilitiesSeparateStorePreferenceFromActionability(t *testing.T) {
+	current := applyPackageCapabilities(Package{
+		Key:                        packageKey(managerStore, "OpenAI.Codex_abc123"),
+		Manager:                    managerStore,
+		ID:                         "OpenAI.Codex_abc123",
+		Name:                       "Codex",
+		Version:                    "1.0.0",
+		UpdateSupported:            true,
+		Installed:                  true,
+		Source:                     sourceNativeAppX,
+		InstalledPackageFamilyName: "OpenAI.Codex_abc123",
+		UpdateState:                string(StoreUpdateCurrent),
+	})
+	if !current.PreferenceEligible || current.CanUpdateNow || current.ExactTargetKind != exactTargetKindNone {
+		t.Fatalf("current exact Store package should be preference-eligible but not actionable: %#v", current)
+	}
+
+	unknown := current
+	unknown.UpdateState = string(StoreUpdateUnknown)
+	unknown = applyPackageCapabilities(unknown)
+	if !unknown.PreferenceEligible || unknown.CanUpdateNow {
+		t.Fatalf("unknown exact Store package should be preference-eligible but not actionable: %#v", unknown)
+	}
+
+	conflict := current
+	conflict.UpdateState = string(StoreUpdateConflict)
+	conflict.StoreProductID = "9NCODEX"
+	conflict.ExactActionTargetAvailable = false
+	conflict = applyPackageCapabilities(conflict)
+	if !conflict.PreferenceEligible || conflict.CanUpdateNow || !strings.Contains(conflict.CannotUpdateReason, "conflict") {
+		t.Fatalf("conflicting Store package must stay preference-only and non-actionable: %#v", conflict)
+	}
+}
+
+func TestPackageCapabilitiesAllowUpdateIDOnlyStoreTarget(t *testing.T) {
+	pkg := applyPackageCapabilities(Package{
+		Key:                        packageKey(managerStore, "OpenAI.Codex_abc123"),
+		Manager:                    managerStore,
+		ID:                         "OpenAI.Codex_abc123",
+		Name:                       "Codex",
+		Version:                    "1.0.0",
+		UpdateSupported:            true,
+		Installed:                  true,
+		Source:                     sourceNativeAppX,
+		InstalledPackageFamilyName: "OpenAI.Codex_abc123",
+		UpdateState:                string(StoreUpdateAvailable),
+		ExactActionTargetAvailable: true,
+		StoreUpdateID:              "OpenAI.Codex_abc123",
+	})
+	if !pkg.PreferenceEligible || !pkg.CanUpdateNow || pkg.ExactTargetKind != exactTargetKindUpdateID || pkg.CannotUpdateReason != "" {
+		t.Fatalf("update-ID-only Store target should be actionable by backend capability fields: %#v", pkg)
+	}
+}
+
+func TestUpdateSelectionUsesSharedPackagePolicy(t *testing.T) {
+	t.Setenv("UPDATER_STATE_DIR", t.TempDir())
+	app := testSessionApp()
+	actionable := applyPackageCapabilities(Package{
+		Key:                        packageKey(managerStore, "OpenAI.Codex_abc123"),
+		Manager:                    managerStore,
+		ID:                         "OpenAI.Codex_abc123",
+		Name:                       "Codex",
+		Version:                    "1.0.0",
+		UpdateAvailable:            true,
+		UpdateSupported:            true,
+		Installed:                  true,
+		Source:                     sourceNativeAppX,
+		InstalledPackageFamilyName: "OpenAI.Codex_abc123",
+		UpdateState:                string(StoreUpdateAvailable),
+		ExactActionTargetAvailable: true,
+		StoreUpdateID:              "OpenAI.Codex_abc123",
+	})
+	blocked := applyPackageCapabilities(Package{
+		Key:                        packageKey(managerStore, "Blocked.App_abc123"),
+		Manager:                    managerStore,
+		ID:                         "Blocked.App_abc123",
+		Name:                       "Blocked",
+		Version:                    "1.0.0",
+		UpdateAvailable:            false,
+		UpdateSupported:            true,
+		Installed:                  true,
+		Source:                     sourceNativeAppX,
+		InstalledPackageFamilyName: "Blocked.App_abc123",
+		UpdateState:                string(StoreUpdateConflict),
+	})
+	app.inventory = Inventory{PackageLookup: PackageLookup{Packages: []Package{actionable, blocked}}}
+	app.inventoryFetchedAt = time.Now()
+
+	if !packageAllowedInBulkUpdate(actionable, UpdateOptions{}) {
+		t.Fatal("bulk policy rejected actionable update-ID-only Store package")
+	}
+	packages, mode, err := app.updateJobPackagesContext(context.Background(), []string{actionable.Key}, UpdateOptions{})
+	if err != nil || mode != updateJobModeSelected || len(packages) != 1 || packages[0].ExactTargetKind != exactTargetKindUpdateID {
+		t.Fatalf("selected update did not use shared actionable Store policy: packages=%#v mode=%s err=%v", packages, mode, err)
+	}
+	if packageAllowedInBulkUpdate(blocked, UpdateOptions{}) {
+		t.Fatal("bulk policy accepted conflicting Store package")
+	}
+	if _, _, err := app.updateJobPackagesContext(context.Background(), []string{blocked.Key}, UpdateOptions{}); err == nil || !strings.Contains(err.Error(), "conflict") {
+		t.Fatalf("selected update should reject conflict with backend reason, err=%v", err)
+	}
+}
+
 func TestStoreAssessmentBrowserSmokeStrings(t *testing.T) {
 	surface := uiJS + "\n" + uiCSS
 	for _, expected := range []string{
 		"storeUpdateState",
 		`return storeUpdateState(pkg) === "available" && !pkg.stale;`,
-		"return packageHasUpdate(pkg);",
+		"return !!pkg.can_update_now;",
 		"Stale evidence",
 		`? "Stale"`,
 		"storeScanHealth",

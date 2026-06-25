@@ -19,10 +19,11 @@ const (
 )
 
 type storeCLIExactCatalogProvider struct {
-	Run         func(context.Context, time.Duration, ...string) CommandResult
-	Now         func() time.Time
-	Version     string
-	Concurrency int
+	Run            func(context.Context, time.Duration, ...string) CommandResult
+	Now            func() time.Time
+	Version        string
+	Concurrency    int
+	StateCheckPFNs map[string]bool
 }
 
 type storeCLIProductMetadata struct {
@@ -391,6 +392,10 @@ func (provider storeCLIExactCatalogProvider) observeFamily(ctx context.Context, 
 		ScanID:            scan.ScanID,
 		VerifiedAt:        observedAt,
 		Evidence:          "store show <package-family-name> returned matching PFN and Product ID",
+	}
+	if provider.StateCheckPFNs != nil && !provider.StateCheckPFNs[strings.ToLower(identity.PackageFamilyName)] {
+		base.Mapping = &mapping
+		return storeCLIExactFamilyResult{Mapping: &mapping, PFN: identity.PackageFamilyName}
 	}
 	update := provider.run(ctx, storeCLIExactProviderTimeout, storeUpdateCommand(identity.PackageFamilyName, false)...)
 	state, updateErr := parseStoreCLIUpdateCheckResult(ctx, update.Stdout+"\n"+update.Stderr, update)

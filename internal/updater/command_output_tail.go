@@ -71,3 +71,38 @@ func validUTF8TailString(data []byte) string {
 	}
 	return strings.ToValidUTF8(string(trimmed), "")
 }
+
+func compactCommandResult(result CommandResult, streamLimit, commandLimit int) CommandResult {
+	if streamLimit <= 0 {
+		streamLimit = commandResultStreamLimitBytes
+	}
+	if commandLimit <= 0 {
+		commandLimit = maxCommandResultCommandBytes
+	}
+	result.Command = truncateCommandField(result.Command, commandLimit)
+	result.Stdout = boundCommandText(result.Stdout, streamLimit)
+	result.Stderr = boundCommandText(result.Stderr, streamLimit)
+	return result
+}
+
+func truncateCommandField(value string, limit int) string {
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	omitted := len(value) - limit
+	marker := fmt.Sprintf("[command truncated: omitted %d bytes]\n", omitted)
+	keep := limit - len(marker)
+	if keep < 0 {
+		keep = 0
+	}
+	return marker + validUTF8TailString([]byte(value[len(value)-keep:]))
+}
+
+func boundCommandText(value string, limit int) string {
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	tail := newBoundedOutputTail(limit)
+	_, _ = tail.Write([]byte(value))
+	return tail.String()
+}

@@ -3,6 +3,7 @@ package updater
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -132,6 +133,131 @@ func TestScheduledAutoUpdateRunsStorePackageAfterOwnedFreshScanPublishes(t *test
 	}
 	if updated.LastAutoUpdateSummary == nil || !updated.LastAutoUpdateSummary.StoreScan.FreshGeneration || updated.LastAutoUpdateSummary.StoreScan.UsedGenerationID != "fresh-owned-scan" {
 		t.Fatalf("fresh owned scan was not summarized correctly: %#v", updated.LastAutoUpdateSummary)
+	}
+}
+
+func TestScheduledAutoUpdateSkipsFreshStoreProjectionWithGenericError(t *testing.T) {
+	userSID, err := currentUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pfn := "OpenAI.Codex_abc123"
+	identity := StoreInstalledIdentity{UserSID: userSID, PackageFamilyName: pfn}
+	repository := newTestStoreScanRepository(t)
+	state := defaultState()
+	state.AutoUpdateGlobal = true
+	state.AutoUpdatePackages = map[string]bool{canonicalStoreAutoUpdateKey(userSID, pfn): true}
+	store := newMemoryStateStore(state)
+
+	executed := installScheduledStoreAutoUpdateHooks(t, userSID, pfn, repository, func(context.Context) (StoreScanResult, error) {
+		completedAt := time.Now().UTC().Add(time.Second)
+		scanID := "fresh-error-scan"
+		persistStoreAutoUpdatePositiveSnapshot(t, repository, identity, scanID, completedAt)
+		return StoreScanResult{
+			Published: true,
+			Scan: StoreScanGeneration{
+				ScanID:           scanID,
+				UserSID:          userSID,
+				StartedAt:        completedAt.Add(-time.Second),
+				CompletedAt:      completedAt,
+				CompletionStatus: StoreScanCompleted,
+			},
+		}, errors.New("post-persistence maintenance failed")
+	})
+
+	results := runAutoUpdateWithStore(context.Background(), store)
+	if *executed || len(results) != 0 {
+		t.Fatalf("scheduled Store auto-update used error-bearing fresh projection: executed=%t results=%#v", *executed, results)
+	}
+	updated, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.LastAutoUpdateSummary == nil || len(updated.LastAutoUpdateSummary.SkippedPackages) != 1 {
+		t.Fatalf("expected skipped Store package summary, got %#v", updated.LastAutoUpdateSummary)
+	}
+	reason := updated.LastAutoUpdateSummary.SkippedPackages[0].Reason
+	if !strings.Contains(reason, "post-persistence maintenance failed") {
+		t.Fatalf("skipped summary did not include blocking error: %q", reason)
+	}
+}
+
+func TestScheduledAutoUpdateSkipsStoreWhenFreshEvidenceExistsWithUnrelatedLocalError(t *testing.T) {
+	userSID, err := currentUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pfn := "OpenAI.Codex_abc123"
+	identity := StoreInstalledIdentity{UserSID: userSID, PackageFamilyName: pfn}
+	repository := newTestStoreScanRepository(t)
+	state := defaultState()
+	state.AutoUpdateGlobal = true
+	state.AutoUpdatePackages = map[string]bool{
+		canonicalStoreAutoUpdateKey(userSID, pfn): true,
+		"winget:Vendor.App":                       true,
+	}
+	store := newMemoryStateStore(state)
+
+	executedStore := installScheduledStoreAutoUpdateHooks(t, userSID, pfn, repository, func(context.Context) (StoreScanResult, error) {
+		completedAt := time.Now().UTC().Add(time.Second)
+		persistStoreAutoUpdatePositiveSnapshot(t, repository, identity, "fresh-unrelated-error-scan", completedAt)
+		return StoreScanResult{}, errors.New("local Store scan provider failed")
+	})
+	oldGetter := inventoryGetter
+	inventoryGetter = func(context.Context) Inventory {
+		return Inventory{PackageLookup: PackageLookup{Packages: []Package{
+			{
+				Key:                        packageKey(managerStore, pfn),
+				Manager:                    managerStore,
+				ID:                         pfn,
+				Name:                       "Codex",
+				Version:                    "1.0.0",
+				Installed:                  true,
+				Source:                     sourceNativeAppX,
+				Match:                      pfn + "_1.0.0.0_x64__abc123",
+				ActionBackend:              backendAppXInventory,
+				UpdateSupported:            false,
+				InstalledPackageFamilyName: pfn,
+				ExactIdentityAvailable:     true,
+			},
+			{
+				Key:              "winget:Vendor.App",
+				Manager:          managerWinget,
+				ID:               "Vendor.App",
+				Name:             "Vendor App",
+				Version:          "1.0.0",
+				AvailableVersion: "1.1.0",
+				UpdateAvailable:  true,
+				UpdateSupported:  true,
+				Installed:        true,
+			},
+		}}}
+	}
+	t.Cleanup(func() { inventoryGetter = oldGetter })
+	restoreActions := replacePackageActionHooks(
+		func(context.Context, time.Duration, ...string) CommandResult {
+			return CommandResult{OK: true, Command: "winget upgrade Vendor.App"}
+		},
+		func(manager string) bool { return manager == managerWinget || manager == managerStore },
+	)
+	t.Cleanup(restoreActions)
+
+	results := runAutoUpdateWithStore(context.Background(), store)
+	if *executedStore {
+		t.Fatal("scheduled Store auto-update ran despite unrelated local scan error")
+	}
+	if len(results) != 1 || results[0].Key != "winget:Vendor.App" || !results[0].Result.OK {
+		t.Fatalf("non-Store auto-update should continue while Store is skipped, got %#v", results)
+	}
+	updated, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.LastAutoUpdateSummary == nil || len(updated.LastAutoUpdateSummary.SkippedPackages) != 1 {
+		t.Fatalf("expected Store skipped summary, got %#v", updated.LastAutoUpdateSummary)
+	}
+	if !strings.Contains(updated.LastAutoUpdateSummary.SkippedPackages[0].Reason, "local Store scan provider failed") {
+		t.Fatalf("Store skipped reason did not include local error: %#v", updated.LastAutoUpdateSummary.SkippedPackages)
 	}
 }
 
@@ -297,6 +423,170 @@ func TestScheduledAutoUpdateRunsNonStorePackageWhenStoreScanFails(t *testing.T) 
 	results := runAutoUpdateWithStore(context.Background(), store)
 	if len(results) != 1 || results[0].Key != "winget:Vendor.App" || !results[0].Result.OK {
 		t.Fatalf("non-Store auto-update should continue after Store scan failure, got %#v", results)
+	}
+}
+
+func TestScheduledAutoUpdateCancellationDuringInventoryIsSummarized(t *testing.T) {
+	state := defaultState()
+	state.AutoUpdateGlobal = true
+	state.AutoUpdatePackages = map[string]bool{"winget:Vendor.App": true}
+	store := newMemoryStateStore(state)
+
+	oldGetter := inventoryGetter
+	started := make(chan struct{})
+	inventoryGetter = func(ctx context.Context) Inventory {
+		close(started)
+		<-ctx.Done()
+		return Inventory{PackageLookup: PackageLookup{Packages: []Package{{
+			Key:              "winget:Vendor.App",
+			Manager:          managerWinget,
+			ID:               "Vendor.App",
+			UpdateAvailable:  true,
+			UpdateSupported:  true,
+			AvailableVersion: "1.1.0",
+		}}}}
+	}
+	t.Cleanup(func() { inventoryGetter = oldGetter })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan []UpdateResult, 1)
+	go func() {
+		done <- runAutoUpdateWithStore(ctx, store)
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("scheduled inventory collection did not start")
+	}
+	cancel()
+	select {
+	case results := <-done:
+		if len(results) != 0 {
+			t.Fatalf("cancelled inventory should not produce update results, got %#v", results)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("scheduled auto-update did not stop after inventory cancellation")
+	}
+	updated, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.LastAutoUpdateSummary == nil || len(updated.LastAutoUpdateSummary.SkippedPackages) != 1 {
+		t.Fatalf("expected cancellation summary, got %#v", updated.LastAutoUpdateSummary)
+	}
+	if !strings.Contains(strings.ToLower(updated.LastAutoUpdateSummary.SkippedPackages[0].Reason), "inventory") {
+		t.Fatalf("cancellation reason did not mention inventory: %#v", updated.LastAutoUpdateSummary.SkippedPackages)
+	}
+}
+
+func TestScheduledAutoUpdateCancellationDuringStoreScanWaitIsSummarized(t *testing.T) {
+	userSID, err := currentUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pfn := "OpenAI.Codex_abc123"
+	repository := newTestStoreScanRepository(t)
+	state := defaultState()
+	state.AutoUpdateGlobal = true
+	state.AutoUpdatePackages = map[string]bool{canonicalStoreAutoUpdateKey(userSID, pfn): true}
+	store := newMemoryStateStore(state)
+
+	oldTimeout := scheduledStoreScanWaitTimeout
+	oldPoll := scheduledStoreScanPollInterval
+	scheduledStoreScanWaitTimeout = 10 * time.Second
+	scheduledStoreScanPollInterval = 5 * time.Millisecond
+	t.Cleanup(func() {
+		scheduledStoreScanWaitTimeout = oldTimeout
+		scheduledStoreScanPollInterval = oldPoll
+	})
+
+	scanAttempted := make(chan struct{})
+	installScheduledStoreAutoUpdateHooks(t, userSID, pfn, repository, func(context.Context) (StoreScanResult, error) {
+		close(scanAttempted)
+		return StoreScanResult{}, errStoreScanAlreadyRunning
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan []UpdateResult, 1)
+	go func() {
+		done <- runAutoUpdateWithStore(ctx, store)
+	}()
+	select {
+	case <-scanAttempted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("scheduled Store scan did not start")
+	}
+	cancel()
+	select {
+	case results := <-done:
+		if len(results) != 0 {
+			t.Fatalf("cancelled Store scan wait should not produce update results, got %#v", results)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("scheduled auto-update did not stop after Store scan wait cancellation")
+	}
+	updated, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.LastAutoUpdateSummary == nil || updated.LastAutoUpdateSummary.StoreScan.Error == "" || len(updated.LastAutoUpdateSummary.SkippedPackages) == 0 {
+		t.Fatalf("expected Store scan cancellation summary, got %#v", updated.LastAutoUpdateSummary)
+	}
+}
+
+func TestScheduledAutoUpdateCancellationDuringPackageActionRetainsEarlierResults(t *testing.T) {
+	state := defaultState()
+	state.AutoUpdateGlobal = true
+	state.AutoUpdatePackages = map[string]bool{
+		"winget:Vendor.First":  true,
+		"winget:Vendor.Second": true,
+	}
+	store := newMemoryStateStore(state)
+
+	oldGetter := inventoryGetter
+	inventoryGetter = func(context.Context) Inventory {
+		return Inventory{PackageLookup: PackageLookup{Packages: []Package{
+			{Key: "winget:Vendor.First", Manager: managerWinget, ID: "Vendor.First", Name: "First", Version: "1.0.0", AvailableVersion: "1.1.0", UpdateAvailable: true, UpdateSupported: true},
+			{Key: "winget:Vendor.Second", Manager: managerWinget, ID: "Vendor.Second", Name: "Second", Version: "1.0.0", AvailableVersion: "1.1.0", UpdateAvailable: true, UpdateSupported: true},
+		}}}
+	}
+	t.Cleanup(func() { inventoryGetter = oldGetter })
+
+	oldScan := runStoreTransactionalScanForInventory
+	runStoreTransactionalScanForInventory = func(context.Context) (StoreScanResult, error) {
+		return StoreScanResult{}, nil
+	}
+	t.Cleanup(func() { runStoreTransactionalScanForInventory = oldScan })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var calls int
+	restoreActions := replacePackageActionHooks(
+		func(got context.Context, timeout time.Duration, args ...string) CommandResult {
+			calls++
+			target := packageActionTargetFromArgs(args)
+			if target == "Vendor.First" {
+				return CommandResult{OK: true, Command: "winget upgrade Vendor.First"}
+			}
+			cancel()
+			<-got.Done()
+			return commandContextDoneResult(got, "winget upgrade Vendor.Second", "during scheduled package action", logCategoriesForCommand(args))
+		},
+		func(manager string) bool { return manager == managerWinget },
+	)
+	t.Cleanup(restoreActions)
+
+	results := runAutoUpdateWithStore(ctx, store)
+	if calls != 2 {
+		t.Fatalf("expected two package actions before cancellation, got %d", calls)
+	}
+	if len(results) != 2 || results[0].Key != "winget:Vendor.First" || !results[0].Result.OK || results[1].Key != "winget:Vendor.Second" {
+		t.Fatalf("expected first result retained and second cancelled, got %#v", results)
+	}
+	updated, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.LastAutoUpdateResults) != 2 || updated.LastAutoUpdateSummary == nil || len(updated.LastAutoUpdateSummary.SkippedPackages) == 0 {
+		t.Fatalf("expected partial results and cancellation summary, got state %#v", updated)
 	}
 }
 

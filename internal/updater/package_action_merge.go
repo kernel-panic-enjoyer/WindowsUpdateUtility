@@ -15,5 +15,5 @@ func mergeCommandResults(primary, fallback CommandResult, label string) CommandR
 		merged.Stderr += "\n"
 	}
 	merged.Stderr += fallback.Stderr
-	return merged
+	return compactCommandResult(merged, commandResultStreamLimitBytes, maxCommandResultCommandBytes)
 }

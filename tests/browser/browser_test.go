@@ -14,6 +14,7 @@ package browser
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -225,6 +226,92 @@ func TestBrowserConnectionBadgeExpiresWhenBackendStops(t *testing.T) {
 	if strings.Contains(text, "Connected") {
 		t.Fatalf("connection badge stayed connected after backend stopped: %q", text)
 	}
+}
+
+func TestBrowserWingetLogTabSurvivesStoreFlood(t *testing.T) {
+	app := updater.NewBrowserTestApp()
+	logPayload := browserLogFloodPayload(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/events" {
+			updater.SetTestSecurityHeaders(w)
+			if !app.TestSessionOK(r) {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprintf(w, "event: logs\ndata: %s\n\n", logPayload)
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			return
+		}
+		app.TestHandler()(w, r)
+	}))
+	t.Cleanup(server.Close)
+	ctx, cancel := newBrowserContext(t)
+	defer cancel()
+
+	navigateAuthenticated(t, ctx, server.URL)
+	waitForText(t, ctx, `#log-connection-status`, "Connected")
+	if err := chromedp.Run(ctx,
+		chromedp.Click(`[data-log-category="winget"]`, chromedp.ByQuery),
+	); err != nil {
+		t.Fatal(err)
+	}
+	waitForText(t, ctx, `#session-log`, "Older log entries were discarded before this point.")
+	logText := waitForText(t, ctx, `#session-log`, "winget upgrade --id yt-dlp.FFmpeg --exact")
+	if !strings.Contains(logText, "portable package was modified") {
+		t.Fatalf("winget tab lost failure diagnostics after Store flood:\n%s", logText)
+	}
+}
+
+func browserLogFloodPayload(t *testing.T) string {
+	t.Helper()
+	type entry struct {
+		ID         int64    `json:"id"`
+		Timestamp  string   `json:"timestamp"`
+		Stream     string   `json:"stream"`
+		Message    string   `json:"message"`
+		Categories []string `json:"categories"`
+		JobID      string   `json:"job_id,omitempty"`
+		PackageKey string   `json:"package_key,omitempty"`
+		Manager    string   `json:"manager,omitempty"`
+		CommandID  string   `json:"command_id,omitempty"`
+	}
+	entries := []entry{{
+		ID:         100,
+		Timestamp:  time.Now().UTC().Format(time.RFC3339),
+		Stream:     "stderr",
+		Message:    "winget upgrade --id yt-dlp.FFmpeg --exact failed: portable package was modified",
+		Categories: []string{"all", "winget", "updates", "mutations"},
+		JobID:      "job-browser-winget",
+		PackageKey: "winget:yt-dlp.FFmpeg",
+		Manager:    updater.ManagerWinget,
+		CommandID:  "cmd-browser-winget",
+	}}
+	for i := 0; i < 3200; i++ {
+		entries = append(entries, entry{
+			ID:         int64(101 + i),
+			Timestamp:  time.Now().UTC().Format(time.RFC3339),
+			Stream:     "stdout",
+			Message:    "store marketing description rating screenshot filler",
+			Categories: []string{"all", "store", "store-scan"},
+			Manager:    updater.ManagerStore,
+		})
+	}
+	payload, err := json.Marshal(map[string]any{
+		"entries":       entries,
+		"oldest_id":     int64(100),
+		"latest_id":     int64(3300),
+		"dropped_count": int64(99),
+		"dropped_bytes": int64(4096),
+		"gap_detected":  true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(payload)
 }
 
 func TestBrowserSearchShowsPartialFailuresAndProvenance(t *testing.T) {

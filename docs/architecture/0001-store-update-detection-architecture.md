@@ -74,6 +74,9 @@ embedded, extracted, or launched for Microsoft Store inventory.
 
 ## Known Gaps
 
-- PackageCatalog event verification is not implemented in this build; verification uses exact inventory polling and targeted catalog checks.
+- PackageCatalog events are used only as an acceleration signal after exact
+  Store actions are accepted. They wake immediate exact inventory and targeted
+  catalog checks; events never prove offer existence or update success on their
+  own.
 - Broader Windows matrix validation remains release-gate work.
 - Store CLI behavior varies by version. Product ID is attempted first through WinGet msstore when available, with verified Store CLI exact targets used as fallback.

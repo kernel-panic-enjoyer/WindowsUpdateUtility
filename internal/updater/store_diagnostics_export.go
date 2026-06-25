@@ -24,13 +24,15 @@ type StoreDiagnosticsExport struct {
 }
 
 type StoreDiagnosticsScan struct {
-	ScanID         string `json:"scan_id,omitempty"`
-	StartedAt      string `json:"started_at,omitempty"`
-	CompletedAt    string `json:"completed_at,omitempty"`
-	WindowsVersion string `json:"windows_version,omitempty"`
-	WindowsBuild   string `json:"windows_build,omitempty"`
-	Architecture   string `json:"architecture,omitempty"`
-	Status         string `json:"status,omitempty"`
+	ScanID         string           `json:"scan_id,omitempty"`
+	Mode           string           `json:"mode,omitempty"`
+	StartedAt      string           `json:"started_at,omitempty"`
+	CompletedAt    string           `json:"completed_at,omitempty"`
+	WindowsVersion string           `json:"windows_version,omitempty"`
+	WindowsBuild   string           `json:"windows_build,omitempty"`
+	Architecture   string           `json:"architecture,omitempty"`
+	Status         string           `json:"status,omitempty"`
+	Metrics        StoreScanMetrics `json:"metrics,omitempty"`
 }
 
 type StoreDiagnosticsPackage struct {
@@ -72,7 +74,7 @@ func buildStoreDiagnosticsExport(ctx context.Context, state State) ([]byte, erro
 	export := StoreDiagnosticsExport{
 		GeneratedAt:         formatAssessmentTime(time.Now().UTC()),
 		SchemaVersion:       storeScanSchemaVersion,
-		DetectorMode:        "new",
+		DetectorMode:        string(StoreScanModeOptimized),
 		AutoUpdateMigration: sanitizeStoreAutoUpdateMigration(state.StoreAutoUpdateMigration),
 	}
 	userSID, sidErr := currentUserSID()
@@ -107,14 +109,17 @@ func applyStoreDiagnosticsSnapshot(export *StoreDiagnosticsExport, snapshot Stor
 		return
 	}
 	scan := snapshot.Scan
+	export.DetectorMode = firstNonEmpty(string(scan.Mode), string(StoreScanModeOptimized))
 	export.Scan = StoreDiagnosticsScan{
 		ScanID:         scan.ScanID,
+		Mode:           string(scan.Mode),
 		StartedAt:      formatStoreScanTime(scan.StartedAt),
 		CompletedAt:    formatStoreScanTime(scan.CompletedAt),
 		WindowsVersion: scan.WindowsVersion,
 		WindowsBuild:   scan.WindowsBuild,
 		Architecture:   scan.Architecture,
 		Status:         string(scan.CompletionStatus),
+		Metrics:        scan.Metrics,
 	}
 	export.Providers = providerSummariesFromRuns(snapshot.ProviderRuns)
 	for _, family := range snapshot.Inventory.Families {

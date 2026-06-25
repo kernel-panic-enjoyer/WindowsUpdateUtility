@@ -1,0 +1,25 @@
+name: Non-Windows Guard
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  document-scope:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Explain current support boundary
+        run: |
+          echo "WindowsUpdaterWebUI is a Windows desktop utility."
+          echo "The production Go package currently depends on Windows APIs and is not a Linux/macOS build target."
+          echo "Race tests and deterministic parser/repository tests should be enabled here only after those packages are split behind portable build tags."
+
+      - name: Check release-gate document exists
+        run: test -s docs/status/release-gates.md

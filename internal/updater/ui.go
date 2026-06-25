@@ -122,7 +122,7 @@ var pageTemplate = template.Must(template.New("page").Funcs(template.FuncMap{
     </section>
 
     <section id="update-results-panel" class="panel table-panel hidden">
-      <div class="section-heading"><div><span class="panel-kicker">Structured record</span><h2>Update Results</h2></div><div class="button-row"><button id="retry-failed-updates" type="button" disabled><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 4v6h-6"/></svg></span><span>Retry Failed</span></button></div></div>
+      <div class="section-heading"><div><span class="panel-kicker">Structured record</span><h2>Update Results</h2></div><div class="button-row"><button id="view-update-job-log" type="button" class="ghost" disabled><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 6h12"/><path d="M8 12h12"/><path d="M8 18h12"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/></svg></span><span>View Job Log</span></button><button id="retry-failed-updates" type="button" disabled><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 4v6h-6"/></svg></span><span>Retry Failed</span></button></div></div>
       <div id="update-results-summary" class="summary-line"></div>
       <div class="table-wrap"><table><thead><tr><th>Status</th><th>Package</th><th>Source</th><th>Installed</th><th>Target</th><th>Result</th></tr></thead><tbody id="update-results-body"></tbody></table></div>
     </section>

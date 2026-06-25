@@ -25,8 +25,18 @@ type StatusResponse struct {
 	Managers        map[string]ManagerStatus `json:"managers"`
 	StartupEnabled  bool                     `json:"startup_enabled"`
 	AutoTaskEnabled bool                     `json:"auto_task_enabled"`
-	Settings        State                    `json:"settings"`
+	Settings        StatusSettings           `json:"settings"`
 	AsyncSnapshot
+}
+
+type StatusSettings struct {
+	AutoUpdateGlobal      bool                        `json:"auto_update_global"`
+	AutoUpdatePackages    map[string]bool             `json:"auto_update_packages,omitempty"`
+	Theme                 string                      `json:"theme"`
+	LastScanAt            string                      `json:"last_scan_at,omitempty"`
+	LastAutoUpdateAt      string                      `json:"last_auto_update_at,omitempty"`
+	LastAutoUpdateResults []UpdateResultSummary       `json:"last_auto_update_results,omitempty"`
+	LastAutoUpdateSummary *ScheduledAutoUpdateSummary `json:"last_auto_update_summary,omitempty"`
 }
 
 type AsyncSnapshot struct {

@@ -33,10 +33,7 @@ func TestAPILogsRequiresTokenAndReturnsEntries(t *testing.T) {
 		t.Fatalf("expected ok, got %d: %s", response.Code, response.Body.String())
 	}
 
-	var decoded struct {
-		Entries  []LogEntry `json:"entries"`
-		LatestID int64      `json:"latest_id"`
-	}
+	var decoded logsAPIResponse
 	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
 		t.Fatal(err)
 	}
@@ -45,6 +42,29 @@ func TestAPILogsRequiresTokenAndReturnsEntries(t *testing.T) {
 	}
 	if !logEntryInCategory(decoded.Entries[0], logCategoryApplication) {
 		t.Fatalf("expected application log category: %#v", decoded.Entries[0])
+	}
+}
+
+func TestAPILogsReportsGapMetadata(t *testing.T) {
+	oldLogs := sessionLogs
+	sessionLogs = &LogBuffer{maxEntries: 3, maxBytes: 64 * 1024}
+	defer func() { sessionLogs = oldLogs }()
+	for _, message := range []string{"one", "two", "three", "four", "five"} {
+		sessionLogs.Append("app", message)
+	}
+	app := testSessionApp()
+	request := authenticatedRequest(app, http.MethodGet, "/api/logs?since=1", nil)
+	response := httptest.NewRecorder()
+	app.serveHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected ok, got %d: %s", response.Code, response.Body.String())
+	}
+	var decoded logsAPIResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !decoded.GapDetected || decoded.DroppedCount == 0 || decoded.OldestID != 3 || decoded.LatestID != 5 {
+		t.Fatalf("unexpected gap response: %#v", decoded)
 	}
 }
 
@@ -75,6 +95,58 @@ func TestAPIJobsRequiresTokenAndReturnsJobs(t *testing.T) {
 	}
 	if len(decoded.Jobs) != 1 || decoded.Jobs[0].JobID != status.JobID {
 		t.Fatalf("unexpected jobs response: %#v", decoded)
+	}
+}
+
+func TestAPIJobLogRequiresTokenAndRejectsUnknownJob(t *testing.T) {
+	app := testSessionApp()
+
+	badRequest := httptest.NewRequest(http.MethodGet, "/api/jobs/log?job_id=missing", nil)
+	badResponse := httptest.NewRecorder()
+	app.serveHTTP(badResponse, badRequest)
+	if badResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized job log request, got %d", badResponse.Code)
+	}
+
+	request := authenticatedRequest(app, http.MethodGet, "/api/jobs/log?job_id=missing", nil)
+	response := httptest.NewRecorder()
+	app.serveHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("expected not found for unknown job, got %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestAPIJobLogReturnsCorrelatedEntries(t *testing.T) {
+	oldLogs := sessionLogs
+	sessionLogs = &LogBuffer{}
+	defer func() { sessionLogs = oldLogs }()
+
+	app := testSessionApp()
+	status := app.startOperationJob(jobTypeUpdate, "", 1, []string{"winget|Git.Git"}, func(ctx context.Context, job *OperationJob) {
+		ctx = withLogMetadata(ctx, logMetadata{JobID: job.status.JobID, JobType: job.status.Type, PackageKey: "winget|Git.Git", Manager: managerWinget})
+		sessionLogs.AppendContext(ctx, "command", "winget upgrade --id Git.Git --exact", logCategoriesForCommand([]string{"winget", "upgrade", "--id", "Git.Git", "--exact"}))
+		sessionLogs.AppendContext(ctx, "stderr", "upgrade failed", logCategoriesForCommand([]string{"winget", "upgrade", "--id", "Git.Git", "--exact"}))
+		app.mutateOperationJob(job, func(status *OperationJobStatus) {
+			status.State = jobStateFailed
+		})
+	})
+	if _, ok := waitForOperationJobState(app, status.JobID, time.Second); !ok {
+		t.Fatal("job did not finish")
+	}
+
+	request := authenticatedRequest(app, http.MethodGet, "/api/jobs/log?job_id="+status.JobID, nil)
+	response := httptest.NewRecorder()
+	app.serveHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected ok, got %d: %s", response.Code, response.Body.String())
+	}
+	var decoded logsAPIResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	joined := joinLogMessages(decoded.Entries)
+	if !strings.Contains(joined, "Git.Git") || !strings.Contains(joined, "upgrade failed") {
+		t.Fatalf("job log missing correlated command output: %q", joined)
 	}
 }
 

@@ -5,6 +5,20 @@ import (
 	"time"
 )
 
+const (
+	exactTargetKindNone             = "none"
+	exactTargetKindProductID        = "product_id"
+	exactTargetKindUpdateID         = "update_id"
+	exactTargetKindProductAndUpdate = "product_and_update_id"
+)
+
+type PackageUpdatePolicy struct {
+	PreferenceEligible bool
+	CanUpdateNow       bool
+	CannotUpdateReason string
+	ExactTargetKind    string
+}
+
 func packageHasExactStoreUpdateTarget(pkg Package) bool {
 	if pkg.Manager != managerStore {
 		return true
@@ -15,6 +29,106 @@ func packageHasExactStoreUpdateTarget(pkg Package) bool {
 	return pkg.ExactActionTargetAvailable &&
 		storeInstalledPackageFamilyName(pkg) != "" &&
 		(strings.TrimSpace(pkg.StoreProductID) != "" || strings.TrimSpace(pkg.StoreUpdateID) != "")
+}
+
+func applyPackageCapabilities(pkg Package) Package {
+	policy := packageUpdatePolicy(pkg, UpdateOptions{})
+	pkg.PreferenceEligible = policy.PreferenceEligible
+	pkg.CanUpdateNow = policy.CanUpdateNow
+	pkg.CannotUpdateReason = policy.CannotUpdateReason
+	pkg.ExactTargetKind = policy.ExactTargetKind
+	return pkg
+}
+
+func packageUpdatePolicy(pkg Package, options UpdateOptions) PackageUpdatePolicy {
+	policy := PackageUpdatePolicy{
+		PreferenceEligible: packagePreferenceEligible(pkg),
+		ExactTargetKind:    exactTargetKind(pkg.StoreProductID, pkg.StoreUpdateID),
+	}
+	if pkg.Manager != managerStore {
+		if !pkg.UpdateAvailable {
+			policy.CannotUpdateReason = "No update available."
+			return policy
+		}
+		if pkg.UpdateSupported == false {
+			policy.CannotUpdateReason = "Updates are not supported for this package."
+			return policy
+		}
+		if pkg.UnknownVersion && !options.AllowUnknownVersion {
+			policy.CannotUpdateReason = "Unknown installed version requires the global unknown-version override."
+			return policy
+		}
+		if pkg.Pinned && !options.AllowPinned {
+			policy.CannotUpdateReason = "Pinned package requires the global pinned update override."
+			return policy
+		}
+		policy.CanUpdateNow = true
+		return policy
+	}
+	if !policy.PreferenceEligible {
+		policy.CannotUpdateReason = "Store package identity is not exact."
+		return policy
+	}
+	if !strings.EqualFold(strings.TrimSpace(pkg.UpdateState), string(StoreUpdateAvailable)) {
+		state := strings.TrimSpace(pkg.UpdateState)
+		if state == "" {
+			state = string(StoreUpdateUnknown)
+		}
+		policy.CannotUpdateReason = "Store state is " + stateLabelForReason(state) + "."
+		return policy
+	}
+	if pkg.Stale {
+		policy.CannotUpdateReason = "Store update requires a fresh assessment; rescan required."
+		return policy
+	}
+	if !pkg.ExactActionTargetAvailable || policy.ExactTargetKind == exactTargetKindNone {
+		policy.CannotUpdateReason = "Store update requires an exact verified action target."
+		return policy
+	}
+	if pkg.UpdateSupported == false {
+		policy.CannotUpdateReason = "No supported executor is available for this Store target."
+		return policy
+	}
+	if pkg.UnknownVersion && !options.AllowUnknownVersion {
+		policy.CannotUpdateReason = "Unknown installed version requires the global unknown-version override."
+		return policy
+	}
+	if pkg.Pinned && !options.AllowPinned {
+		policy.CannotUpdateReason = "Pinned package requires the global pinned update override."
+		return policy
+	}
+	policy.CanUpdateNow = true
+	return policy
+}
+
+func packagePreferenceEligible(pkg Package) bool {
+	if pkg.Manager != managerStore {
+		return pkg.UpdateSupported != false
+	}
+	return storeInstalledPackageFamilyName(pkg) != "" && normalizedJobPackageKey(pkg) != ""
+}
+
+func exactTargetKind(productID, updateID string) string {
+	productID = strings.TrimSpace(productID)
+	updateID = strings.TrimSpace(updateID)
+	switch {
+	case productID != "" && updateID != "":
+		return exactTargetKindProductAndUpdate
+	case productID != "":
+		return exactTargetKindProductID
+	case updateID != "":
+		return exactTargetKindUpdateID
+	default:
+		return exactTargetKindNone
+	}
+}
+
+func stateLabelForReason(state string) string {
+	state = strings.ToLower(strings.TrimSpace(state))
+	if state == "" {
+		return "unknown"
+	}
+	return state
 }
 
 func storeInstalledPackageFamilyName(pkg Package) string {

@@ -63,20 +63,9 @@ func (app *App) updateJobPackagesContext(ctx context.Context, packageKeys []stri
 		if !ok {
 			pkg = Package{Key: normalized, Manager: manager, ID: id, Name: id, UpdateSupported: true}
 		}
-		if !packageHasExactStoreUpdateTarget(pkg) {
-			return nil, updateJobModeSelected, fmt.Errorf("%s has no exact verified Store update target", normalized)
-		}
-		if !packageHasFreshStoreAvailableAssessment(pkg) {
-			return nil, updateJobModeSelected, fmt.Errorf("%s requires a fresh available Store assessment before updating", normalized)
-		}
-		if pkg.UpdateSupported == false {
-			return nil, updateJobModeSelected, fmt.Errorf("%s does not support updates", normalized)
-		}
-		if pkg.UnknownVersion && !options.AllowUnknownVersion {
-			return nil, updateJobModeSelected, fmt.Errorf("%s has an unknown installed version and requires an explicit global unknown-version update choice", normalized)
-		}
-		if pkg.Pinned && !options.AllowPinned {
-			return nil, updateJobModeSelected, fmt.Errorf("%s is pinned and requires an explicit global pinned update choice", normalized)
+		policy := packageUpdatePolicy(pkg, options)
+		if !policy.CanUpdateNow {
+			return nil, updateJobModeSelected, fmt.Errorf("%s cannot be updated now: %s", normalized, firstNonEmpty(policy.CannotUpdateReason, "not actionable"))
 		}
 		pkg.Key = normalized
 		applyUpdateOptions(&pkg, options)
@@ -90,12 +79,7 @@ func (app *App) updateJobPackagesContext(ctx context.Context, packageKeys []stri
 }
 
 func packageAllowedInBulkUpdate(pkg Package, options UpdateOptions) bool {
-	return pkg.UpdateAvailable &&
-		pkg.UpdateSupported != false &&
-		packageHasExactStoreUpdateTarget(pkg) &&
-		packageHasFreshStoreAvailableAssessment(pkg) &&
-		(!pkg.UnknownVersion || options.AllowUnknownVersion) &&
-		(!pkg.Pinned || options.AllowPinned)
+	return packageUpdatePolicy(pkg, options).CanUpdateNow
 }
 
 func packageHasFreshStoreAvailableAssessment(pkg Package) bool {

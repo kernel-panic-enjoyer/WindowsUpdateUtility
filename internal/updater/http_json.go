@@ -12,15 +12,19 @@ type apiErrorResponse struct {
 }
 
 type logsAPIResponse struct {
-	Entries  []LogEntry `json:"entries"`
-	LatestID int64      `json:"latest_id"`
+	Entries      []LogEntry `json:"entries"`
+	OldestID     int64      `json:"oldest_id"`
+	LatestID     int64      `json:"latest_id"`
+	DroppedCount int64      `json:"dropped_count"`
+	DroppedBytes int64      `json:"dropped_bytes"`
+	GapDetected  bool       `json:"gap_detected"`
 }
 
 type commandAPIResponse struct {
-	Result         *CommandResult `json:"result,omitempty"`
-	RefreshStarted bool           `json:"refresh_started,omitempty"`
-	Settings       *State         `json:"settings,omitempty"`
-	Notice         string         `json:"notice,omitempty"`
+	Result         *CommandResult  `json:"result,omitempty"`
+	RefreshStarted bool            `json:"refresh_started,omitempty"`
+	Settings       *StatusSettings `json:"settings,omitempty"`
+	Notice         string          `json:"notice,omitempty"`
 }
 
 type oneOrManyStrings []string
@@ -78,11 +82,13 @@ func refreshedCommandResponse(result CommandResult) commandAPIResponse {
 }
 
 func settingsResponse(state State) commandAPIResponse {
-	return commandAPIResponse{Settings: &state}
+	settings := statusSettingsFromState(state)
+	return commandAPIResponse{Settings: &settings}
 }
 
 func settingsCommandResponse(state State, result CommandResult) commandAPIResponse {
-	return commandAPIResponse{Result: &result, Settings: &state}
+	settings := statusSettingsFromState(state)
+	return commandAPIResponse{Result: &result, Settings: &settings}
 }
 
 func requestIsJSON(r *http.Request) bool {

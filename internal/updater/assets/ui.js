@@ -17,9 +17,13 @@
   var searchPageSize = 10;
   var maxBrowserLogEntries = 2500;
   var maxBrowserLogBytes = 1024 * 1024;
+  var maxBrowserCategoryLogEntries = 1200;
+  var maxBrowserCategoryLogBytes = 512 * 1024;
   var lastLogID = 0;
   var logEntries = [];
   var logBytes = 0;
+  var logEntriesByCategory = {};
+  var logBytesByCategory = {};
   var logSearchQuery = "";
   var activeLogCategory = "all";
   var clearedLogBeforeByCategory = {};
@@ -288,6 +292,11 @@
     entry._size = logEntryClientSize(entry);
     return entry;
   }
+  function categoriesForLogEntry(entry){
+    var categories = entry.categories && entry.categories.length ? entry.categories.slice() : ["all", "application"];
+    if(categories.indexOf("all") === -1){ categories.unshift("all"); }
+    return categories;
+  }
   function trimBrowserLogs(){
     while(logEntries.length > 0 && (logEntries.length > maxBrowserLogEntries || logBytes > maxBrowserLogBytes)){
       var removed = logEntries.shift();
@@ -295,10 +304,20 @@
     }
     if(logBytes < 0){ logBytes = 0; }
   }
-  function logEntryInActiveCategory(entry){
-    var category = activeLogCategory || "all";
-    var categories = entry.categories || ["all", "application"];
-    return categories.indexOf(category) !== -1;
+  function trimBrowserCategoryLogs(category){
+    var entries = logEntriesByCategory[category] || [];
+    var bytes = Number(logBytesByCategory[category] || 0);
+    while(entries.length > 0 && (entries.length > maxBrowserCategoryLogEntries || bytes > maxBrowserCategoryLogBytes)){
+      var removed = entries.shift();
+      bytes -= Number(removed && removed._size || 0);
+    }
+    logBytesByCategory[category] = Math.max(0, bytes);
+  }
+  function rememberLogEntryInCategory(category, entry){
+    if(!logEntriesByCategory[category]){ logEntriesByCategory[category] = []; }
+    logEntriesByCategory[category].push(entry);
+    logBytesByCategory[category] = Number(logBytesByCategory[category] || 0) + Number(entry._size || 0);
+    trimBrowserCategoryLogs(category);
   }
   function renderLogLines(shouldScroll){
     var target = $("session-log");
@@ -318,9 +337,11 @@
   }
   function filteredLogLines(){
     var query = logSearchQuery.trim().toLowerCase();
-    var clearedBefore = clearedLogBeforeByCategory[activeLogCategory || "all"] || 0;
-    return logEntries.filter(function(entry){
-      return Number(entry.id || 0) > clearedBefore && logEntryInActiveCategory(entry);
+    var category = activeLogCategory || "all";
+    var clearedBefore = clearedLogBeforeByCategory[category] || 0;
+    var entries = logEntriesByCategory[category] || (category === "all" ? logEntries : []);
+    return entries.filter(function(entry){
+      return Number(entry.id || 0) > clearedBefore;
     }).map(function(entry){ return entry._formatted || formatLogEntry(entry); }).filter(function(line){
       return !query || line.toLowerCase().indexOf(query) !== -1;
     });
@@ -329,12 +350,34 @@
     if(!entries || entries.length === 0){ return; }
     entries.forEach(function(entry){
       lastLogID = Math.max(lastLogID, Number(entry.id || 0));
-      logEntries.push(prepareLogEntry(entry));
-      logBytes += Number(entry._size || 0);
+      var prepared = prepareLogEntry(entry);
+      logEntries.push(prepared);
+      logBytes += Number(prepared._size || 0);
+      categoriesForLogEntry(prepared).forEach(function(category){ rememberLogEntryInCategory(category, prepared); });
     });
     trimBrowserLogs();
     var auto = $("log-autoscroll");
     scheduleLogRender(!auto || auto.checked);
+  }
+  function appendLogGapNotice(oldestID){
+    var oldest = Number(oldestID || 0);
+    var id = oldest > 1 ? oldest - 1 : lastLogID + 1;
+    appendLogEntries([{
+      id:id,
+      timestamp:(new Date()).toISOString(),
+      stream:"app",
+      message:"Older log entries were discarded before this point.",
+      categories:["all", "application", "searches", "updates", "winget", "store", "store-scan", "mutations", "chocolatey"]
+    }]);
+  }
+  function applyLogQueryMetadata(data){
+    if(!data){ return; }
+    if(data.gap_detected){
+      appendLogGapNotice(data.oldest_id);
+    }
+    if(typeof data.latest_id === "number" && data.latest_id > lastLogID && (!data.entries || data.entries.length === 0)){
+      lastLogID = data.latest_id;
+    }
   }
   function setLogConnectionState(state, message){
     var target = $("log-connection-status");
@@ -387,10 +430,8 @@
       var response = await fetch(api("/api/logs", {since:String(lastLogID)}));
       var data = await response.json();
       if(!response.ok){ throw new Error(data.error || "Log polling failed"); }
+      applyLogQueryMetadata(data);
       appendLogEntries(data.entries || []);
-      if(typeof data.latest_id === "number" && data.latest_id > lastLogID && (!data.entries || data.entries.length === 0)){
-        lastLogID = data.latest_id;
-      }
       markBackendContact("Connected");
       if(data.entries && data.entries.length){
         logPollDelay = 1000;
@@ -438,10 +479,8 @@
       try{
         var data = JSON.parse(event.data || "{}");
         markBackendContact("Connected");
+        applyLogQueryMetadata(data);
         appendLogEntries(data.entries || []);
-        if(typeof data.latest_id === "number" && data.latest_id > lastLogID && (!data.entries || data.entries.length === 0)){
-          lastLogID = data.latest_id;
-        }
       }catch(e){}
     });
     eventStream.addEventListener("jobs", function(event){
@@ -737,14 +776,14 @@
     return params;
   }
   function packageAutoUpdateable(pkg){
-    return pkg.update_supported !== false && packageHasExactStoreTarget(pkg) && packageHasFreshStoreAssessment(pkg) && !pkg.unknown_version && !pkg.pinned;
+    return !!(pkg && pkg.preference_eligible) && !pkg.unknown_version && !pkg.pinned;
   }
   function packageBulkUpdateable(pkg){
     var options = arguments.length > 1 && arguments[1] ? arguments[1] : {allowUnknown:allowUnknownVersionUpdates(), allowPinned:allowPinnedUpdates()};
+    if(!pkg){ return false; }
+    if(pkg.can_update_now){ return true; }
     return packageHasUpdate(pkg) &&
-      pkg.update_supported !== false &&
-      packageHasExactStoreTarget(pkg) &&
-      packageHasFreshStoreAssessment(pkg) &&
+      (!pkg.cannot_update_reason || pkg.cannot_update_reason.indexOf("override") !== -1) &&
       (!pkg.unknown_version || options.allowUnknown) &&
       (!pkg.pinned || options.allowPinned);
   }
@@ -803,7 +842,7 @@
   function packageHasExactStoreTarget(pkg){
     if(pkg && pkg.manager === "store" && !storeAssessmentActive(pkg)){ return false; }
     if(!storeAssessmentActive(pkg)){ return true; }
-    return !!pkg.exact_action_target_available && !!pkg.installed_package_family_name && !!pkg.store_product_id;
+    return !!pkg.exact_action_target_available && !!pkg.installed_package_family_name && String(pkg.exact_target_kind || "none") !== "none";
   }
   function packageHasFreshStoreAssessment(pkg){
     if(pkg && pkg.manager === "store" && !storeAssessmentActive(pkg)){ return false; }
@@ -811,14 +850,15 @@
     return storeUpdateState(pkg) === "available" && !pkg.stale;
   }
   function packageHasUpdate(pkg){
-    if(storeAssessmentActive(pkg)){ return packageHasFreshStoreAssessment(pkg) && packageHasExactStoreTarget(pkg); }
+    if(storeAssessmentActive(pkg)){ return !!pkg.can_update_now; }
     if(pkg && pkg.manager === "store"){ return false; }
     return !!pkg.update_available;
   }
   function packageNeedsUpdateAttention(pkg){
     if(pkg && pkg.manager === "store" && !storeAssessmentActive(pkg)){ return true; }
     if(!storeAssessmentActive(pkg)){ return !!pkg.update_available; }
-    return packageHasUpdate(pkg);
+    var state = storeUpdateState(pkg);
+    return !!pkg.can_update_now || state === "unknown" || state === "conflict" || state === "pending" || !!pkg.stale;
   }
   function packageReasonText(pkg){
     return String((pkg && pkg.update_reason) || "").trim();
@@ -1143,7 +1183,7 @@
 		return '<span class="badge manager-badge">' + html(managerLabel(pkg.manager)) + '</span>' + backend;
 	}
   function autoButton(pkg){
-    if(pkg.update_supported === false || !packageHasExactStoreTarget(pkg)){
+    if(!pkg.preference_eligible){
       return '<span class="muted">N/A</span>';
     }
     if(pkg.unknown_version || pkg.pinned){
@@ -1203,20 +1243,11 @@
     return available;
   }
 	function updateForm(pkg){
-    if(storeAssessmentActive(pkg) && !packageHasExactStoreTarget(pkg)){
-      return '<span class="muted" title="Store updates require an exact verified action target">Exact target unavailable</span>';
-    }
-    if(storeAssessmentActive(pkg) && !packageHasFreshStoreAssessment(pkg)){
-      return '<span class="muted" title="Store updates require a fresh available assessment">Rescan required</span>';
-    }
-		if(pkg.update_supported === false){
+		if(pkg.manager !== "store" && pkg.update_supported === false){
 			return '<span class="muted">Inventory only</span>';
 		}
-    if(!packageHasExactStoreTarget(pkg)){
-      return '<span class="muted" title="Store updates require an exact verified action target">Exact target unavailable</span>';
-    }
-    if(!packageHasFreshStoreAssessment(pkg)){
-      return '<span class="muted" title="Store updates require a fresh available assessment">Rescan required</span>';
+    if(!pkg.can_update_now){
+      return '<span class="muted" title="' + attr(pkg.cannot_update_reason || "This package cannot be updated now") + '">' + html(pkg.cannot_update_reason || "Unavailable") + '</span>';
     }
     var blockedUnknown = pkg.unknown_version && !allowUnknownVersionUpdates();
     var blockedPinned = pkg.pinned && !allowPinnedUpdates();
@@ -1227,7 +1258,7 @@
 		return '<form class="update-form" data-key="' + attr(pkg.key) + '" data-unknown-version="' + (pkg.unknown_version ? 'true' : 'false') + '" data-pinned="' + (pkg.pinned ? 'true' : 'false') + '" data-blocked-unknown="' + (blockedUnknown ? 'true' : 'false') + '" data-blocked-pinned="' + (blockedPinned ? 'true' : 'false') + '" method="post" action="/api/update"><input type="hidden" name="manager" value="' + attr(pkg.manager) + '"><input type="hidden" name="package_id" value="' + attr(pkg.id) + '"><button type="submit" aria-label="' + attr(label + " " + pkg.name) + '"' + (disabled ? ' disabled' : '') + title + '>' + icon("update") + '<span>' + html(label) + '</span></button><div class="row-progress' + (updateState ? '' : ' hidden') + '">' + progressBar((updateState ? label : "Update progress") + " for " + pkg.name) + '</div></form>';
   }
 	function installedAction(pkg){
-		if(packageHasUpdate(pkg) && packageHasExactStoreTarget(pkg) && packageHasFreshStoreAssessment(pkg)){
+		if(pkg.can_update_now){
 			return updateForm(pkg);
 		}
 		return '<span class="muted">-</span>';
@@ -2069,6 +2100,11 @@
       retry.disabled = counts.failed === 0;
       retry.dataset.jobId = status.job_id || "";
     }
+    var jobLog = $("view-update-job-log");
+    if(jobLog){
+      jobLog.disabled = !status.job_id;
+      jobLog.dataset.jobId = status.job_id || "";
+    }
   }
   function renderLatestUpdateResult(jobs){
     var latest = null;
@@ -2092,6 +2128,31 @@
     if(status.allow_unknown_version){ params.set("allow_unknown_version", "true"); }
     if(status.allow_pinned){ params.set("allow_pinned", "true"); }
     renderUpdatePreflight(buildUpdatePreflight("selected", rows.map(function(row){ return row.key; }), params, "Retrying failed packages..."));
+  }
+  async function viewUpdateJobLog(){
+    var button = $("view-update-job-log");
+    var jobID = button ? button.dataset.jobId || "" : "";
+    if(!jobID){
+      showNotice("No completed update job log is available.");
+      return;
+    }
+    if(button){ button.disabled = true; }
+    try{
+      var response = await fetch(api("/api/jobs/log", {job_id:jobID}));
+      var data = await response.json();
+      if(!response.ok){ throw new Error(data.error || "Could not load job log"); }
+      applyLogQueryMetadata(data);
+      appendLogEntries(data.entries || []);
+      setActiveLogCategory("all");
+      var panel = $("session-log-panel");
+      if(panel && panel.scrollIntoView){ panel.scrollIntoView({behavior:"smooth", block:"start"}); }
+      showNotice("Job log loaded into Session Log.");
+    }catch(e){
+      showNotice("Could not load job log: " + e.message);
+      showToast("Could not load job log: " + e.message, "error");
+    }finally{
+      if(button){ button.disabled = false; }
+    }
   }
   async function startUpdateJob(params, keys, message){
     activeUpdateKeys = keys || [];
@@ -2551,6 +2612,7 @@
   $("confirm-update-job").addEventListener("click", function(){ confirmPendingUpdateJob(); });
   $("cancel-update-preflight").addEventListener("click", function(){ hideUpdatePreflight(); });
   $("retry-failed-updates").addEventListener("click", function(){ retryFailedUpdateResults(); });
+  $("view-update-job-log").addEventListener("click", function(){ viewUpdateJobLog(); });
 
 
   setTheme(currentTheme());
