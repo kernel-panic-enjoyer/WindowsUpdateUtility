@@ -103,6 +103,11 @@ For automated distribution smoke tests, use:
 powershell -ExecutionPolicy Bypass -File .\dev\scripts\Smoke-Distribution.ps1 -Exe .\dist\WindowsUpdaterWebUI.exe
 ```
 
+## License
+
+WindowsUpdateUtility is licensed under the GNU General Public License version
+3 only (`GPL-3.0-only`). See [LICENSE](LICENSE).
+
 ## Notes
 
 - Supported OS floor: Windows 10 or newer with the App Installer/WinGet stack
