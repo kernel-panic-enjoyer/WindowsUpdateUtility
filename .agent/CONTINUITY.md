@@ -46,6 +46,7 @@
 - 2026-06-28T17:32:12+02:00 [USER] Active objective: remove packages from the primary Updates Available queue after their update job result succeeds.
 - 2026-06-28T17:59:45+02:00 [USER] Active objective: make per-row update progress bars use a uniform length across queued/active update rows.
 - 2026-06-28T18:03:34+02:00 [USER] Active objective: hide the global update progress panel once all update jobs have completed successfully.
+- 2026-06-28T18:28:51+02:00 [USER] Active objective: diagnose and fix the failed Windows CI formatting check for commit `b513108`.
 
 [DECISIONS]
 
@@ -93,6 +94,7 @@
 - 2026-06-28T17:32:12+02:00 [CODE] The primary update queue now suppresses package keys with successful update results observed in the current UI session; failed, cancelled, skipped, or accepted-not-verified results remain visible.
 - 2026-06-28T17:59:45+02:00 [CODE] Row update forms now share `--row-update-action-width:148px`; progress tracks fill that width whether the row has only an update form or update form plus diagnostics action.
 - 2026-06-28T18:03:34+02:00 [CODE] `reconcileJobs` now clears `updateBusy`, active update keys, current update job ID, row progress, and the global update progress panel whenever no active update jobs remain.
+- 2026-06-28T18:28:51+02:00 [CODE] Added `.gitattributes` with `*.go text eol=lf` so Windows GitHub Actions checkouts do not materialize Go files with CRLF and trip `gofmt -l`.
 
 [PROGRESS]
 
@@ -201,6 +203,7 @@
 
 [OUTCOMES]
 
+- 2026-06-28T18:28:51+02:00 [TOOL] Windows CI formatting failure root cause was GitHub Actions Windows checkout line endings: without `.gitattributes`, fresh runner checkout could materialize Go files with CRLF and `gofmt -l` listed all Go files. Fix validation passed: `git check-attr text eol -- main.go internal/updater/ui_test.go`, tracked Go `gofmt -l` check, `go test -count=1 ./internal/updater`, `go test -count=1 ./...`, `go vet ./...`, bundled Node `--check internal/updater/assets/ui.js`, `git diff --check`, and `powershell -NoProfile -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1`; rebuilt `dist\WindowsUpdaterWebUI.exe` at 15,254,528 bytes with SHA-256 `adde10e30ec7886ec370de6e42901daefe9e668f01a96098840713a6b64d55dc`.
 - 2026-06-28T18:03:34+02:00 [TOOL] Stuck global update-progress validation passed: focused regression failed before the JS change, then focused regression, bundled Node `--check internal/updater/assets/ui.js`, `go test -count=1 ./internal/updater`, `go test -count=1 ./...`, `go vet ./...`, browser tests from `tests/browser` with `-tags uitestsupport`, `git diff --check` with CRLF warnings only, and `powershell -NoProfile -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1` passed; rebuilt `dist\WindowsUpdaterWebUI.exe` at 15,254,528 bytes with SHA-256 `3afe8be97b5a04f1b4e2b91c7f422285b4306d42b6822b4c5262b06fe881b439`.
 - 2026-06-28T17:59:45+02:00 [TOOL] Uniform row-progress validation passed: focused UI hook test, bundled Node `--check internal/updater/assets/ui.js`, `go test -count=1 ./internal/updater`, `go test -count=1 ./...`, `go vet ./...`, browser tests from `tests/browser` with `-tags uitestsupport`, `git diff --check` with CRLF warnings only, and `powershell -NoProfile -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1` passed; rebuilt `dist\WindowsUpdaterWebUI.exe` at 15,254,528 bytes with SHA-256 `ca38db79dd7753277a3619fcac26cc03358c86d61af29f55d42ca6de10efee25`.
 - 2026-06-28T17:32:12+02:00 [TOOL] Successful-update queue removal validation passed: focused static regression failed before the JS change, then focused UI tests, bundled Node `--check internal/updater/assets/ui.js`, `go test -count=1 ./internal/updater`, `go test -count=1 ./...`, `go vet ./...`, browser tests from `tests/browser` with `-tags uitestsupport`, `git diff --check` with CRLF warnings only, and `powershell -NoProfile -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1` passed; rebuilt `dist\WindowsUpdaterWebUI.exe` at 15,254,016 bytes with SHA-256 `df3f48cc7d226332e48645adc1b57b65817eb953383ffd89ae98e6f4f0784633`.
