@@ -43,6 +43,11 @@ type StoreCatalogProviderRun struct {
 	Error        string
 	Observations []StoreProviderObservation
 	Mappings     []VerifiedStoreIdentityMapping
+
+	// PositiveUpdateHint means a provider saw non-authoritative update text
+	// without enough identity to attach it to a package. It is only a planner
+	// signal for exact PFN checks; it is never persisted or treated as evidence.
+	PositiveUpdateHint bool `json:"-"`
 }
 
 type StoreScanPipeline struct {
@@ -396,6 +401,7 @@ func (pipeline *StoreScanPipeline) planExactWork(ctx context.Context, scan Store
 
 	state := pipeline.planningState(ctx)
 	incompleteAggregate := aggregateCoverageIncomplete(aggregateRuns)
+	displayOnlyPositiveHint := aggregatePositiveHintRequiresExactSweep(aggregateRuns)
 	reusableMappings := reusableStoreMappings(previousSnapshot, previousFound, byPFN, scan.StartedAt, exactProviderVersion)
 	positiveNeedingTargets := positiveAggregateObservationsWithoutExactTarget(scan, aggregateRuns)
 	planned := map[string]bool{}
@@ -415,6 +421,13 @@ func (pipeline *StoreScanPipeline) planExactWork(ctx context.Context, scan Store
 		}
 		planned[key] = true
 		plan.stateCheckPFNs[key] = true
+	}
+	if displayOnlyPositiveHint {
+		for _, family := range byPFN {
+			key := strings.ToLower(family.Identity.PackageFamilyName)
+			planned[key] = true
+			plan.stateCheckPFNs[key] = true
+		}
 	}
 	if incompleteAggregate {
 		for _, family := range byPFN {
@@ -466,6 +479,15 @@ func productLikeFamiliesByPFN(scan StoreScanGeneration, families []StorePackaged
 func aggregateCoverageIncomplete(runs []StoreCatalogProviderRun) bool {
 	for _, run := range runs {
 		if storeCatalogProviderRequired(run.Provider) && run.Health != StoreProviderHealthy {
+			return true
+		}
+	}
+	return false
+}
+
+func aggregatePositiveHintRequiresExactSweep(runs []StoreCatalogProviderRun) bool {
+	for _, run := range runs {
+		if run.PositiveUpdateHint && run.Provider.Key() == storeCLIUpdatesProviderID && run.Health != StoreProviderUnsupported {
 			return true
 		}
 	}

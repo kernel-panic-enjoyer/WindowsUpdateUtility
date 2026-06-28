@@ -158,7 +158,7 @@ main{width:min(1500px,100%);margin:0 auto;padding:22px 28px 28px}
 .progress-title{font-weight:800}
 .progress-bar{position:relative;height:7px;overflow:hidden;background:color-mix(in srgb,var(--line) 70%,transparent);border-radius:999px}
 .progress-bar span{position:absolute;inset:0 auto 0 0;width:38%;background:linear-gradient(90deg,var(--blue),var(--teal));border-radius:999px;animation:progress-slide 1s linear infinite}
-.row-progress{margin-top:8px;min-width:100px}
+.row-progress{width:100%}
 .row-progress .progress-bar{height:4px}
 @keyframes progress-slide{0%{transform:translateX(-110%)}100%{transform:translateX(270%)}}
 .manager{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 12px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line)}
@@ -174,8 +174,10 @@ main{width:min(1500px,100%);margin:0 auto;padding:22px 28px 28px}
 .manager-details-button{min-height:24px;padding:2px 8px;border-radius:6px;font-size:12px;line-height:1.2}
 .manager-status-details{align-items:flex-start}
 .manager form,.update-form,.install-form,.manager-install-form,.update-all-form{margin:0}
+.update-form{--row-update-action-width:148px;display:grid;gap:8px;width:var(--row-update-action-width);max-width:100%}
+.update-form button{width:100%}
 .row-actions{display:flex;align-items:flex-start;gap:8px;flex-wrap:nowrap}
-.row-actions .update-form{display:grid;gap:8px;justify-items:start;flex:0 0 auto}
+.row-actions .update-form{flex:0 0 var(--row-update-action-width)}
 .stack{display:grid;gap:10px}
 .check-control{display:inline-flex;align-items:center;gap:7px;color:var(--muted);font-weight:700}
 .table-panel{padding:0;overflow:hidden}

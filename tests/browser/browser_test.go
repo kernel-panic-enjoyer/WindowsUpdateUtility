@@ -570,6 +570,72 @@ func TestBrowserManagerFilterUsesVisiblePackages(t *testing.T) {
 	}
 }
 
+func TestBrowserHidesStaleStoreEvidenceFromUpdatesQueue(t *testing.T) {
+	app := updater.NewBrowserTestApp()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/packages":
+			updater.SetTestSecurityHeaders(w)
+			if !app.TestSessionOK(r) {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			updater.WriteTestJSON(w, http.StatusOK, updater.InventoryResponse{Inventory: updater.Inventory{PackageLookup: updater.PackageLookup{
+				Managers: map[string]updater.ManagerStatus{
+					updater.ManagerWinget: {Available: true},
+					updater.ManagerStore:  {Available: true, InventoryAvailable: true, InventoryBackend: updater.InventoryBackendAppX, ActionBackend: updater.ActionBackendStoreCLI},
+				},
+				Packages: []updater.Package{
+					{Key: "winget:Visible.Update", Manager: updater.ManagerWinget, ID: "Visible.Update", Name: "Visible Winget Update", Version: "1.0.0", AvailableVersion: "1.1.0", UpdateAvailable: true, UpdateSupported: true, Installed: true, Source: updater.SourceWinget, PreferenceEligible: true, CanUpdateNow: true},
+					{
+						Key:                        "store:Hidden.Store_abc123",
+						Manager:                    updater.ManagerStore,
+						ID:                         "Hidden.Store_abc123",
+						Name:                       "Hidden Stale Store",
+						Version:                    "1.0.0",
+						Installed:                  true,
+						UpdateSupported:            false,
+						UpdateState:                "available",
+						UpdateReason:               "retained previous positive update because the latest scan was incomplete",
+						Stale:                      true,
+						InstalledPackageFamilyName: "Hidden.Store_abc123",
+						CannotUpdateReason:         "Store update requires a fresh assessment; rescan required.",
+						ProviderSummaries: []updater.StorePackageProviderSummary{{
+							Name:   "previous-generation",
+							Health: "stale",
+							Kind:   "stale_result",
+						}},
+					},
+				},
+			}, StoreScanHealth: updater.StoreScanHealthSummary{
+				Active:        true,
+				Healthy:       false,
+				Authoritative: false,
+				Status:        "incomplete",
+				Reason:        "retained previous positive update because the latest scan was incomplete",
+				Counts:        map[string]int{"available": 1, "stale": 1},
+			}}})
+		default:
+			app.TestHandler()(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	ctx, cancel := newBrowserContext(t)
+	defer cancel()
+
+	navigateAuthenticated(t, ctx, server.URL)
+	waitForText(t, ctx, `#updates-body`, "Visible Winget Update")
+	waitForText(t, ctx, `#store-scan-health-body`, "Hidden Stale Store")
+	var updatesBody string
+	if err := chromedp.Run(ctx, chromedp.Text(`#updates-body`, &updatesBody, chromedp.ByQuery)); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(updatesBody, "Hidden Stale Store") || strings.Contains(updatesBody, "Stale evidence") {
+		t.Fatalf("stale Store evidence should stay out of Updates Available:\n%s", updatesBody)
+	}
+}
+
 func TestBrowserKeyboardAccessibilityAndMobileLayout(t *testing.T) {
 	restoreManagers := updater.ReplaceManagerDetectionCacheForTest(map[string]updater.ManagerStatus{
 		updater.ManagerWinget: {Available: false, Error: "winget unavailable"},

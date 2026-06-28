@@ -253,6 +253,29 @@ func TestStoreAssessmentBrowserSmokeStrings(t *testing.T) {
 	}
 }
 
+func TestStoreStaleEvidenceHiddenFromPrimaryUpdateQueueAssets(t *testing.T) {
+	start := strings.Index(uiJS, "function packageNeedsUpdateAttentionBase(pkg){")
+	if start < 0 {
+		t.Fatal("packageNeedsUpdateAttentionBase function not found")
+	}
+	end := strings.Index(uiJS[start:], "\n  function packageSuppressedByCompletedUpdate")
+	if end < 0 {
+		t.Fatal("packageNeedsUpdateAttentionBase function end not found")
+	}
+	body := uiJS[start : start+end]
+	for _, expected := range []string{
+		`if(pkg.stale){ return false; }`,
+		`return !!pkg.can_update_now || state === "unknown" || state === "conflict" || state === "pending";`,
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("packageNeedsUpdateAttentionBase should contain %q; body:\n%s", expected, body)
+		}
+	}
+	if strings.Contains(body, "|| !!pkg.stale") {
+		t.Fatalf("stale Store evidence should not enter the primary update queue; body:\n%s", body)
+	}
+}
+
 func requestPackages(t *testing.T, app *App) InventoryResponse {
 	t.Helper()
 	request := authenticatedRequest(app, http.MethodGet, "/api/packages", nil)

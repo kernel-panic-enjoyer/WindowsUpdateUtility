@@ -269,6 +269,74 @@ func TestOptimizedStoreScanHealthyAggregateNoUpdatesAvoidsExactChecks(t *testing
 	}
 }
 
+func TestOptimizedStoreScanAggregateDisplayOnlyPositiveTriggersExactSweep(t *testing.T) {
+	restoreAvailable := replacePackageActionManagerAvailable(func(manager string) bool {
+		return manager == managerStore
+	})
+	defer restoreAvailable()
+
+	store := newTestStoreScanRepository(t)
+	userSID := "S-1-5-21-display-only-positive"
+	codexPFN := "OpenAI.Codex_2p2nqsd0c76g0"
+	otherPFN := "Microsoft.GamingApp_8wekyb3d8bbwe"
+	counts := map[string]int{}
+	displayOnlyAggregateOutput := strings.Join([]string{
+		"Checking for updates...",
+		"",
+		"Updates available (1 found)",
+		"",
+		"Store-managed update available",
+		"This Store app update can be installed immediately.",
+		"Name  Publisher  Version       Date",
+		"Codex OpenAI     26.623.3245.0 2026-06-28",
+		"",
+		"Would you like to install the 1 Store update(s) now? [y/n] (y):",
+		"Failed to read input in non-interactive mode.",
+	}, "\n")
+	pipeline := newMultiFamilyStoreScanPipeline(store, userSID, []string{codexPFN, otherPFN}, []StoreCatalogProvider{
+		countingStoreCLIExactProvider(t, counts, map[string]string{
+			codexPFN: "9NCODEX",
+			otherPFN: "9MV0B5HZVK9Z",
+		}, map[string]string{
+			codexPFN: strings.Join([]string{
+				"Checking updates...",
+				"Checking updates for Codex...",
+				"Update available for 'Codex'",
+				"Would you like to apply the update? [y/n] (y):",
+				"Failed to read input in non-interactive mode.",
+			}, "\n"),
+			otherPFN: "Already up to date",
+		}),
+		storeCLIUpdatesCatalogProvider{
+			Version: "store-cli-test-v1",
+			Run: func(ctx context.Context, timeout time.Duration, args ...string) CommandResult {
+				counts["store-updates"]++
+				return CommandResult{OK: true, Command: strings.Join(args, " "), Stdout: displayOnlyAggregateOutput}
+			},
+		},
+	})
+	restoreSID := replaceStoreScanSID(userSID)
+	defer restoreSID()
+
+	result, err := pipeline.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts["store-show"] != 2 || counts["store-update-targeted"] != 2 {
+		t.Fatalf("display-only aggregate positive should trigger exact checks for product-like PFNs: counts=%#v", counts)
+	}
+	byPFN := assessmentsByPFN(result.Assessments)
+	if got := byPFN[codexPFN]; got.State != StoreUpdateAvailable || !got.ExactActionTargetAvailable || got.StoreProductID != "9NCODEX" {
+		t.Fatalf("exact Codex evidence did not become actionable: %#v", got)
+	}
+	if got := byPFN[otherPFN]; got.State == StoreUpdateAvailable || got.ExactActionTargetAvailable {
+		t.Fatalf("display-only aggregate hint manufactured an update for unrelated PFN: %#v", got)
+	}
+	if result.Scan.Metrics.ExactChecksPlanned != 2 || result.Scan.Metrics.MappingsRefreshed != 2 {
+		t.Fatalf("unexpected exact sweep metrics: %#v", result.Scan.Metrics)
+	}
+}
+
 func TestOptimizedStoreScanVP9AggregatePositiveReusesCachedMapping(t *testing.T) {
 	restoreAvailable := replacePackageActionManagerAvailable(func(manager string) bool {
 		return manager == managerStore

@@ -39,6 +39,7 @@
   var jobsInitialized = false;
   var serverJobs = [];
   var completedJobIDs = {};
+  var completedUpdateKeys = {};
   var activeUpdateKeys = [];
   var activeUpdateJobID = "";
   var pendingBulkUpdate = null;
@@ -854,11 +855,19 @@
     if(pkg && pkg.manager === "store"){ return false; }
     return !!pkg.update_available;
   }
-  function packageNeedsUpdateAttention(pkg){
+  function packageNeedsUpdateAttentionBase(pkg){
     if(pkg && pkg.manager === "store" && !storeAssessmentActive(pkg)){ return true; }
     if(!storeAssessmentActive(pkg)){ return !!pkg.update_available; }
     var state = storeUpdateState(pkg);
-    return !!pkg.can_update_now || state === "unknown" || state === "conflict" || state === "pending" || !!pkg.stale;
+    if(pkg.stale){ return false; }
+    return !!pkg.can_update_now || state === "unknown" || state === "conflict" || state === "pending";
+  }
+  function packageSuppressedByCompletedUpdate(pkg){
+    return !!(pkg && pkg.key && completedUpdateKeys[pkg.key] && packageNeedsUpdateAttentionBase(pkg));
+  }
+  function packageNeedsUpdateAttention(pkg){
+    if(packageSuppressedByCompletedUpdate(pkg)){ return false; }
+    return packageNeedsUpdateAttentionBase(pkg);
   }
   function packageReasonText(pkg){
     return String((pkg && pkg.update_reason) || "").trim();
@@ -1380,6 +1389,7 @@
   function renderPackages(data){
     renderManagers(data);
     packages = data.packages || [];
+    reconcileCompletedUpdateKeys();
     latestStoreScanHealth = data.store_scan_health || null;
     latestPackagesLoading = !!data.loading;
     latestStoreLoading = !!data.store_loading;
@@ -1730,12 +1740,14 @@
       setUpdateBusy(false, activeUpdateKeys, current.current_key || "");
       setGlobalProgress(true, message, false);
       showNotice("");
-    }else if(!updateBusy){
+    }else{
       activeUpdateKeys = [];
       activeUpdateJobID = "";
+      setUpdateBusy(false, [], "");
       setGlobalProgress(false, "", false);
     }
     reconcileAuxiliaryJobProgress(activeServerJobs().filter(function(job){ return !jobIsUpdate(job); }));
+    if(jobsInitialized){ recordSucceededUpdateResults(serverJobs); }
     renderPackageTables();
     renderLatestUpdateResult(serverJobs);
     reconcileCompletedJobs(serverJobs);
@@ -1789,6 +1801,30 @@
       }else if(job.type === "inventory-refresh"){
         loadPackages(false);
       }
+    });
+  }
+  function recordSucceededUpdateResults(status){
+    (Array.isArray(status) ? status : [status]).forEach(function(job){
+      if(!jobIsUpdate(job) || !jobComplete(job)){ return; }
+      if(job.job_id && completedJobIDs[job.job_id]){ return; }
+      updateResultRows(job).forEach(function(row){
+        if(row.state === "succeeded" && row.key){
+          completedUpdateKeys[row.key] = true;
+        }
+      });
+    });
+  }
+  function reconcileCompletedUpdateKeys(){
+    var present = {};
+    packages.forEach(function(pkg){
+      if(!pkg || !pkg.key){ return; }
+      present[pkg.key] = true;
+      if(completedUpdateKeys[pkg.key] && !packageNeedsUpdateAttentionBase(pkg)){
+        delete completedUpdateKeys[pkg.key];
+      }
+    });
+    Object.keys(completedUpdateKeys).forEach(function(key){
+      if(!present[key]){ delete completedUpdateKeys[key]; }
     });
   }
   function packageByKey(key){

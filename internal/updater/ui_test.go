@@ -311,6 +311,10 @@ func TestRenderedHTMLContainsAsyncUpdateHooks(t *testing.T) {
 		`return !!pkg.can_update_now || state === "unknown" || state === "conflict"`,
 		`row-actions`,
 		`.row-actions{display:flex`,
+		`--row-update-action-width:148px`,
+		`.update-form button{width:100%}`,
+		`.row-actions .update-form{flex:0 0 var(--row-update-action-width)}`,
+		`.row-progress{width:100%}`,
 		`icon-only`,
 		`managersRendered`,
 		`renderUpdatesTable`,
@@ -392,6 +396,8 @@ func TestRenderedHTMLContainsAsyncUpdateHooks(t *testing.T) {
 		`packageNameCell(pkg, {diagnostics:true})`,
 		`managerCell(pkg) + '</td><td>' + html(pkg.version)`,
 		`.row-actions{display:grid`,
+		`.row-progress{margin-top:8px;min-width:100px}`,
+		`.row-actions .update-form{display:grid;gap:8px;justify-items:start;flex:0 0 auto}`,
 		`Log reconnecting`,
 		`Session log disconnected. Reconnecting`,
 		`Log disconnected; retrying`,
@@ -423,5 +429,44 @@ func TestRenderedHTMLContainsAsyncUpdateHooks(t *testing.T) {
 	searchResultsIndex := strings.Index(rendered, `id="search-results-panel"`)
 	if installProgressIndex < 0 || searchResultsIndex < 0 || installProgressIndex > searchResultsIndex {
 		t.Fatalf("expected install progress banner before search results, progress=%d search=%d", installProgressIndex, searchResultsIndex)
+	}
+}
+
+func TestSuccessfulUpdateResultsSuppressPrimaryUpdateRows(t *testing.T) {
+	for _, expected := range []string{
+		`var completedUpdateKeys = {};`,
+		`function recordSucceededUpdateResults(status){`,
+		`if(job.job_id && completedJobIDs[job.job_id]){ return; }`,
+		`completedUpdateKeys[row.key] = true;`,
+		`function packageSuppressedByCompletedUpdate(pkg){`,
+		`if(packageSuppressedByCompletedUpdate(pkg)){ return false; }`,
+		`if(jobsInitialized){ recordSucceededUpdateResults(serverJobs); }`,
+	} {
+		if !strings.Contains(uiJS, expected) {
+			t.Fatalf("expected successful update rows to suppress primary update entries, missing %q", expected)
+		}
+	}
+}
+
+func TestCompletedUpdateJobsClearGlobalProgress(t *testing.T) {
+	start := strings.Index(uiJS, "function reconcileJobs(jobs){")
+	if start < 0 {
+		t.Fatal("reconcileJobs function not found")
+	}
+	end := strings.Index(uiJS[start:], "\n  function reconcileAuxiliaryJobProgress")
+	if end < 0 {
+		t.Fatal("reconcileJobs function end not found")
+	}
+	body := uiJS[start : start+end]
+	for _, expected := range []string{
+		`setUpdateBusy(false, [], "");`,
+		`setGlobalProgress(false, "", false);`,
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("completed update jobs should clear global progress, missing %q; body:\n%s", expected, body)
+		}
+	}
+	if strings.Contains(body, `}else if(!updateBusy){`) {
+		t.Fatalf("completed update job cleanup must not depend on updateBusy already being false; body:\n%s", body)
 	}
 }

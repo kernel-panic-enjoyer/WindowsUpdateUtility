@@ -50,6 +50,7 @@ type storeCLIUpdatesParseResult struct {
 	ExplicitNoUpdates    bool
 	Offers               []storeCLIUpdatesParsedOffer
 	ExpectedOfferCount   int
+	PositiveHint         bool
 	FailureDiagnostics   []string
 	Contradictory        bool
 	CompleteCoverage     bool
@@ -97,6 +98,7 @@ func (provider storeCLIUpdatesCatalogProvider) Observe(ctx context.Context, scan
 	result := provider.run(ctx, storeCLIUpdatesProviderTimeout, storeUpdatesCommand()...)
 	run.CompletedAt = provider.now()
 	parsed, parseErr := parseStoreCLIUpdatesOutput(result.Stdout + "\n" + result.Stderr)
+	run.PositiveUpdateHint = parsed.PositiveHint || parsed.ExpectedOfferCount > len(parsed.Offers)
 	if parseErr != nil && len(parsed.Offers) == 0 {
 		run.Health = StoreProviderIncomplete
 		run.Error = sanitizeProviderDiagnostic(firstNonEmpty(showErrString(parseErr), result.Stderr, result.Stdout))
@@ -695,6 +697,7 @@ func parseStoreCLIUpdatesOutput(output string) (storeCLIUpdatesParseResult, erro
 				flush("new update record")
 			}
 			positiveHint = true
+			result.PositiveHint = true
 			if count := storeCLIUpdatePromptOfferCount(lower); count > result.ExpectedOfferCount {
 				result.ExpectedOfferCount = count
 			}
