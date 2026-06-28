@@ -1,146 +1,264 @@
-# Windows Updater WebUI
+# WindowsUpdateUtility
 
-A single distributed Go Windows updater with a browser UI for winget,
-Chocolatey, and Microsoft Store apps. Microsoft Store packaged-app inventory is
-enumerated in the interactive user's session through an internal same-binary
-WinRT worker so blocked Store APIs can be cancelled without orphaning helpers.
+[![Windows CI](https://github.com/kernel-panic-enjoyer/WindowsUpdateUtility/actions/workflows/windows-ci.yml/badge.svg)](https://github.com/kernel-panic-enjoyer/WindowsUpdateUtility/actions/workflows/windows-ci.yml)
+[![Browser UI CI](https://github.com/kernel-panic-enjoyer/WindowsUpdateUtility/actions/workflows/browser-ci.yml/badge.svg)](https://github.com/kernel-panic-enjoyer/WindowsUpdateUtility/actions/workflows/browser-ci.yml)
+[![Release](https://github.com/kernel-panic-enjoyer/WindowsUpdateUtility/actions/workflows/release.yml/badge.svg)](https://github.com/kernel-panic-enjoyer/WindowsUpdateUtility/actions/workflows/release.yml)
+[![License: GPL-3.0-only](https://img.shields.io/badge/License-GPL--3.0--only-blue.svg)](LICENSE)
+
+WindowsUpdateUtility is a Windows app updater with a local browser UI for
+WinGet, Chocolatey, and Microsoft Store apps. It runs in the interactive user
+session, keeps package-manager operations explicit, and treats Microsoft Store
+updates conservatively so stale or ambiguous Store evidence cannot become an
+actionable update.
+
+## Contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Install](#install)
+- [Run](#run)
+- [Application updates](#application-updates)
+- [Safety model](#safety-model)
+- [Build from source](#build-from-source)
+- [Test and validate](#test-and-validate)
+- [Project layout](#project-layout)
+- [Troubleshooting](#troubleshooting)
+- [Release process](#release-process)
+- [License](#license)
 
 ## Features
 
-- Runs as a local-only WebUI on `127.0.0.1`.
-- Runs the WebUI in the interactive user session and uses elevation only for actions that require it.
-- Detects winget, Chocolatey, and the native Store CLI.
-- Lists installed winget, Chocolatey, and current-user Store packaged apps in one table.
-- Uses the exact Microsoft Store assessment model by default. Store status is
-  `Unknown` unless the app has a fresh, complete, exact, current-user scan; it
-  must not guess Store update state from display names or fuzzy matches.
-- Detects available updates and enables update buttons only for packages with
-  updates and exact action targets. Store execution attempts verified Product
-  ID first through WinGet msstore when available, with verified Store CLI exact
-  targets used only as fallback.
-- Searches for installable packages and filters out truncated winget IDs.
-- Installs packages from winget, Chocolatey, or Store after an explicit button click.
-- Updates individual packages, selected packages, or all packages.
-- Checks GitHub Releases for newer WindowsUpdaterWebUI builds and can replace
-  itself after a verified download and explicit user confirmation.
-- Supports Start with Windows through Windows Task Scheduler.
-- Supports opt-in daily auto-update for individual packages or all packages
-  through Windows Task Scheduler.
-- Scans Windows uninstall registry plus managed package inventory and reports apps newly detected since the previous scan.
-- Exports Store diagnostics from the WebUI scan-health panel without raw user SIDs, tokens, credentials, or personal install paths.
-- Retains bounded session logs and exports category-specific log archives.
-- Includes a dark/light WebUI theme with no separate frontend JavaScript dependency.
+- Local-only WebUI bound to `127.0.0.1` with a tokenized browser URL.
+- Unified inventory for WinGet, Chocolatey, and current-user Microsoft Store
+  packaged apps.
+- Individual, selected, or bulk package updates.
+- Explicit package installs from WinGet, Chocolatey, or Microsoft Store.
+- Optional Start with Windows and scheduled auto-update support through Windows
+  Task Scheduler.
+- Prompt-first application self-update from GitHub Releases with SHA-256
+  verification before replacement.
+- Bounded session logs with category filters and export support.
+- Store scan health and diagnostics export for investigating Store provider
+  failures without exposing raw SIDs, credentials, tokens, or personal install
+  paths.
+- Light and dark themes with embedded static assets and no separate frontend
+  package pipeline.
 
-## Project Layout
+## Requirements
 
-- `main.go`: thin executable entrypoint.
-- `app.manifest` / `app.syso`: Windows icon and explicit `asInvoker` manifest so the WebUI starts without startup elevation.
-- `internal/updater`: application backend, WebUI, package-manager integrations, tests, and embedded assets.
-- `internal/updater/assets`: app icon, favicon, CSS, and JavaScript assets.
-- `dev/scripts`: developer build and distribution smoke helpers.
-- `dev/tools/icongen`: icon generation utility.
-- `dev/tools/spikes`: disposable Store/API validation probes, excluded from the production binary.
-- `docs/architecture`: architecture decision records.
-- `docs/status`: current implementation status and release-gate notes.
-- `docs/testing`: manual Windows smoke-test procedures.
-- `docs/troubleshooting`: user-facing troubleshooting notes.
-- `dist`: local build output.
+- Windows 10 or newer.
+- App Installer / WinGet available for WinGet-backed actions.
+- Microsoft Store app stack available for Store-backed actions.
+- Chocolatey is optional and used only when installed or explicitly installed
+  through the app.
+- Administrator rights may be required for package-manager actions that modify
+  machine-wide software.
 
-## Build
+Development requirements:
 
-Use the Go version declared in `go.mod` on Windows. This repository currently
-declares Go 1.26.
+- Go version declared in [go.mod](go.mod).
+- PowerShell.
+- Node.js for `node --check internal/updater/assets/ui.js`.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1
-```
+## Install
 
-`dev\scripts\Build-Workspace.ps1` is read-only with respect to tracked source.
-It checks formatting with `gofmt -l`, runs tests, vet, the WebUI JavaScript
-syntax check, and the Windows GUI build. If formatting is needed, run:
+Download `WindowsUpdaterWebUI.exe` from the
+[latest GitHub Release](https://github.com/kernel-panic-enjoyer/WindowsUpdateUtility/releases/latest).
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\dev\scripts\Format-Workspace.ps1
-```
-
-Build output is written under `dist\`. The production executable is unstripped;
-the build script intentionally uses only `-H=windowsgui` and does not use
-`-s`, `-w`, UPX, or packing. Each build writes a sibling `.metadata.json` file
-with commit, dirty-worktree flag, Go version, target platform, byte count, and
-SHA-256. Release builds inject the application version with:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1 -Version 0.0.1
-```
+Release assets are built by GitHub Actions on `windows-latest`. Do not use
+local `dist\` builds as release artifacts.
 
 ## Run
 
 Double-click `WindowsUpdaterWebUI.exe`.
 
-The executable starts the local WebUI and opens a tokenized browser URL. UAC is
-requested only for privileged operations. No batch file, script launcher, Python
-runtime, VBS launcher, or C# launcher is required.
+The app starts the local WebUI and opens a browser tab. The main process runs
+unelevated by default; UAC is requested only for specific privileged actions.
 
-For development without UAC:
+For development or scripted startup:
 
 ```powershell
-Set-ExecutionPolicy -Scope Process Bypass
 go run . --no-browser
 ```
 
-Supported user-facing CLI options are:
+Supported user-facing options:
 
-- `--no-browser`: start the local WebUI and print the tokenized URL instead of
-  opening a browser.
-- `--port <port>`: bind the local WebUI to an explicit port; startup fails if
-  it is unavailable.
-- `--token <token>`: use a caller-provided bootstrap token.
-- `--task auto-update`: run the scheduled auto-update task once and print JSON
-  results.
-- `--help`: print usage.
+```text
+WindowsUpdaterWebUI.exe [--no-browser] [--port PORT] [--token TOKEN]
+WindowsUpdaterWebUI.exe --task auto-update
+```
 
-`--no-elevate` is not supported. The executable manifest is already
-`asInvoker`; the WebUI runs unelevated and only individual privileged actions
-use the typed elevated worker.
+| Option | Description |
+| --- | --- |
+| `--no-browser` | Start the local WebUI and print the URL instead of opening a browser. |
+| `--port PORT` | Bind the WebUI to a specific local port. Startup fails if the port is unavailable. |
+| `--token TOKEN` | Use a caller-provided bootstrap token instead of generating one. |
+| `--task auto-update` | Run the scheduled auto-update task once and print JSON results. |
+| `--help`, `-h` | Print usage. |
 
-For automated distribution smoke tests, use:
+Internal modes such as `--elevated-worker`, `--store-inventory-worker`, and
+`--self-update-apply` are implementation details. They are not public
+automation interfaces.
+
+## Application updates
+
+The Automation panel can check GitHub Releases for a newer stable version of
+`WindowsUpdaterWebUI.exe`.
+
+The self-update flow:
+
+1. Reads the latest non-draft, non-prerelease GitHub Release.
+2. Requires `WindowsUpdaterWebUI.exe`,
+   `WindowsUpdaterWebUI.metadata.json`, and
+   `WindowsUpdaterWebUI.exe.sha256`.
+3. Downloads the executable to a temporary directory.
+4. Verifies the SHA-256 checksum.
+5. Starts an internal apply helper that waits for the current process to exit,
+   replaces the executable, keeps a `.bak`, and restarts the app.
+
+The app does not silently replace itself. The user must choose **Install and
+Restart**.
+
+## Safety model
+
+WindowsUpdateUtility is intentionally strict about Microsoft Store updates:
+
+- Store package identity is the exact `(user SID, package family name)` pair.
+- Display names and fuzzy matching never establish Store update identity.
+- Unknown, stale, incomplete, or conflicting Store evidence does not become
+  `Current`.
+- Store execution requires fresh exact evidence and an exact action target.
+- Accepted Store commands require post-action verification.
+- Store live validation is opt-in and should run only on controlled Windows
+  hardware.
+
+Package-manager commands are bounded and cancellation-aware. Mutable operations
+own their Windows process tree through Job Object termination semantics where
+applicable, and retained command output is limited while the Session Log still
+streams live output.
+
+## Build from source
+
+Run the workspace build script from the repository root:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\dev\scripts\Smoke-Distribution.ps1 -Exe .\dist\WindowsUpdaterWebUI.exe
+powershell -NoProfile -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1
 ```
+
+The script checks formatting, runs tests, runs `go vet`, validates embedded
+JavaScript syntax, and builds the Windows GUI executable under `dist\`.
+
+For a versioned build:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1 -Version 0.0.1
+```
+
+The production executable is intentionally unstripped. The build uses
+`-H=windowsgui` and does not use `-s`, `-w`, UPX, or packing. Each build writes
+`dist\WindowsUpdaterWebUI.metadata.json` with provenance including commit,
+dirty-worktree state, Go version, target platform, byte count, and SHA-256.
+
+Format Go sources with:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\dev\scripts\Format-Workspace.ps1
+```
+
+## Test and validate
+
+Common local checks:
+
+```powershell
+gofmt -w <changed-go-files>
+go test -count=1 ./...
+go vet ./...
+node --check internal/updater/assets/ui.js
+git diff --check
+powershell -NoProfile -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1
+```
+
+To run the root and browser suites as separate reported steps:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\dev\scripts\Run-Tests.ps1
+```
+
+Distribution smoke:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\dev\scripts\Smoke-Distribution.ps1 -Exe .\dist\WindowsUpdaterWebUI.exe
+```
+
+Browser UI tests live in [tests/browser](tests/browser) and use the
+`uitestsupport` build tag:
+
+```powershell
+Push-Location .\tests\browser
+go test -tags uitestsupport -count=1 .
+Pop-Location
+```
+
+Some Store and PackageCatalog tests require controlled Windows hardware and
+explicit opt-in environment gates. Hosted CI does not perform destructive Store
+updates.
+
+## Project layout
+
+| Path | Purpose |
+| --- | --- |
+| [main.go](main.go) | Thin executable entry point. |
+| [internal/updater](internal/updater) | Backend, WebUI handlers, package-manager integrations, Store logic, and tests. |
+| [internal/updater/assets](internal/updater/assets) | Embedded CSS, JavaScript, icons, and static assets. |
+| [dev/scripts](dev/scripts) | Formatting, build, and smoke-test scripts. |
+| [dev/tools](dev/tools) | Developer-only tools and validation probes. |
+| [docs/architecture](docs/architecture) | Architecture decision records. |
+| [docs/status](docs/status) | Release gates and implementation status. |
+| [docs/testing](docs/testing) | Manual smoke-test procedures. |
+| [docs/troubleshooting](docs/troubleshooting) | User-facing troubleshooting notes. |
+| [tests/browser](tests/browser) | Browser regression tests. |
+| [dist](dist) | Local build output. |
+
+## Troubleshooting
+
+- Store status `Unknown` means the app does not have enough exact,
+  current-user evidence to declare the Store package current.
+- Store update buttons are disabled unless the app has fresh exact evidence and
+  a verified action target.
+- Use **Export Store Diagnostics** from the Store scan-health panel when Store
+  updates appear missing or stale.
+- Use **Export Logs** from Session Log when package-manager commands fail.
+
+More detail:
+
+- [Microsoft Store troubleshooting](docs/troubleshooting/microsoft-store.md)
+- [Release gates](docs/status/release-gates.md)
+- [Microsoft Store update status](docs/status/microsoft-store-update-status.md)
+
+## Release process
+
+Official release executables are built and uploaded by
+[.github/workflows/release.yml](.github/workflows/release.yml).
+
+To publish a release, dispatch the **Release** workflow from `main` with a
+semantic version such as `0.0.1`. The workflow builds
+`dist\WindowsUpdaterWebUI.exe`, generates
+`WindowsUpdaterWebUI.exe.sha256`, and creates the `v<version>` GitHub Release
+with the executable, metadata, and checksum assets.
+
+Normal CI artifacts are not release assets and are not consumed by the
+self-updater.
+
+## Contributing
+
+Keep changes small and reviewable. For code changes, add focused regression
+tests before changing behavior where practical, run the relevant validation
+commands, and keep Microsoft Store identity and freshness invariants intact.
+
+Do not add SQLite, CGO, UPX, executable stripping, packing, or fuzzy Store
+identity matching.
 
 ## License
 
-WindowsUpdateUtility is licensed under the GNU General Public License version
-3 only (`GPL-3.0-only`). See [LICENSE](LICENSE).
-
-## Notes
-
-- Official release executables are built by GitHub Actions from `main` through
-  `.github/workflows/release.yml`. Do not upload local `dist\` builds to a
-  GitHub release.
-- Supported OS floor: Windows 10 or newer with the App Installer/WinGet stack
-  available. Windows 11 is the primary validation target.
-- Architecture policy: x64 is the primary release target. ARM64 is supported by
-  Go builds and must be smoke-tested on ARM64 Windows hardware before release.
-- Package install/update actions may download software and require administrator rights.
-- Missing winget opens Microsoft App Installer.
-- Missing Store CLI opens Microsoft Store and Windows Update surfaces. Store CLI
-  is required for exact Store fallback evidence and execution when WinGet
-  msstore cannot provide a verified Product ID path.
-- WinGet msstore Product ID execution is attempted before verified Store CLI
-  exact targets.
-- Missing Chocolatey installs through winget when winget is available; otherwise the app opens the Chocolatey install page.
-- State is stored under `%LOCALAPPDATA%\WindowsUpdaterWebUI\state.json` by default.
-- Store scan snapshots are stored under `%LOCALAPPDATA%\WindowsUpdaterWebUI\store-scans\user-<hash>\`, with `current.json` pointing at immutable generation files.
-- Log retention is bounded in memory by category and job. Exported logs include
-  retained tails, not an unbounded complete history.
-- Internal unsupported modes such as `--elevated-worker` and
-  `--store-inventory-worker` are same-binary implementation details for typed
-  privilege isolation and killable current-user Store inventory. The
-  `--self-update-apply` mode is likewise internal and exists only to complete a
-  verified self-replacement after the main process exits. They are not public
-  automation interfaces.
-- Hosted CI does not perform real Microsoft Store live validation. Store live
-  tests are opt-in and must run on controlled Windows hardware with explicit
-  environment gates.
+WindowsUpdateUtility is licensed under the GNU General Public License version 3
+only (`GPL-3.0-only`). See [LICENSE](LICENSE).

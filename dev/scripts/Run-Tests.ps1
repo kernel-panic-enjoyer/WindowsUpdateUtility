@@ -19,13 +19,13 @@
     Requires Go >= 1.26 on PATH (the module targets go 1.26).
 
 .EXAMPLE
-    ./Run-Tests.ps1
+    .\dev\scripts\Run-Tests.ps1
 
 .EXAMPLE
-    ./Run-Tests.ps1 -SkipBrowser
+    .\dev\scripts\Run-Tests.ps1 -SkipBrowser
 
 .EXAMPLE
-    $env:UPDATER_RUN_STORE_LIVE_TESTS = '1'; ./Run-Tests.ps1 -Live
+    $env:UPDATER_RUN_STORE_LIVE_TESTS = '1'; .\dev\scripts\Run-Tests.ps1 -Live
 #>
 [CmdletBinding()]
 param(
@@ -34,7 +34,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$root = $PSScriptRoot
+$root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $results = [ordered]@{}
 
 function Test-BrowserAvailable {

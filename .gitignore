@@ -23,8 +23,7 @@ go.work.sum
 
 # Local app state
 .state/
-dist/*.metadata.json
-dist/size-analysis/
+dist/
 __pycache__/
 *.pyc
 .pytest_cache/
