@@ -16,10 +16,10 @@ jobs:
         working-directory: tests/browser
     steps:
       - name: Check out
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6.5.0
         with:
           go-version-file: tests/browser/go.mod
           cache-dependency-path: tests/browser/go.sum
