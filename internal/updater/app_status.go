@@ -220,13 +220,14 @@ func (app *App) appUpdateStatusContext(ctx context.Context, force bool) AppUpdat
 
 func statusSettingsFromState(state State) StatusSettings {
 	return StatusSettings{
-		AutoUpdateGlobal:      state.AutoUpdateGlobal,
-		AutoUpdatePackages:    trimBoolMap(state.AutoUpdatePackages, maxStateAutoUpdatePackages),
-		Theme:                 state.Theme,
-		LastScanAt:            state.LastScanAt,
-		LastAutoUpdateAt:      state.LastAutoUpdateAt,
-		LastAutoUpdateResults: trimUpdateResultSummaries(state.LastAutoUpdateResults),
-		LastAutoUpdateSummary: state.LastAutoUpdateSummary,
+		AutoUpdateGlobal:                state.AutoUpdateGlobal,
+		AutoUpdatePackages:              trimBoolMap(state.AutoUpdatePackages, maxStateAutoUpdatePackages),
+		Theme:                           state.Theme,
+		LastScanAt:                      state.LastScanAt,
+		LastAutoUpdateAt:                state.LastAutoUpdateAt,
+		LastAutoUpdateResults:           trimUpdateResultSummaries(state.LastAutoUpdateResults),
+		LastAutoUpdateSummary:           state.LastAutoUpdateSummary,
+		AppUpdatePromptDismissedVersion: state.AppUpdatePromptDismissedVersion,
 	}
 }
 

@@ -97,3 +97,13 @@ func TestRefreshStatusQueuesForcedRefreshWhileLoading(t *testing.T) {
 		t.Fatal("status should remain loading after queueing forced refresh")
 	}
 }
+
+func TestStatusSettingsExposeAppUpdatePromptDismissedVersion(t *testing.T) {
+	state := defaultState()
+	state.AppUpdatePromptDismissedVersion = "1.2.3"
+
+	settings := statusSettingsFromState(state)
+	if settings.AppUpdatePromptDismissedVersion != "1.2.3" {
+		t.Fatalf("expected dismissed app update version in status settings, got %#v", settings)
+	}
+}

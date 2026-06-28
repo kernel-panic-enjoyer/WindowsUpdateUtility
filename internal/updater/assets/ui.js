@@ -45,6 +45,8 @@
   var pendingBulkUpdate = null;
   var lastUpdateResultJob = null;
   var latestStatus = null;
+  var promptedAppUpdateVersions = {};
+  var activeAppUpdatePrompt = null;
   var latestStoreScanHealth = null;
   var latestPackagesLoading = true;
   var statusRequestSeq = 0;
@@ -1176,6 +1178,74 @@
     renderDashboardSummary();
   }
 
+  function appUpdatePromptVersion(update){
+    update = update || {};
+    return String(update.latest_version || update.latest_tag || "").trim();
+  }
+  function appUpdatePromptDismissedVersion(){
+    return String((latestStatus && latestStatus.settings && latestStatus.settings.app_update_prompt_dismissed_version) || "").trim();
+  }
+  function maybeShowAppUpdatePrompt(update){
+    update = update || {};
+    if(!update.available){ return; }
+    var version = appUpdatePromptVersion(update);
+    if(!version){ return; }
+    if(promptedAppUpdateVersions[version]){ return; }
+    if(appUpdatePromptDismissedVersion() === version){ return; }
+    promptedAppUpdateVersions[version] = true;
+    openAppUpdateModal(update);
+  }
+  function appUpdateReleaseLink(update){
+    var releaseURL = String((update && update.release_url) || "").trim();
+    if(!releaseURL){ return ""; }
+    return '<p><a href="' + attr(releaseURL) + '" target="_blank" rel="noreferrer">View release details</a></p>';
+  }
+  function openAppUpdateModal(update){
+    update = update || {};
+    var modal = $("app-update-modal");
+    var body = $("app-update-modal-body");
+    var checkbox = $("app-update-dismiss-version");
+    if(!modal || !body){ return; }
+    var version = appUpdatePromptVersion(update);
+    var current = update.current_version || "0.0.0-dev";
+    activeAppUpdatePrompt = {version:version, update:update};
+    body.innerHTML =
+      '<p>Current version: <strong>' + html(current) + '</strong></p>' +
+      '<p>Latest version: <strong>' + html(version || "newer release") + '</strong></p>' +
+      appUpdateReleaseLink(update);
+    if(checkbox){ checkbox.checked = false; }
+    modal.classList.remove("hidden");
+    updateModalOpenState();
+    var apply = $("app-update-modal-apply");
+    if(apply){ apply.focus(); }
+  }
+  async function persistAppUpdatePromptDismissal(version){
+    version = String(version || "").trim();
+    if(!version){ return; }
+    var params = new URLSearchParams();
+    params.set("version", version);
+    try{
+      var response = await postForm("/api/settings/app-update-prompt", params);
+      var payload = await response.json();
+      if(!response.ok){ throw new Error(payload.error || "Could not save app update prompt preference"); }
+      latestStatus = latestStatus || {};
+      if(payload.settings){ latestStatus.settings = payload.settings; }
+    }catch(e){
+      showToast("Could not save app update prompt preference: " + e.message, "error");
+    }
+  }
+  function closeAppUpdateModal(persistDismissal){
+    var modal = $("app-update-modal");
+    if(!modal){ return; }
+    var version = activeAppUpdatePrompt && activeAppUpdatePrompt.version;
+    var checkbox = $("app-update-dismiss-version");
+    var shouldPersist = persistDismissal && checkbox && checkbox.checked;
+    modal.classList.add("hidden");
+    updateModalOpenState();
+    activeAppUpdatePrompt = null;
+    if(shouldPersist){ persistAppUpdatePromptDismissal(version); }
+  }
+
   function renderAppUpdateStatus(update){
     update = update || {};
     var status = $("app-update-status");
@@ -1201,6 +1271,7 @@
         apply.textContent = "Install " + (update.latest_version || "Update") + " and Restart";
       }
     }
+    maybeShowAppUpdatePrompt(update);
   }
 
 
@@ -2476,6 +2547,17 @@
       closePackageDiagnosticsModal();
       return;
     }
+    var closeAppUpdate = event.target.closest("[data-app-update-close]");
+    if(closeAppUpdate){
+      closeAppUpdateModal(true);
+      return;
+    }
+    var appUpdateApply = event.target.closest("#app-update-modal-apply");
+    if(appUpdateApply){
+      closeAppUpdateModal(false);
+      startAppSelfUpdate();
+      return;
+    }
     var toastClose = event.target.closest(".toast-close");
     if(toastClose){
       var toast = toastClose.closest(".toast");
@@ -2495,6 +2577,11 @@
   document.addEventListener("keydown", function(event){
     var storeModal = $("store-status-modal");
     var packageModal = $("package-diagnostics-modal");
+    var appUpdateModal = $("app-update-modal");
+    if(event.key === "Escape" && appUpdateModal && !appUpdateModal.classList.contains("hidden")){
+      closeAppUpdateModal(true);
+      return;
+    }
     if(event.key === "Escape" && packageModal && !packageModal.classList.contains("hidden")){
       closePackageDiagnosticsModal();
       return;

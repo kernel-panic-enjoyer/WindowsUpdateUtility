@@ -1,5 +1,6 @@
 [PLANS]
 
+- 2026-06-28T20:24:45+02:00 [USER] Active objective: show a WebUI application self-update popup when a newer GitHub Release is detected, with durable "don't show again for this version" suppression.
 - 2026-06-28T19:29:41+02:00 [USER] Active objective: add CI-built GitHub Releases self-update support, expose prompt-first app update controls, and publish future `v0.0.1` assets from GitHub Actions rather than local uploads.
 - 2026-06-22T22:49:00+02:00 [USER] Active objective: clean up `C:\Users\User\Documents\Updater` so the repo tree is readable and not cluttered with obsolete sidecars, generated binaries, smoke state, or stale developer artifacts.
 - 2026-06-22T22:53:39+02:00 [USER] Superseded operational preference: use normal toolchain/temp defaults and build final executables under `dist\`.
@@ -52,6 +53,8 @@
 
 [DECISIONS]
 
+- 2026-06-28T20:24:45+02:00 [CODE] App self-update prompt suppression is persisted in `state.json` as `app_update_prompt_dismissed_version`, exposed through compact `/api/status` settings, and written only through `StateStore.Update` via `POST /api/settings/app-update-prompt`.
+- 2026-06-28T20:24:45+02:00 [CODE] The self-update modal is session-debounced per detected latest version and durable suppression is version-scoped; choosing Install and Restart starts the existing self-update apply flow without writing a dismissal.
 - 2026-06-28T19:29:41+02:00 [CODE] Application self-update consumes GitHub Release assets only when a stable semver tag is newer and includes `WindowsUpdaterWebUI.exe`, `WindowsUpdaterWebUI.metadata.json`, and `WindowsUpdaterWebUI.exe.sha256`; the local app downloads to temp, verifies SHA-256, then launches the downloaded same-binary `--self-update-apply` helper to replace the original executable after shutdown.
 - 2026-06-28T19:29:41+02:00 [CODE] Official release executables are built by `.github/workflows/release.yml` on `windows-latest` through `dev/scripts/Build-Workspace.ps1 -Version <semver>`; local `dist\` builds remain validation artifacts and are not release upload sources.
 - 2026-06-22T22:49:00+02:00 [CODE] Project is a Go Windows updater WebUI utility with tray integration, local tokenized WebUI, winget/Chocolatey/Store package operations, scheduled tasks, update queues, session logs, and Store diagnostics.
@@ -208,6 +211,7 @@
 
 [OUTCOMES]
 
+- 2026-06-28T20:24:45+02:00 [TOOL] App-update popup validation passed: initial focused updater test failed before production changes with missing state/status/endpoint symbols; after implementation `go test -count=1 ./internal/updater`, browser tests from `tests/browser` with `-tags uitestsupport`, `go test -count=1 ./...`, `go vet ./...`, bundled Node `--check internal/updater/assets/ui.js`, `git diff --check` with CRLF warnings only, and `powershell -NoProfile -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1` passed; rebuilt `dist\WindowsUpdaterWebUI.exe` at 16,027,136 bytes.
 - 2026-06-28T19:59:37+02:00 [TOOL] Organization cleanup was pushed directly to `main` as `52d7198`; GitHub reported the pull-request branch rule was bypassed for that direct push. Old local branches `codex/ci-built-self-update`, `codex/gplv3-license`, and `codex/windows-updater-webui` were deleted; remote branch `origin/codex/ci-built-self-update` was deleted; only local `main` and remote `origin/main` remain.
 - 2026-06-28T19:54:56+02:00 [TOOL] Repository organization cleanup completed: root `Run-Tests.ps1` moved to `dev/scripts/Run-Tests.ps1` with corrected root resolution, docs updated to the new path, `dist/` is now ignored as generated build output, and local untracked `dist/` plus empty `.agents/` were removed. Validation passed: moved test runner with `-SkipBrowser`, `go test -count=1 ./...` through that runner, and `git diff --check` with Windows CRLF warnings only.
 - 2026-06-28T19:50:38+02:00 [TOOL] README was rewritten as a user/developer entry point with badges, install/run instructions, application self-update behavior, safety model, build/test commands, project layout, troubleshooting links, release process, contributing notes, and GPLv3 licensing. Validation passed: README local link targets and `git diff --check` with Windows CRLF warnings only.

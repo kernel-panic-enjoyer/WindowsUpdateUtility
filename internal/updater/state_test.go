@@ -265,6 +265,20 @@ func TestSetAutoUpdateRejectsAmbiguousStorePackageKeys(t *testing.T) {
 	}
 }
 
+func TestNormalizeStatePreservesBoundedAppUpdatePromptDismissal(t *testing.T) {
+	state := defaultState()
+	state.AppUpdatePromptDismissedVersion = strings.Repeat("v", maxStateStringBytes+64)
+
+	normalizeState(&state, nil)
+
+	if len(state.AppUpdatePromptDismissedVersion) > maxStateStringBytes {
+		t.Fatalf("dismissed app update version was not bounded: %d", len(state.AppUpdatePromptDismissedVersion))
+	}
+	if state.AppUpdatePromptDismissedVersion == "" {
+		t.Fatal("dismissed app update version should be preserved when non-empty")
+	}
+}
+
 func TestSetAutoUpdateSaveFailureDoesNotMutateScheduledTask(t *testing.T) {
 	oldCreate := createAutoUpdateTaskRunner
 	oldDelete := deleteTaskRunner

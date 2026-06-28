@@ -3,6 +3,7 @@ package updater
 import (
 	"context"
 	"net/http"
+	"strings"
 )
 
 func setThemePreference(theme string) (State, error) {
@@ -20,6 +21,22 @@ func setThemePreferenceWithStore(ctx context.Context, store StateStore, theme st
 		} else {
 			state.Theme = "dark"
 		}
+		return nil
+	})
+}
+
+func setAppUpdatePromptDismissedVersion(version string) (State, error) {
+	store, err := defaultStateStore()
+	if err != nil {
+		return State{}, err
+	}
+	return setAppUpdatePromptDismissedVersionWithStore(context.Background(), store, version)
+}
+
+func setAppUpdatePromptDismissedVersionWithStore(ctx context.Context, store StateStore, version string) (State, error) {
+	version = strings.TrimSpace(version)
+	return store.Update(ctx, func(state *State) error {
+		state.AppUpdatePromptDismissedVersion = version
 		return nil
 	})
 }
@@ -83,6 +100,20 @@ func parseThemeRequest(r *http.Request) (string, error) {
 	return r.Form.Get("theme"), nil
 }
 
+func parseAppUpdatePromptRequest(r *http.Request) (string, error) {
+	if requestIsJSON(r) {
+		var payload struct {
+			Version string `json:"version"`
+		}
+		if err := decodeJSONRequest(r, &payload); err != nil {
+			return "", err
+		}
+		return strings.TrimSpace(payload.Version), nil
+	}
+	_ = r.ParseForm()
+	return strings.TrimSpace(r.Form.Get("version")), nil
+}
+
 func (app *App) handleStartupSettingsAPI(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
@@ -121,6 +152,23 @@ func (app *App) handleThemeSettingsAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	state, err := setThemePreference(theme)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, settingsResponse(state))
+}
+
+func (app *App) handleAppUpdatePromptSettingsAPI(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	version, err := parseAppUpdatePromptRequest(r)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	state, err := setAppUpdatePromptDismissedVersion(version)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return

@@ -636,6 +636,171 @@ func TestBrowserHidesStaleStoreEvidenceFromUpdatesQueue(t *testing.T) {
 	}
 }
 
+func TestBrowserAppUpdatePromptDismissesPerVersion(t *testing.T) {
+	app := updater.NewBrowserTestApp()
+	var dismissedVersion atomic.Value
+	var statusVersion atomic.Value
+	statusVersion.Store("1.1.0")
+	appUpdateStatus := func() updater.AppUpdateStatus {
+		version := statusVersion.Load().(string)
+		return updater.AppUpdateStatus{
+			CurrentVersion: "1.0.0",
+			LatestVersion:  version,
+			LatestTag:      "v" + version,
+			Available:      true,
+			ReleaseURL:     "https://example.test/releases/v" + version,
+		}
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/status":
+			updater.SetTestSecurityHeaders(w)
+			if !app.TestSessionOK(r) {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			settings := updater.StatusSettings{Theme: "dark"}
+			if value := dismissedVersion.Load(); value != nil {
+				settings.AppUpdatePromptDismissedVersion = value.(string)
+			}
+			updater.WriteTestJSON(w, http.StatusOK, updater.StatusResponse{
+				Managers: map[string]updater.ManagerStatus{
+					updater.ManagerWinget: {Available: true},
+					updater.ManagerStore:  {Available: true},
+					updater.ManagerChoco:  {Available: true},
+				},
+				Settings:  settings,
+				AppUpdate: appUpdateStatus(),
+			})
+		case "/api/app-update/check":
+			updater.SetTestSecurityHeaders(w)
+			if !app.TestSessionOK(r) {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			updater.WriteTestJSON(w, http.StatusOK, appUpdateStatus())
+		case "/api/settings/app-update-prompt":
+			updater.SetTestSecurityHeaders(w)
+			if !app.TestSessionOK(r) {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			if err := r.ParseForm(); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			version := strings.TrimSpace(r.Form.Get("version"))
+			dismissedVersion.Store(version)
+			updater.WriteTestJSON(w, http.StatusOK, map[string]any{
+				"settings": updater.StatusSettings{Theme: "dark", AppUpdatePromptDismissedVersion: version},
+			})
+		default:
+			app.TestHandler()(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	ctx, cancel := newBrowserContext(t)
+	defer cancel()
+
+	waitForAppUpdateModal := func() {
+		t.Helper()
+		if err := chromedp.Run(ctx,
+			chromedp.Poll(`!document.querySelector("#app-update-modal").classList.contains("hidden")`, nil, chromedp.WithPollingInterval(50*time.Millisecond), chromedp.WithPollingTimeout(3*time.Second)),
+		); err != nil {
+			var state string
+			_ = chromedp.Run(ctx, chromedp.Evaluate(`JSON.stringify({
+			  modalHidden: document.querySelector("#app-update-modal")?.classList.contains("hidden"),
+			  status: document.querySelector("#app-update-status")?.innerText,
+			  checkDisabled: document.querySelector("#app-update-check")?.disabled,
+			  dismissed: window.__appUpdatePromptDismissedVersionForTest ? window.__appUpdatePromptDismissedVersionForTest() : ""
+			})`, &state))
+			t.Fatalf("app update modal did not become visible: %v state=%s", err, state)
+		}
+	}
+	waitForAppUpdateModalHidden := func() {
+		t.Helper()
+		if err := chromedp.Run(ctx,
+			chromedp.Poll(`document.querySelector("#app-update-modal").classList.contains("hidden")`, nil, chromedp.WithPollingInterval(50*time.Millisecond), chromedp.WithPollingTimeout(3*time.Second)),
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clickAppUpdateCheck := func() {
+		t.Helper()
+		if err := chromedp.Run(ctx,
+			chromedp.Poll(`!document.querySelector("#app-update-check").disabled`, nil, chromedp.WithPollingInterval(50*time.Millisecond), chromedp.WithPollingTimeout(3*time.Second)),
+			chromedp.Evaluate(`document.querySelector("#app-update-check").click()`, nil),
+			chromedp.Poll(`!document.querySelector("#app-update-check").disabled`, nil, chromedp.WithPollingInterval(50*time.Millisecond), chromedp.WithPollingTimeout(3*time.Second)),
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	navigateAuthenticated(t, ctx, server.URL)
+	waitForAppUpdateModal()
+	var modalText string
+	if err := chromedp.Run(ctx, chromedp.Text(`#app-update-modal`, &modalText, chromedp.ByQuery)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(modalText, "Application update available") || !strings.Contains(modalText, "1.1.0") {
+		t.Fatalf("unexpected app update modal text: %s", modalText)
+	}
+	if err := chromedp.Run(ctx, chromedp.Click(`#app-update-later`, chromedp.ByQuery)); err != nil {
+		t.Fatal(err)
+	}
+	waitForAppUpdateModalHidden()
+
+	clickAppUpdateCheck()
+	if err := chromedp.Run(ctx, chromedp.Sleep(250*time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	var visibleAfterLater bool
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`!document.querySelector("#app-update-modal").classList.contains("hidden")`, &visibleAfterLater)); err != nil {
+		t.Fatal(err)
+	}
+	if visibleAfterLater {
+		t.Fatal("modal reopened for the same version after a session dismissal")
+	}
+
+	statusVersion.Store("1.2.0")
+	clickAppUpdateCheck()
+	waitForAppUpdateModal()
+	if err := chromedp.Run(ctx,
+		chromedp.Click(`#app-update-dismiss-version`, chromedp.ByQuery),
+		chromedp.Click(`#app-update-later`, chromedp.ByQuery),
+	); err != nil {
+		t.Fatal(err)
+	}
+	waitForAppUpdateModalHidden()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if value := dismissedVersion.Load(); value == "1.2.0" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected persisted dismissed version 1.2.0, got %#v", dismissedVersion.Load())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	clickAppUpdateCheck()
+	if err := chromedp.Run(ctx, chromedp.Sleep(250*time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	var visibleForDismissed bool
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`!document.querySelector("#app-update-modal").classList.contains("hidden")`, &visibleForDismissed)); err != nil {
+		t.Fatal(err)
+	}
+	if visibleForDismissed {
+		t.Fatal("modal appeared for the dismissed version")
+	}
+
+	statusVersion.Store("1.3.0")
+	clickAppUpdateCheck()
+	waitForAppUpdateModal()
+}
+
 func TestBrowserKeyboardAccessibilityAndMobileLayout(t *testing.T) {
 	restoreManagers := updater.ReplaceManagerDetectionCacheForTest(map[string]updater.ManagerStatus{
 		updater.ManagerWinget: {Available: false, Error: "winget unavailable"},

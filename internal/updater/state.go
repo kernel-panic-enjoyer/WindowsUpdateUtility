@@ -67,19 +67,20 @@ type ScheduledAutoUpdateSkippedPackage struct {
 }
 
 type State struct {
-	CreatedAt                string                         `json:"created_at"`
-	UpdatedAt                string                         `json:"updated_at"`
-	AutoUpdateGlobal         bool                           `json:"auto_update_global"`
-	AutoUpdatePackages       map[string]bool                `json:"auto_update_packages"`
-	RegistryApps             map[string]ScannedApp          `json:"registry_apps"`
-	WingetApps               map[string]ScannedApp          `json:"winget_apps"`
-	StoreApps                map[string]ScannedApp          `json:"store_apps"`
-	StoreAutoUpdateMigration StoreAutoUpdateMigrationReport `json:"store_auto_update_migration,omitempty"`
-	LastScanAt               string                         `json:"last_scan_at"`
-	LastAutoUpdateAt         string                         `json:"last_auto_update_at"`
-	LastAutoUpdateResults    []UpdateResultSummary          `json:"last_auto_update_results"`
-	LastAutoUpdateSummary    *ScheduledAutoUpdateSummary    `json:"last_auto_update_summary,omitempty"`
-	Theme                    string                         `json:"theme"`
+	CreatedAt                       string                         `json:"created_at"`
+	UpdatedAt                       string                         `json:"updated_at"`
+	AutoUpdateGlobal                bool                           `json:"auto_update_global"`
+	AutoUpdatePackages              map[string]bool                `json:"auto_update_packages"`
+	RegistryApps                    map[string]ScannedApp          `json:"registry_apps"`
+	WingetApps                      map[string]ScannedApp          `json:"winget_apps"`
+	StoreApps                       map[string]ScannedApp          `json:"store_apps"`
+	StoreAutoUpdateMigration        StoreAutoUpdateMigrationReport `json:"store_auto_update_migration,omitempty"`
+	LastScanAt                      string                         `json:"last_scan_at"`
+	LastAutoUpdateAt                string                         `json:"last_auto_update_at"`
+	LastAutoUpdateResults           []UpdateResultSummary          `json:"last_auto_update_results"`
+	LastAutoUpdateSummary           *ScheduledAutoUpdateSummary    `json:"last_auto_update_summary,omitempty"`
+	Theme                           string                         `json:"theme"`
+	AppUpdatePromptDismissedVersion string                         `json:"app_update_prompt_dismissed_version,omitempty"`
 }
 
 func utcNow() string {
@@ -286,6 +287,7 @@ func normalizeState(state *State, legacyAssessments map[string]legacyAssessmentC
 	state.LastScanAt = clampStateString(state.LastScanAt)
 	state.LastAutoUpdateAt = clampStateString(state.LastAutoUpdateAt)
 	state.Theme = clampStateString(state.Theme)
+	state.AppUpdatePromptDismissedVersion = clampStateString(strings.TrimSpace(state.AppUpdatePromptDismissedVersion))
 	state.AutoUpdatePackages = trimBoolMap(state.AutoUpdatePackages, maxStateAutoUpdatePackages)
 	state.RegistryApps = trimScannedAppMap(state.RegistryApps, maxStateScannedAppsPerBucket)
 	state.WingetApps = trimScannedAppMap(state.WingetApps, maxStateScannedAppsPerBucket)

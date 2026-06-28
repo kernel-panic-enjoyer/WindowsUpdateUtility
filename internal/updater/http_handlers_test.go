@@ -578,6 +578,13 @@ func TestSettingsJSONRequestParsers(t *testing.T) {
 	if err != nil || theme != "light" {
 		t.Fatalf("unexpected theme JSON parse: theme=%q err=%v", theme, err)
 	}
+
+	appUpdatePromptRequest := httptest.NewRequest(http.MethodPost, "/api/settings/app-update-prompt", strings.NewReader(`{"version":"1.2.3"}`))
+	appUpdatePromptRequest.Header.Set("Content-Type", "application/json")
+	version, err := parseAppUpdatePromptRequest(appUpdatePromptRequest)
+	if err != nil || version != "1.2.3" {
+		t.Fatalf("unexpected app update prompt JSON parse: version=%q err=%v", version, err)
+	}
 }
 
 func TestSettingsAPIsRejectMalformedJSONBeforeSideEffects(t *testing.T) {
@@ -590,6 +597,7 @@ func TestSettingsAPIsRejectMalformedJSONBeforeSideEffects(t *testing.T) {
 		{"startup", "/api/settings/startup", `{"enabled":`, true},
 		{"auto update", "/api/settings/auto-update", `{"package_keys":{}}`, true},
 		{"theme", "/api/settings/theme", `{"theme":`, false},
+		{"app update prompt", "/api/settings/app-update-prompt", `{"version":`, false},
 	}
 
 	for _, tc := range cases {
@@ -621,5 +629,37 @@ func TestSettingsAPIsRejectMalformedJSONBeforeSideEffects(t *testing.T) {
 				t.Fatalf("expected invalid JSON error, got %#v", decoded)
 			}
 		})
+	}
+}
+
+func TestAppUpdatePromptSettingsEndpointPersistsDismissedVersion(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("UPDATER_STATE_DIR", dir)
+	original := defaultState()
+	original.Theme = "light"
+	original.AutoUpdatePackages["winget:Git.Git"] = true
+	if err := saveState(original); err != nil {
+		t.Fatal(err)
+	}
+
+	app := testSessionApp()
+	request := authenticatedRequest(app, http.MethodPost, "/api/settings/app-update-prompt", strings.NewReader(`{"version":"1.2.3"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	app.serveHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected ok, got %d: %s", response.Code, response.Body.String())
+	}
+	var decoded commandAPIResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Settings == nil || decoded.Settings.AppUpdatePromptDismissedVersion != "1.2.3" {
+		t.Fatalf("settings response did not include dismissed version: %#v", decoded.Settings)
+	}
+	loaded := loadState()
+	if loaded.AppUpdatePromptDismissedVersion != "1.2.3" || loaded.Theme != "light" || !loaded.AutoUpdatePackages["winget:Git.Git"] {
+		t.Fatalf("endpoint did not preserve unrelated state: %#v", loaded)
 	}
 }

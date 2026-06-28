@@ -181,6 +181,11 @@ main{width:min(1500px,100%);margin:0 auto;padding:22px 28px 28px}
 .stack{display:grid;gap:10px}
 .app-update-control{display:grid;gap:10px;padding-top:10px;border-top:1px solid var(--line)}
 .app-update-control p{margin:3px 0 0;overflow-wrap:anywhere}
+.app-update-modal{border-left:4px solid var(--blue)}
+.app-update-modal-body{display:grid;gap:8px;margin-bottom:12px;overflow-wrap:anywhere}
+.app-update-modal-body p{margin:0;color:var(--muted)}
+.app-update-modal-actions{justify-content:flex-end;margin-top:12px}
+.app-update-dismiss{margin-top:4px}
 .check-control{display:inline-flex;align-items:center;gap:7px;color:var(--muted);font-weight:700}
 .table-panel{padding:0;overflow:hidden}
   .table-panel>.section-heading,.table-panel>p,.table-panel>pre,.table-footer{padding-left:16px;padding-right:16px}

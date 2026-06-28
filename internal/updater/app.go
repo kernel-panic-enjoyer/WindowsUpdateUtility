@@ -31,13 +31,14 @@ type StatusResponse struct {
 }
 
 type StatusSettings struct {
-	AutoUpdateGlobal      bool                        `json:"auto_update_global"`
-	AutoUpdatePackages    map[string]bool             `json:"auto_update_packages,omitempty"`
-	Theme                 string                      `json:"theme"`
-	LastScanAt            string                      `json:"last_scan_at,omitempty"`
-	LastAutoUpdateAt      string                      `json:"last_auto_update_at,omitempty"`
-	LastAutoUpdateResults []UpdateResultSummary       `json:"last_auto_update_results,omitempty"`
-	LastAutoUpdateSummary *ScheduledAutoUpdateSummary `json:"last_auto_update_summary,omitempty"`
+	AutoUpdateGlobal                bool                        `json:"auto_update_global"`
+	AutoUpdatePackages              map[string]bool             `json:"auto_update_packages,omitempty"`
+	Theme                           string                      `json:"theme"`
+	LastScanAt                      string                      `json:"last_scan_at,omitempty"`
+	LastAutoUpdateAt                string                      `json:"last_auto_update_at,omitempty"`
+	LastAutoUpdateResults           []UpdateResultSummary       `json:"last_auto_update_results,omitempty"`
+	LastAutoUpdateSummary           *ScheduledAutoUpdateSummary `json:"last_auto_update_summary,omitempty"`
+	AppUpdatePromptDismissedVersion string                      `json:"app_update_prompt_dismissed_version,omitempty"`
 }
 
 type AsyncSnapshot struct {

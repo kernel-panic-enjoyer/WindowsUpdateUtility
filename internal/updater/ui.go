@@ -66,6 +66,19 @@ var pageTemplate = template.Must(template.New("page").Funcs(template.FuncMap{
       </div>
     </section>
 
+    <section id="app-update-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="app-update-modal-title">
+      <div class="modal-backdrop" data-app-update-close></div>
+      <div class="modal-panel app-update-modal" role="document">
+        <div class="modal-header">
+          <div><span class="panel-kicker">Application update</span><h2 id="app-update-modal-title">Application update available</h2></div>
+          <button id="app-update-close" class="ghost" type="button" data-app-update-close><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 6l12 12"/><path d="M18 6 6 18"/></svg></span><span>Close</span></button>
+        </div>
+        <div id="app-update-modal-body" class="app-update-modal-body"></div>
+        <label class="check-control app-update-dismiss"><input id="app-update-dismiss-version" type="checkbox"> Don&#39;t show again for this version</label>
+        <div class="button-row app-update-modal-actions"><button id="app-update-modal-apply" type="button">Install and Restart</button><button id="app-update-later" class="ghost" type="button" data-app-update-close>Later</button></div>
+      </div>
+    </section>
+
     <section class="dashboard-hero">
       <div class="hero-copy">
         <div class="hero-topline"><span class="eyebrow">Updates first</span></div>
