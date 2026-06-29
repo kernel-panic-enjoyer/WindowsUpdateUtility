@@ -239,14 +239,19 @@ func packageFamilyNameFromPackageFullName(fullName string) string {
 
 func looksLikeStoreProductID(value string) bool {
 	value = strings.TrimSpace(value)
-	if len(value) < 8 || len(value) > 32 {
+	if len(value) < 7 || len(value) > 32 {
 		return false
 	}
+	hasDigit := false
 	for _, r := range value {
-		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+		if r >= 'A' && r <= 'Z' {
+			continue
+		}
+		if r >= '0' && r <= '9' {
+			hasDigit = true
 			continue
 		}
 		return false
 	}
-	return true
+	return hasDigit
 }

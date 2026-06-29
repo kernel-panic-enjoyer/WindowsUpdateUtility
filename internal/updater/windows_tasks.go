@@ -2,7 +2,10 @@ package updater
 
 import (
 	"context"
+	"errors"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -25,7 +28,10 @@ func createStartupTask() CommandResult {
 }
 
 func createStartupTaskDirect() CommandResult {
-	exe, _ := os.Executable()
+	exe, err := osExecutable()
+	if err != nil {
+		return validationCommandResult("startup task", err)
+	}
 	action := quoteArg(exe) + " --no-browser"
 	return runCommand(60*time.Second, "schtasks.exe", "/Create", "/TN", taskStartup, "/TR", action, "/SC", "ONLOGON", "/RL", "LIMITED", "/F")
 }
@@ -41,9 +47,59 @@ func createAutoUpdateTask() CommandResult {
 }
 
 func createAutoUpdateTaskDirect() CommandResult {
-	exe, _ := os.Executable()
+	exe, err := osExecutable()
+	if err != nil {
+		return validationCommandResult("auto-update task", err)
+	}
+	if err := validateAutoUpdateTaskExecutable(exe); err != nil {
+		return validationCommandResult("auto-update task", err)
+	}
 	action := quoteArg(exe) + " --task auto-update"
 	return runCommand(60*time.Second, "schtasks.exe", "/Create", "/TN", taskAutoUpdate, "/TR", action, "/SC", "DAILY", "/ST", defaultAutoUpdateTime, "/RL", "HIGHEST", "/F")
+}
+
+func validateAutoUpdateTaskExecutable(exe string) error {
+	if pathWithinAnyRoot(exe, trustedAutoUpdateTaskRoots()) {
+		return nil
+	}
+	return errors.New("auto-update task requires the executable to be installed under Program Files or Windows")
+}
+
+func trustedAutoUpdateTaskRoots() []string {
+	return []string{
+		os.Getenv("ProgramFiles"),
+		os.Getenv("ProgramFiles(x86)"),
+		os.Getenv("SystemRoot"),
+	}
+}
+
+func pathWithinAnyRoot(path string, roots []string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+	candidate, err := filepath.Abs(path)
+	if err != nil {
+		candidate = path
+	}
+	candidate = filepath.Clean(candidate)
+	for _, root := range roots {
+		root = strings.TrimSpace(root)
+		if root == "" {
+			continue
+		}
+		rootPath, err := filepath.Abs(root)
+		if err != nil {
+			rootPath = root
+		}
+		rootPath = filepath.Clean(rootPath)
+		rel, err := filepath.Rel(rootPath, candidate)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func deleteTask(name string) CommandResult {

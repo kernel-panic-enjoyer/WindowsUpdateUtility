@@ -341,6 +341,15 @@ func TestRequestBoundaryRejectsBadHostOriginAndFetchMetadata(t *testing.T) {
 		t.Fatalf("expected bad origin rejection, got %d", badOriginResponse.Code)
 	}
 
+	portlessOrigin := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:4183/api/scan", nil)
+	addTestSessionCookie(app, portlessOrigin)
+	portlessOrigin.Header.Set("Origin", "http://127.0.0.1")
+	portlessOriginResponse := httptest.NewRecorder()
+	app.serveHTTP(portlessOriginResponse, portlessOrigin)
+	if portlessOriginResponse.Code != http.StatusForbidden {
+		t.Fatalf("expected portless origin rejection for configured port, got %d", portlessOriginResponse.Code)
+	}
+
 	nullOriginWithoutUIHeader := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:4183/api/scan", nil)
 	addTestSessionCookie(app, nullOriginWithoutUIHeader)
 	nullOriginWithoutUIHeader.Header.Set("Origin", "null")

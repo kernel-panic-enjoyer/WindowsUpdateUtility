@@ -40,11 +40,20 @@ func TestStorePackageKeysAreValid(t *testing.T) {
 	if err := validateManagerAndID("store", "bad%query"); err == nil {
 		t.Fatal("store queries with cmd expansion characters should be rejected")
 	}
+	if err := validateManagerAndID("store", "--manifest=C:\\malicious.yaml"); err == nil {
+		t.Fatal("store option-shaped targets should be rejected")
+	}
 	if err := validateManagerAndID("winget", "Long Desktop App"); err != nil {
 		t.Fatalf("winget positional package targets should validate: %v", err)
 	}
 	if err := validateManagerAndID("winget", "bad&target"); err == nil {
 		t.Fatal("winget targets with shell metacharacters should be rejected")
+	}
+	if err := validateManagerAndID("winget", "--manifest=C:\\malicious.yaml"); err == nil {
+		t.Fatal("winget option-shaped targets should be rejected")
+	}
+	if err := validateManagerAndID("choco", "--version"); err == nil {
+		t.Fatal("chocolatey option-shaped package ids should be rejected")
 	}
 }
 

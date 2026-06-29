@@ -47,7 +47,7 @@ func (app *App) trustedHost(r *http.Request) bool {
 		return false
 	}
 	if portText == "" {
-		return true
+		return app.expectedPort() == 80
 	}
 	port, err := strconv.Atoi(portText)
 	return err == nil && port == app.expectedPort()

@@ -295,7 +295,7 @@ Codex                OpenAI.Codex                          0.1.0            0.2.
 	}
 }
 
-func TestMergeWingetExportWithTableKeepsTruncatedRowsAsActionTargets(t *testing.T) {
+func TestMergeWingetExportWithTableKeepsOnlyTruncatedMSIXRowsAsActionTargets(t *testing.T) {
 	table := []Package{
 		{Name: "WinAppRuntime.Main.1.8", ID: "MSIX\\MicrosoftCorporationII.WinAppRuntime.M…", Version: "8000.859.21.0", Manager: managerWinget},
 		{Name: "Truncated Desktop", ID: "SomeVendor.SomeReallyLongDesktopPackageIdent…", Version: "1.0", Manager: managerWinget, Source: sourceWinget},
@@ -303,24 +303,21 @@ func TestMergeWingetExportWithTableKeepsTruncatedRowsAsActionTargets(t *testing.
 
 	got := mergeWingetExportWithTable(nil, table)
 
-	if len(got) != 2 {
-		t.Fatalf("expected truncated rows to be preserved, got %#v", got)
+	if len(got) != 1 {
+		t.Fatalf("expected only truncated MSIX rows to be preserved, got %#v", got)
 	}
-	var sawStore, sawDesktop bool
+	var sawStore bool
 	for _, pkg := range got {
 		if pkg.Manager == managerStore && pkg.Source == sourceMSStore && pkg.ID == "WinAppRuntime.Main.1.8" && pkg.ActionBackend == backendWingetMSStoreFallback {
 			sawStore = true
 		}
-		if pkg.Manager == managerWinget && pkg.Source == sourceWinget && pkg.ID == "Truncated Desktop" {
-			sawDesktop = true
-		}
 	}
-	if !sawStore || !sawDesktop {
-		t.Fatalf("expected truncated Store and desktop rows to become action targets, got %#v", got)
+	if !sawStore {
+		t.Fatalf("expected truncated MSIX row to become a Store action target, got %#v", got)
 	}
 }
 
-func TestMergeWingetUpdateOutputKeepsTruncatedUpdatesByName(t *testing.T) {
+func TestMergeWingetUpdateOutputKeepsOnlyTruncatedMSIXUpdatesByName(t *testing.T) {
 	storeOutput := `
 Name                   ID                                                                                 Version       Available
 -------------------------------------------------------------------------------------------------------------------------------
@@ -339,7 +336,7 @@ Name               ID                                                           
 Truncated Desktop  SomeVendor.SomeReallyLongDesktopPackageIdentifierThatCannotFit…  1.0     1.1       winget
 `
 	mergeWingetUpdateOutput(updates, nil, desktopOutput, "")
-	if updates[packageKey(managerWinget, strings.ToLower("Truncated Desktop"))] != "1.1" {
-		t.Fatalf("expected truncated desktop update to be keyed by package name, got %#v", updates)
+	if _, ok := updates[packageKey(managerWinget, strings.ToLower("Truncated Desktop"))]; ok {
+		t.Fatalf("truncated desktop updates must not be keyed by display name, got %#v", updates)
 	}
 }

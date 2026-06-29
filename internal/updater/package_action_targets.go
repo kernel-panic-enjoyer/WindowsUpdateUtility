@@ -37,7 +37,7 @@ func wingetUpdateTargetCandidates(pkg Package) []string {
 
 func wingetNameFallbackTarget(pkg Package) string {
 	name := strings.TrimSpace(pkg.Name)
-	if name == "" || len(name) > 160 || containsBlockedPackageActionChar(name) {
+	if name == "" || len(name) > 160 || containsBlockedPackageActionChar(name) || isOptionLikePackageTarget(name) {
 		return ""
 	}
 	for _, existing := range []string{pkg.ID, pkg.Match} {
@@ -71,7 +71,7 @@ func uniqueUpdateTargets(values []string) []string {
 	var targets []string
 	for _, value := range values {
 		value = strings.TrimSpace(value)
-		if value == "" || len(value) > 240 || containsBlockedPackageActionChar(value) {
+		if value == "" || len(value) > 240 || containsBlockedPackageActionChar(value) || isOptionLikePackageTarget(value) {
 			continue
 		}
 		normalized := strings.ToLower(value)
@@ -89,7 +89,7 @@ func uniquePackageIDTargets(values []string) []string {
 	var targets []string
 	for _, value := range values {
 		value = strings.TrimSpace(value)
-		if value == "" || !isSafePackageID(value) {
+		if value == "" || isOptionLikePackageTarget(value) || !isSafePackageID(value) {
 			continue
 		}
 		normalized := strings.ToLower(value)

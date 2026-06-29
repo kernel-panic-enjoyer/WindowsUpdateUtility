@@ -10,8 +10,8 @@ import (
 
 func searchPackages(query string) (PackageLookup, error) {
 	query = strings.TrimSpace(query)
-	if query == "" {
-		return PackageLookup{}, errors.New("search query cannot be empty")
+	if err := validatePackageSearchQuery(query); err != nil {
+		return PackageLookup{}, err
 	}
 	appLog("Package search started for %q.", query)
 	managers := detectManagers()
@@ -29,6 +29,17 @@ func searchPackages(query string) (PackageLookup, error) {
 	sortSearchPackages(query, packages)
 	appLog("Package search completed for %q with %d result(s).", query, len(packages))
 	return PackageLookup{Packages: packages, Managers: managers, CommandResults: commandResults}, nil
+}
+
+func validatePackageSearchQuery(query string) error {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return errors.New("search query cannot be empty")
+	}
+	if len(query) > 240 || containsBlockedPackageActionChar(query) || isOptionLikePackageTarget(query) {
+		return errors.New("search query contains unsupported characters")
+	}
+	return nil
 }
 
 type packageSearchResult struct {

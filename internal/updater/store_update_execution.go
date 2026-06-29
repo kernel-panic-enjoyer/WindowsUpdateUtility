@@ -283,12 +283,15 @@ func exactStoreUpdateRequestFromPackage(ctx context.Context, pkg Package) (Store
 		return StoreExactUpdateRequest{}, fmt.Errorf("Store update user could not be identified: %w", err)
 	}
 	identity := StoreInstalledIdentity{UserSID: userSID, PackageFamilyName: pfn}
-	target := firstNonEmpty(pkg.StoreProductID, pkg.StoreUpdateID)
+	productID := strings.TrimSpace(pkg.StoreProductID)
+	updateID := strings.TrimSpace(pkg.StoreUpdateID)
+	if productID != "" && !looksLikeStoreProductID(productID) {
+		return StoreExactUpdateRequest{}, errors.New("Store update Product ID is not a valid Microsoft Store Product ID")
+	}
+	target := firstNonEmpty(productID, updateID)
 	if !pkg.ExactActionTargetAvailable || target == "" {
 		return StoreExactUpdateRequest{}, errors.New("Store update requires an exact verified Product ID or provider target")
 	}
-	productID := strings.TrimSpace(pkg.StoreProductID)
-	updateID := strings.TrimSpace(pkg.StoreUpdateID)
 	provider, err := exactStoreUpdateExecutionProvider(productID, updateID)
 	if err != nil {
 		return StoreExactUpdateRequest{}, err
@@ -312,10 +315,15 @@ func exactStoreUpdateRequestFromPackage(ctx context.Context, pkg Package) (Store
 }
 
 func exactStoreUpdateExecutionProvider(productID, updateID string) (StoreProviderIdentity, error) {
-	if strings.TrimSpace(productID) != "" && packageActionManagerAvailable(managerWinget) {
+	productID = strings.TrimSpace(productID)
+	updateID = strings.TrimSpace(updateID)
+	if productID != "" && !looksLikeStoreProductID(productID) {
+		return StoreProviderIdentity{}, errors.New("Store update Product ID is not a valid Microsoft Store Product ID")
+	}
+	if productID != "" && packageActionManagerAvailable(managerWinget) {
 		return StoreProviderIdentity{ID: managerWinget, Name: "WinGet Microsoft Store exact update", Backend: backendWingetMSStoreFallback}, nil
 	}
-	if (strings.TrimSpace(productID) != "" || strings.TrimSpace(updateID) != "") && packageActionManagerAvailable(managerStore) {
+	if (productID != "" || updateID != "") && packageActionManagerAvailable(managerStore) {
 		return StoreProviderIdentity{ID: managerStore, Name: "Store CLI exact update", Backend: backendStoreCLI}, nil
 	}
 	return StoreProviderIdentity{}, errors.New("no exact Store update executor is available for the verified target")
@@ -576,6 +584,9 @@ type storeProductIDFirstExactUpdateRunner struct{}
 
 func (storeProductIDFirstExactUpdateRunner) RunStoreUpdate(ctx context.Context, request StoreExactUpdateRequest) CommandResult {
 	productID := strings.TrimSpace(request.ProductID)
+	if productID != "" && !looksLikeStoreProductID(productID) {
+		return validationCommandResult("Store exact update", errors.New("Store update Product ID is not a valid Microsoft Store Product ID"))
+	}
 	if productID == "" || !packageActionManagerAvailable(managerWinget) {
 		return storeCLIExactUpdateRunner{}.RunStoreUpdate(ctx, request)
 	}
@@ -606,7 +617,11 @@ func (provider storeProductIDFirstExactCatalogQueryProvider) QueryExact(ctx cont
 	if storeProvider == nil {
 		storeProvider = storeCLIExactCatalogQueryProvider{}
 	}
-	if strings.TrimSpace(request.ProductID) == "" || !packageActionManagerAvailable(managerWinget) {
+	productID := strings.TrimSpace(request.ProductID)
+	if productID != "" && !looksLikeStoreProductID(productID) {
+		return StoreExactCatalogResult{}, validationCommandResult("Store exact catalog query", errors.New("Store update Product ID is not a valid Microsoft Store Product ID"))
+	}
+	if productID == "" || !packageActionManagerAvailable(managerWinget) {
 		return storeProvider.QueryExact(ctx, request)
 	}
 	wingetProvider := provider.Winget

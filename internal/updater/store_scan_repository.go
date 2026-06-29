@@ -232,7 +232,9 @@ func sortStoreScanSnapshot(snapshot *StoreScanSnapshot) {
 }
 
 func targetFromPersistedObservation(identity StoreInstalledIdentity, provider StoreProviderIdentity, productID, updateID string, verified bool, verifiedAt time.Time) *ExactStoreUpdateTarget {
-	if !verified || (strings.TrimSpace(productID) == "" && strings.TrimSpace(updateID) == "") {
+	productID = strings.TrimSpace(productID)
+	updateID = strings.TrimSpace(updateID)
+	if !verified || (productID == "" && updateID == "") || (productID != "" && !looksLikeStoreProductID(productID)) {
 		return nil
 	}
 	if verifiedAt.IsZero() {
@@ -241,8 +243,8 @@ func targetFromPersistedObservation(identity StoreInstalledIdentity, provider St
 	return &ExactStoreUpdateTarget{
 		Identity:   identity,
 		Provider:   provider,
-		ProductID:  strings.TrimSpace(productID),
-		UpdateID:   strings.TrimSpace(updateID),
+		ProductID:  productID,
+		UpdateID:   updateID,
 		Verified:   true,
 		VerifiedBy: firstNonEmpty(provider.Key(), provider.Name),
 		VerifiedAt: verifiedAt,

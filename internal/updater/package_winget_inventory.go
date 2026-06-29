@@ -73,8 +73,6 @@ func mergeWingetUpdateOutput(updates map[string]string, details map[string]Packa
 		}
 		if fallback, ok := wingetTruncatedMSIXPackage(pkg); ok {
 			pkg = fallback
-		} else if fallback, ok := wingetTruncatedNameTargetPackage(pkg); ok {
-			pkg = fallback
 		} else if isTruncatedID(pkg.ID) {
 			continue
 		}

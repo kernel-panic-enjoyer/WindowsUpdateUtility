@@ -282,10 +282,10 @@ func TestReconcileStoreUpdatePositiveTargetConsensus(t *testing.T) {
 	updateIDTarget.ProductID = ""
 	updateIDTarget.UpdateID = identity.PackageFamilyName
 	targetProductA := exactStoreTarget(identity, storeProvider)
-	targetProductA.ProductID = "9NA"
+	targetProductA.ProductID = "9NAAAAA"
 	targetProductA.UpdateID = ""
 	targetProductB := exactStoreTarget(identity, wingetProvider)
-	targetProductB.ProductID = "9NB"
+	targetProductB.ProductID = "9NBBBBB"
 	targetProductB.UpdateID = ""
 	targetUpdateA := exactStoreTarget(identity, storeProvider)
 	targetUpdateA.ProductID = ""

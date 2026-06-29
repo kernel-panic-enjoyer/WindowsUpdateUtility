@@ -25,6 +25,22 @@ func TestSearchQueryVariantsNormalizePunctuation(t *testing.T) {
 	}
 }
 
+func TestSearchPackagesRejectsShellAndOptionQueries(t *testing.T) {
+	for _, query := range []string{
+		`codex" & echo injected`,
+		"codex|calc",
+		"%TEMP%",
+		"--source msstore",
+	} {
+		if _, err := searchPackages(query); err == nil {
+			t.Fatalf("expected unsafe search query %q to be rejected", query)
+		}
+	}
+	if err := validatePackageSearchQuery("Visual Studio Code"); err != nil {
+		t.Fatalf("normal search query should validate: %v", err)
+	}
+}
+
 func TestCombineWingetSearchResultsKeepsVariantOutput(t *testing.T) {
 	result := combineWingetSearchResults([]CommandResult{
 		{OK: true, Command: "winget search build tools", Stdout: "Microsoft Build Tools 2015"},

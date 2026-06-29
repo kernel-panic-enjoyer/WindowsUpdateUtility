@@ -1,5 +1,6 @@
 [PLANS]
 
+- 2026-06-29T22:00:54+02:00 [USER] Objective completed: remediate the 7 Codex Security findings from `C:\Users\User\AppData\Local\Temp\codex-security-scans\Updater\131d62542c94_20260629T135310Z\report.md` in the repository source and rebuild `dist\WindowsUpdaterWebUI.exe`.
 - 2026-06-29T16:04:04+02:00 [USER] Active objective: explain and fix why pre-scan/unknown Microsoft Store packages appear in `Updates Available` and why the available cell duplicates `Unknown`.
 - 2026-06-29T15:53:10+02:00 [USER] Active objective: run a Codex Security repository-wide scan on `C:\Users\User\Documents\Updater` and produce the final scan report.
 - 2026-06-28T21:36:05+02:00 [USER] Active objective: release `v0.1.1` from `main` with a compact changelog after the dependency bump.
@@ -60,6 +61,7 @@
 
 [DECISIONS]
 
+- 2026-06-29T22:00:54+02:00 [CODE] Security remediation rejects shell metacharacters and option-shaped values at package search/action boundaries, keeps generic truncated WinGet desktop IDs non-actionable, validates Store Product IDs before mapping/target/execution, requires configured loopback ports for mutating origins, and only creates the high-integrity auto-update task from Program Files/Windows install roots.
 - 2026-06-29T16:04:04+02:00 [CODE] Store packages without an active assessment, and Store assessments with state `unknown`, are diagnostics/health states only; they must not populate the primary update queue. The Available cell renders a single unknown badge/placeholder rather than badge plus duplicate `Unknown` text.
 - 2026-06-29T15:53:10+02:00 [TOOL] Codex Security scan uses terminal/chat artifact workflow because dedicated setup continuation tools were not exposed; preflight passed with native `multi_agent_v1`, 6 usable worker slots, goal tools available, and scan id `131d62542c94_20260629T135310Z`.
 - 2026-06-28T21:27:08+02:00 [CODE] Dependency bump scope includes root Go module, `tests/browser` Go module, and workflow runtime/action pins. Node is represented only by workflow `node-version` and `node --check`; no tracked Node package manifest exists.
@@ -232,6 +234,7 @@
 
 [OUTCOMES]
 
+- 2026-06-29T22:00:54+02:00 [TOOL] Codex Security remediation validation passed: focused regressions for package search/action injection, WinGet truncation, Store Product ID binding, request Origin, and scheduled-task roots; `go test -count=1 ./internal/updater`, `go test -count=1 ./...`, `go vet ./...`, bundled Node `--check internal/updater/assets/ui.js`, `git diff --check` (CRLF warning only for edited Store fixture), and `powershell -NoProfile -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1` passed. Rebuilt `dist\WindowsUpdaterWebUI.exe` at 16,032,256 bytes with SHA-256 `08815f7998d4382d8db1acb5230916a56dce19d5b999fae351cd5772a975fe49`.
 - 2026-06-29T21:08:09+02:00 [TOOL] Store detection diagnostic validation passed: regression first reproduced the false incomplete Store summary, then focused regression, `go test -count=1 ./internal/updater`, `go test -count=1 ./...`, `go vet ./...`, bundled Node `--check internal/updater/assets/ui.js`, `git diff --check`, and `powershell -NoProfile -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1` passed; rebuilt `dist\WindowsUpdaterWebUI.exe` SHA-256 `6111feeb3362c39653cd74f3c13e212816053d56911d8f4c22bf4c33a687767b`.
 - 2026-06-29T17:28:25+02:00 [TOOL] Maintainability naming pass validation passed: `go test -count=1 ./internal/updater`, bundled `node --check internal/updater/assets/ui.js`, `git diff --check`, and `dev/scripts/Build-Workspace.ps1` all succeeded. Rebuilt `dist\WindowsUpdaterWebUI.exe` SHA-256 `741d252a893f35b5dc99405e1d3dc15435f190b9abfd5a8449c4c3293652ff11`.
 - 2026-06-29T17:40:10+02:00 [TOOL] Additional maintainability rename validation passed: `gofmt`, `go test -count=1 ./internal/updater`, `go vet ./...`, bundled `node --check internal/updater/assets/ui.js`, `git diff --check`, and `dev/scripts/Build-Workspace.ps1` succeeded. Rebuilt `dist\WindowsUpdaterWebUI.exe` SHA-256 `6b4b3dd97ee9ac800cce760312d02304128eeb4af99de111f31765d74a7778dc`.

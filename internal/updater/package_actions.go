@@ -35,7 +35,7 @@ func validateManagerAndID(manager, id string) error {
 	}
 	id = strings.TrimSpace(id)
 	if manager == managerStore || manager == managerWinget {
-		if id == "" || len(id) > 240 || containsBlockedPackageActionChar(id) {
+		if id == "" || len(id) > 240 || containsBlockedPackageActionChar(id) || isOptionLikePackageTarget(id) {
 			if manager == managerStore {
 				return errors.New("store package id or query contains unsupported characters")
 			}
@@ -43,7 +43,7 @@ func validateManagerAndID(manager, id string) error {
 		}
 		return nil
 	}
-	if id == "" || !isSafePackageID(id) {
+	if id == "" || isOptionLikePackageTarget(id) || !isSafePackageID(id) {
 		return errors.New("package id contains unsupported characters")
 	}
 	return nil
@@ -70,6 +70,10 @@ func containsBlockedPackageActionChar(value string) bool {
 		}
 	}
 	return false
+}
+
+func isOptionLikePackageTarget(value string) bool {
+	return strings.HasPrefix(strings.TrimSpace(value), "-")
 }
 
 func isASCIIAlphaNumeric(r rune) bool {

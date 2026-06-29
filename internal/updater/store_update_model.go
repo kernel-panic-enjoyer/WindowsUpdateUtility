@@ -137,6 +137,7 @@ type VerifiedStoreIdentityMapping struct {
 
 func (mapping VerifiedStoreIdentityMapping) VerifiedFor(identity StoreInstalledIdentity, scan StoreScanGeneration) bool {
 	return mapping.ProductID != "" &&
+		looksLikeStoreProductID(mapping.ProductID) &&
 		mapping.ScanID == scan.ScanID &&
 		mapping.InstalledIdentity.Equal(identity) &&
 		!mapping.VerifiedAt.IsZero()
@@ -153,9 +154,12 @@ type ExactStoreUpdateTarget struct {
 }
 
 func (target ExactStoreUpdateTarget) ExactFor(identity StoreInstalledIdentity) bool {
+	productID := strings.TrimSpace(target.ProductID)
+	updateID := strings.TrimSpace(target.UpdateID)
 	return target.Verified &&
 		target.Identity.Equal(identity) &&
-		(target.ProductID != "" || target.UpdateID != "") &&
+		(productID == "" || looksLikeStoreProductID(productID)) &&
+		(productID != "" || updateID != "") &&
 		!target.VerifiedAt.IsZero()
 }
 

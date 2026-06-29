@@ -129,10 +129,16 @@ func (provider storeCLIUpdatesCatalogProvider) Observe(ctx context.Context, scan
 
 	matchedPFNs := map[string]bool{}
 	var unmatched []string
+	var invalidProductIDs []string
 	for _, offer := range parsed.Offers {
 		family, found := byPFN[strings.ToLower(offer.PFN)]
 		if !found {
 			unmatched = append(unmatched, firstNonEmpty(offer.PFN, offer.ProductID))
+			continue
+		}
+		productID := strings.TrimSpace(offer.ProductID)
+		if !looksLikeStoreProductID(productID) {
+			invalidProductIDs = append(invalidProductIDs, firstNonEmpty(offer.PFN, offer.ProductID))
 			continue
 		}
 		matchedPFNs[strings.ToLower(family.Identity.PackageFamilyName)] = true
@@ -140,7 +146,7 @@ func (provider storeCLIUpdatesCatalogProvider) Observe(ctx context.Context, scan
 		target := &ExactStoreUpdateTarget{
 			Identity:   family.Identity,
 			Provider:   identity,
-			ProductID:  offer.ProductID,
+			ProductID:  productID,
 			UpdateID:   family.Identity.PackageFamilyName,
 			Verified:   true,
 			VerifiedBy: identity.Key(),
@@ -166,12 +172,17 @@ func (provider storeCLIUpdatesCatalogProvider) Observe(ctx context.Context, scan
 		})
 		run.Mappings = append(run.Mappings, VerifiedStoreIdentityMapping{
 			InstalledIdentity: family.Identity,
-			ProductID:         offer.ProductID,
+			ProductID:         productID,
 			Provider:          identity,
 			ScanID:            scan.ScanID,
 			VerifiedAt:        observedAt,
 			Evidence:          "store updates --apply false returned matching PFN and Product ID.",
 		})
+	}
+	if len(invalidProductIDs) > 0 {
+		run.Health = StoreProviderIncomplete
+		run.Error = fmt.Sprintf("ignored %d Store CLI aggregate update row(s) with invalid Product ID", len(invalidProductIDs))
+		return run
 	}
 	if len(unmatched) > 0 {
 		run.Health = StoreProviderIncomplete
@@ -487,6 +498,9 @@ func parseStoreCLIShowMetadata(output string) (storeCLIProductMetadata, error) {
 	}
 	if metadata.ProductID == "" {
 		return metadata, fmt.Errorf("Store CLI show output did not include Product ID")
+	}
+	if !looksLikeStoreProductID(metadata.ProductID) {
+		return metadata, fmt.Errorf("Store CLI show output included invalid Product ID")
 	}
 	return metadata, nil
 }

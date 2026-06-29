@@ -103,6 +103,19 @@ func TestExactStoreUpdateRequestAllowsUpdateIDOnlyTarget(t *testing.T) {
 	}
 }
 
+func TestExactStoreUpdateRequestRejectsMalformedProductID(t *testing.T) {
+	restoreSID := replaceStoreScanSID("S-1-5-21-exec")
+	defer restoreSID()
+
+	pkg := testExactStorePackage()
+	pkg.StoreProductID = "OpenAI.Codex"
+	pkg.StoreUpdateID = pkg.InstalledPackageFamilyName
+
+	if _, err := exactStoreUpdateRequestFromPackage(context.Background(), pkg); err == nil || !strings.Contains(err.Error(), "Product ID") {
+		t.Fatalf("expected malformed Product ID to be rejected before execution, got %v", err)
+	}
+}
+
 func TestStoreProductIDFirstExactUpdateRunnerUsesWingetProductID(t *testing.T) {
 	var commands []string
 	var targets []string
@@ -128,6 +141,25 @@ func TestStoreProductIDFirstExactUpdateRunnerUsesWingetProductID(t *testing.T) {
 	}
 	if !strings.Contains(commands[0], "--id 9NCODEX --exact") || !strings.Contains(commands[0], "--source msstore") {
 		t.Fatalf("expected winget msstore exact Product ID command, got %q", commands[0])
+	}
+}
+
+func TestStoreProductIDFirstExactUpdateRunnerRejectsMalformedProductID(t *testing.T) {
+	restore := replacePackageActionHooks(
+		func(ctx context.Context, timeout time.Duration, args ...string) CommandResult {
+			t.Fatalf("malformed Product ID must not run a package-manager command: %v", args)
+			return CommandResult{}
+		},
+		func(manager string) bool { return true },
+	)
+	defer restore()
+
+	request := testExactStoreRequest()
+	request.ProductID = "OpenAI.Codex"
+	request.Target = request.ProductID
+	result := storeProductIDFirstExactUpdateRunner{}.RunStoreUpdate(context.Background(), request)
+	if result.OK || !strings.Contains(result.Stderr, "Product ID") {
+		t.Fatalf("expected malformed Product ID validation failure, got %#v", result)
 	}
 }
 

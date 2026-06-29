@@ -25,6 +25,9 @@ Technical Information
 	if _, err := parseStoreCLIShowMetadata("Name: VP9"); err == nil {
 		t.Fatal("expected missing PFN/Product ID to be rejected")
 	}
+	if _, err := parseStoreCLIShowMetadata("Product ID: Microsoft.VP9VideoExtensions\nPFN: Microsoft.VP9VideoExtensions_8wekyb3d8bbwe"); err == nil {
+		t.Fatal("expected malformed Product ID to be rejected")
+	}
 }
 
 func TestParseStoreCLIUpdateCheck(t *testing.T) {
@@ -512,9 +515,9 @@ func TestParseStoreCLIUpdatesOutputFieldOrderAndMalformedRecords(t *testing.T) {
 			name: "adjacent exact records",
 			output: `Product ID : 9N4D0MSMP0PT
 PFN : Microsoft.VP9VideoExtensions_8wekyb3d8bbwe
-Product ID : 9NCALC
+Product ID : 9NCALC1
 PFN : Microsoft.WindowsCalculator_8wekyb3d8bbwe`,
-			wantIDs:  []string{"9N4D0MSMP0PT", "9NCALC"},
+			wantIDs:  []string{"9N4D0MSMP0PT", "9NCALC1"},
 			wantPFNs: []string{"Microsoft.VP9VideoExtensions_8wekyb3d8bbwe", "Microsoft.WindowsCalculator_8wekyb3d8bbwe"},
 		},
 		{
@@ -522,17 +525,17 @@ PFN : Microsoft.WindowsCalculator_8wekyb3d8bbwe`,
 			output: `Product ID : 9N4D0MSMP0PT
 PFN : Microsoft.VP9VideoExtensions_8wekyb3d8bbwe
 PFN : Microsoft.WindowsCalculator_8wekyb3d8bbwe
-Product ID : 9NCALC`,
-			wantIDs:  []string{"9N4D0MSMP0PT", "9NCALC"},
+Product ID : 9NCALC1`,
+			wantIDs:  []string{"9N4D0MSMP0PT", "9NCALC1"},
 			wantPFNs: []string{"Microsoft.VP9VideoExtensions_8wekyb3d8bbwe", "Microsoft.WindowsCalculator_8wekyb3d8bbwe"},
 		},
 		{
 			name: "pfn-first then product-id-first adjacent records",
 			output: `PFN : Microsoft.VP9VideoExtensions_8wekyb3d8bbwe
 Product ID : 9N4D0MSMP0PT
-Product ID : 9NCALC
+Product ID : 9NCALC1
 PFN : Microsoft.WindowsCalculator_8wekyb3d8bbwe`,
-			wantIDs:  []string{"9N4D0MSMP0PT", "9NCALC"},
+			wantIDs:  []string{"9N4D0MSMP0PT", "9NCALC1"},
 			wantPFNs: []string{"Microsoft.VP9VideoExtensions_8wekyb3d8bbwe", "Microsoft.WindowsCalculator_8wekyb3d8bbwe"},
 		},
 		{
@@ -540,8 +543,8 @@ PFN : Microsoft.WindowsCalculator_8wekyb3d8bbwe`,
 			output: `Product ID : 9N4D0MSMP0PT
 PFN : Microsoft.VP9VideoExtensions_8wekyb3d8bbwe
 Update ID : Microsoft.WindowsCalculator_8wekyb3d8bbwe
-Product ID : 9NCALC`,
-			wantIDs:  []string{"9N4D0MSMP0PT", "9NCALC"},
+Product ID : 9NCALC1`,
+			wantIDs:  []string{"9N4D0MSMP0PT", "9NCALC1"},
 			wantPFNs: []string{"Microsoft.VP9VideoExtensions_8wekyb3d8bbwe", "Microsoft.WindowsCalculator_8wekyb3d8bbwe"},
 		},
 		{
@@ -549,10 +552,10 @@ Product ID : 9NCALC`,
 			output: `Product ID : 9N4D0MSMP0PT
 PFN : Microsoft.VP9VideoExtensions_8wekyb3d8bbwe
 PFN : Microsoft.WindowsCalculator_8wekyb3d8bbwe
-Product ID : 9NCALC
+Product ID : 9NCALC1
 Product ID : 9NPAINT
 Update ID : Microsoft.Paint_8wekyb3d8bbwe`,
-			wantIDs:  []string{"9N4D0MSMP0PT", "9NCALC", "9NPAINT"},
+			wantIDs:  []string{"9N4D0MSMP0PT", "9NCALC1", "9NPAINT"},
 			wantPFNs: []string{"Microsoft.VP9VideoExtensions_8wekyb3d8bbwe", "Microsoft.WindowsCalculator_8wekyb3d8bbwe", "Microsoft.Paint_8wekyb3d8bbwe"},
 		},
 		{
@@ -767,7 +770,7 @@ func TestStoreCLIExactProviderCancellationAfterAllPackagesComplete(t *testing.T)
 				updateChecks++
 				return CommandResult{OK: true, Command: command, Stdout: "'VP9-Videoerweiterungen' is already up to date"}
 			case strings.Contains(command, " show "+calc):
-				return CommandResult{OK: true, Command: command, Stdout: "Product ID : 9NCALC\nPFN : " + calc}
+				return CommandResult{OK: true, Command: command, Stdout: "Product ID : 9NCALC1\nPFN : " + calc}
 			case strings.Contains(command, " update "+calc):
 				updateChecks++
 				return CommandResult{OK: true, Command: command, Stdout: "'Calculator' is already up to date"}
@@ -914,6 +917,33 @@ func TestStoreCLIUpdatesProviderRequiresExactIdentifiersForPositive(t *testing.T
 	}
 }
 
+func TestStoreCLIUpdatesProviderRejectsMalformedProductIDForMatchedPFN(t *testing.T) {
+	restore := replacePackageActionManagerAvailable(func(manager string) bool { return manager == managerStore })
+	defer restore()
+	scan := StoreScanGeneration{
+		ScanID:           "scan-store-updates-invalid-product",
+		UserSID:          "S-1-5-21-store-updates",
+		StartedAt:        time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC),
+		CompletedAt:      time.Date(2026, 6, 21, 12, 0, 1, 0, time.UTC),
+		CompletionStatus: StoreScanCompleted,
+	}
+	pfn := "Microsoft.VP9VideoExtensions_8wekyb3d8bbwe"
+	offer := strings.Replace(loadStoreCLIFixture(t, storeCLIFixtureVersion, "neutral", "vp9-update-available.txt"), "Product ID : 9N4D0MSMP0PT", "Product ID : Microsoft.VP9VideoExtensions", 1)
+	provider := storeCLIUpdatesCatalogProvider{
+		Now: fixedPipelineTimes(scan.StartedAt, scan.StartedAt.Add(time.Second)),
+		Run: func(ctx context.Context, timeout time.Duration, args ...string) CommandResult {
+			return CommandResult{OK: true, Command: strings.Join(args, " "), Stdout: offer}
+		},
+	}
+	run := provider.Observe(context.Background(), scan, testStoreInventory(scan, pfn, "1.2.13.0").Families)
+	if run.Health != StoreProviderIncomplete || len(run.Observations) != 0 || len(run.Mappings) != 0 {
+		t.Fatalf("invalid Product ID must not publish a positive target: %#v", run)
+	}
+	if !strings.Contains(run.Error, "invalid Product ID") {
+		t.Fatalf("run error did not explain invalid Product ID: %#v", run)
+	}
+}
+
 func TestStoreCLIUpdatesProviderExactInapplicableOffer(t *testing.T) {
 	restore := replacePackageActionManagerAvailable(func(manager string) bool { return manager == managerStore })
 	defer restore()
@@ -1015,7 +1045,7 @@ func TestStoreCLIUpdatesProviderAdjacentPFNFirstOffers(t *testing.T) {
 	for _, observation := range run.Observations {
 		byPFN[observation.Identity.PackageFamilyName] = observation
 	}
-	for pfn, productID := range map[string]string{vp9PFN: "9N4D0MSMP0PT", calcPFN: "9NCALC"} {
+	for pfn, productID := range map[string]string{vp9PFN: "9N4D0MSMP0PT", calcPFN: "9NCALC1"} {
 		got := byPFN[pfn]
 		if got.Kind != StoreObservationPositiveUpdateOffer || got.Target == nil || got.Target.ProductID != productID {
 			t.Fatalf("offer for %s = %#v", pfn, got)

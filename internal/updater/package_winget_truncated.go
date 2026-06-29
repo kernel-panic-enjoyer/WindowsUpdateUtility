@@ -31,18 +31,6 @@ func wingetTruncatedMSIXPackage(pkg Package) (Package, bool) {
 	return pkg, true
 }
 
-func wingetTruncatedNameTargetPackage(pkg Package) (Package, bool) {
-	if !isTruncatedID(pkg.ID) || strings.TrimSpace(pkg.Name) == "" {
-		return Package{}, false
-	}
-	pkg.ID = strings.TrimSpace(pkg.Name)
-	pkg.Manager = wingetSourceManager(pkg.Source)
-	if pkg.Manager == "" {
-		pkg.Manager = managerWinget
-	}
-	return pkg, true
-}
-
 func wingetIDMatches(fullID, tableID string) bool {
 	full := strings.ToLower(fullID)
 	table := strings.ToLower(tableID)
@@ -91,10 +79,6 @@ func mergeWingetExportWithTable(exported, table []Package) []Package {
 			continue
 		}
 		if fallback, ok := wingetTruncatedMSIXPackage(pkg); ok {
-			merged = append(merged, fallback)
-			continue
-		}
-		if fallback, ok := wingetTruncatedNameTargetPackage(pkg); ok {
 			merged = append(merged, fallback)
 			continue
 		}
