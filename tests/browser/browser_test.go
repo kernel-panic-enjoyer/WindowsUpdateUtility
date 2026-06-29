@@ -16,6 +16,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -567,6 +568,51 @@ func TestBrowserManagerFilterUsesVisiblePackages(t *testing.T) {
 	section := waitForText(t, ctx, `#installed-section`, "Visible Store App")
 	if strings.Contains(section, "Visible Winget App") {
 		t.Fatalf("installed Store filter should hide non-Store rows:\n%s", section)
+	}
+}
+
+func TestBrowserPackageRowsUseUniformHeight(t *testing.T) {
+	app := updater.NewBrowserTestApp()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/packages":
+			updater.SetTestSecurityHeaders(w)
+			if !app.TestSessionOK(r) {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			updater.WriteTestJSON(w, http.StatusOK, updater.InventoryResponse{Inventory: updater.Inventory{PackageLookup: updater.PackageLookup{
+				Managers: map[string]updater.ManagerStatus{
+					updater.ManagerWinget: {Available: true},
+				},
+				Packages: []updater.Package{
+					{Key: "winget:Short.Row", Manager: updater.ManagerWinget, ID: "Short.Row", Name: "Short Row", Version: "1.0.0", AvailableVersion: "1.1.0", UpdateAvailable: true, UpdateSupported: true, Installed: true, Source: updater.SourceWinget, PreferenceEligible: true, CanUpdateNow: true},
+					{Key: "winget:Very.Long.Row", Manager: updater.ManagerWinget, ID: "Very.Long.Package.Identifier.With.Many.Sections.And.Overflow.Text", Name: "Very Long Package Name That Previously Stretched The Updates Table Row", Version: "2026.06.29-build-with-extra-long-channel-and-metadata", AvailableVersion: "2026.06.30-build-with-extra-long-channel-and-metadata", UpdateAvailable: true, UpdateSupported: true, Installed: true, Source: updater.SourceWinget, PreferenceEligible: true, CanUpdateNow: true},
+				},
+			}}})
+		default:
+			app.TestHandler()(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	ctx, cancel := newBrowserContext(t)
+	defer cancel()
+
+	navigateAuthenticated(t, ctx, server.URL)
+	waitForText(t, ctx, `#updates-body`, "Short Row")
+	var heights []float64
+	if err := chromedp.Run(ctx,
+		chromedp.Poll(`document.querySelectorAll("#updates-body tr[data-key]").length >= 2`, nil, chromedp.WithPollingInterval(50*time.Millisecond), chromedp.WithPollingTimeout(3*time.Second)),
+		chromedp.Evaluate(`Array.from(document.querySelectorAll("#updates-body tr[data-key]")).slice(0, 2).map((row) => Math.round(row.getBoundingClientRect().height))`, &heights),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(heights) != 2 {
+		t.Fatalf("expected two measured update rows, got %#v", heights)
+	}
+	if math.Abs(heights[0]-heights[1]) > 1 {
+		t.Fatalf("expected uniform update row heights, got %#v", heights)
 	}
 }
 

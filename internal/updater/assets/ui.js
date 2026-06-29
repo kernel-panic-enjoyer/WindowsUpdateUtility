@@ -1186,6 +1186,13 @@
     target.innerHTML = "Licensed under " + html(license) + repoLink;
   }
 
+  function clippedCellText(value, className){
+    var text = String(value || "").trim();
+    if(!text){ return '<span class="muted">-</span>'; }
+    var classes = "cell-clip" + (className ? " " + className : "");
+    return '<span class="' + attr(classes) + '" title="' + attr(text) + '">' + html(text) + '</span>';
+  }
+
   function appUpdatePromptVersion(update){
     update = update || {};
     return String(update.latest_version || update.latest_tag || "").trim();
@@ -1291,7 +1298,8 @@
     if(pkg.pinned){
       secondary += " - pinned";
     }
-    return '<strong>' + html(pkg.name || "Store app") + '</strong><br><span class="muted">' + html(secondary) + '</span>';
+    var name = pkg.name || "Store app";
+    return '<div class="package-name-cell"><strong title="' + attr(name) + '">' + html(name) + '</strong><span class="muted" title="' + attr(secondary) + '">' + html(secondary) + '</span></div>';
   }
 	function managerCell(pkg, options){
     options = options || {};
@@ -1315,11 +1323,11 @@
       if(!text){
         return showStatusBadge ? stateBadge(pkg) : '<span class="muted">-</span>';
       }
-      var content = muted ? '<span class="muted">' + html(text) + '</span>' : html(text);
+      var content = clippedCellText(text, muted ? "muted" : "");
       if(!showStatusBadge){
         return content;
       }
-      return stateBadge(pkg) + '<br>' + content;
+      return '<div class="available-cell">' + stateBadge(pkg) + content + '</div>';
     }
     if(storeAssessmentActive(pkg)){
       var state = storeUpdateState(pkg);
@@ -1355,15 +1363,15 @@
       }
       return showStatusBadge ? stateBadge(pkg) : '<span class="muted">-</span>';
     }
-    var available = html(pkg.available_version);
-    return available;
+    return clippedCellText(pkg.available_version);
   }
 	function updateForm(pkg){
 		if(pkg.manager !== "store" && pkg.update_supported === false){
-			return '<span class="muted">Inventory only</span>';
+			return '<span class="row-message muted" title="Inventory only">Inventory only</span>';
 		}
     if(!pkg.can_update_now){
-      return '<span class="muted" title="' + attr(pkg.cannot_update_reason || "This package cannot be updated now") + '">' + html(pkg.cannot_update_reason || "Unavailable") + '</span>';
+      var reason = pkg.cannot_update_reason || "Unavailable";
+      return '<span class="row-message muted" title="' + attr(reason || "This package cannot be updated now") + '">' + html(reason) + '</span>';
     }
     var blockedUnknown = pkg.unknown_version && !allowUnknownVersionUpdates();
     var blockedPinned = pkg.pinned && !allowPinnedUpdates();
@@ -1423,7 +1431,7 @@
     target.innerHTML = page.items.map(function(pkg){
       var selectable = packageCanBeIncludedInBulkUpdate(pkg);
       var rowClass = rowUpdateState(pkg.key) === "active" ? ' class="updating-current"' : '';
-      return '<tr data-key="' + attr(pkg.key) + '"' + rowClass + '><td><input form="update-selected-form" type="checkbox" name="package_key" value="' + attr(pkg.key) + '" aria-label="Select ' + attr(pkg.name) + ' for update"' + ((updateBusy || !selectable) ? ' disabled' : '') + '></td><td>' + packageNameCell(pkg) + '</td><td>' + managerCell(pkg, {compact:true}) + '</td><td>' + html(pkg.version) + '</td><td>' + packageAvailableCell(pkg) + '</td><td>' + autoButton(pkg) + '</td><td>' + updateActionCell(pkg) + '</td></tr>';
+      return '<tr data-key="' + attr(pkg.key) + '"' + rowClass + '><td><input form="update-selected-form" type="checkbox" name="package_key" value="' + attr(pkg.key) + '" aria-label="Select ' + attr(pkg.name) + ' for update"' + ((updateBusy || !selectable) ? ' disabled' : '') + '></td><td>' + packageNameCell(pkg) + '</td><td>' + managerCell(pkg, {compact:true}) + '</td><td>' + clippedCellText(pkg.version) + '</td><td>' + packageAvailableCell(pkg) + '</td><td>' + autoButton(pkg) + '</td><td class="action-cell">' + updateActionCell(pkg) + '</td></tr>';
     }).join("");
     renderPager(page, status, prev, next);
   }
@@ -1447,7 +1455,7 @@
 	target.innerHTML = page.items.map(function(pkg){
 		var rowStatus = pkg.manager === "store" ? stateBadge(pkg) : (pkg.update_supported === false ? '<span class="badge">Inventory only</span>' : ((pkg.unknown_version || pkg.pinned) && pkg.update_available ? '<span class="badge warn">Explicit update</span>' : (pkg.update_available ? '<span class="badge warn">Update</span>' : '<span class="badge ok">Current</span>')));
     var rowClass = rowUpdateState(pkg.key) === "active" ? ' class="updating-current"' : '';
-		return '<tr data-key="' + attr(pkg.key) + '"' + rowClass + '><td>' + packageNameCell(pkg) + '</td><td>' + managerCell(pkg, {compact:true}) + '</td><td>' + html(pkg.version) + '</td><td>' + packageAvailableCell(pkg, {statusBadge:false, compact:true}) + '</td><td>' + rowStatus + '</td><td>' + autoButton(pkg) + '</td><td>' + installedAction(pkg) + '</td></tr>';
+		return '<tr data-key="' + attr(pkg.key) + '"' + rowClass + '><td>' + packageNameCell(pkg) + '</td><td>' + managerCell(pkg, {compact:true}) + '</td><td>' + clippedCellText(pkg.version) + '</td><td>' + packageAvailableCell(pkg, {statusBadge:false, compact:true}) + '</td><td>' + rowStatus + '</td><td>' + autoButton(pkg) + '</td><td class="action-cell">' + installedAction(pkg) + '</td></tr>';
 	}).join("");
     renderPager(page, status, prev, next, hasFilter ? " matches" : "");
   }

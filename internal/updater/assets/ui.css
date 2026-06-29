@@ -177,10 +177,18 @@ main{width:min(1500px,100%);margin:0 auto;padding:22px 28px 28px}
 .manager-details-button{min-height:24px;padding:2px 8px;border-radius:6px;font-size:12px;line-height:1.2}
 .manager-status-details{align-items:flex-start}
 .manager form,.update-form,.install-form,.manager-install-form,.update-all-form{margin:0}
-.update-form{--row-update-action-width:148px;display:grid;gap:8px;width:var(--row-update-action-width);max-width:100%}
+.update-form{--row-update-action-width:132px;display:grid;gap:8px;width:var(--row-update-action-width);max-width:100%}
 .update-form button{width:100%}
 .row-actions{display:flex;align-items:flex-start;gap:8px;flex-wrap:nowrap}
 .row-actions .update-form{flex:0 0 var(--row-update-action-width)}
+.action-cell{padding-right:24px}
+.row-message{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;max-width:240px;overflow:hidden;text-overflow:ellipsis;line-height:1.35}
+.package-name-cell{display:grid;gap:3px;min-width:0;line-height:1.35}
+.package-name-cell strong,.package-name-cell .muted,.cell-clip{display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden;text-overflow:ellipsis}
+.package-name-cell strong{-webkit-line-clamp:1}
+.package-name-cell .muted,.cell-clip{-webkit-line-clamp:2}
+.available-cell{display:grid;gap:3px;align-items:center;min-width:0}
+.available-cell .badge{width:max-content;max-width:100%}
 .stack{display:grid;gap:10px}
 .app-update-control{display:grid;gap:10px;padding-top:10px;border-top:1px solid var(--line)}
 .app-update-control p{margin:3px 0 0;overflow-wrap:anywhere}
@@ -219,6 +227,9 @@ thead th{position:sticky;top:0;z-index:1;background:var(--surface-strong)}
 th,td{border-bottom:1px solid var(--line);padding:12px 14px;text-align:left;vertical-align:middle;overflow-wrap:anywhere}
 th{color:var(--muted);text-transform:uppercase;font-size:12px;font-weight:800;letter-spacing:.04em}
 tbody tr{background:var(--surface)}
+#updates-body,#packages-body{--package-row-height:78px}
+#updates-body tr[data-key],#packages-body tr[data-key]{height:var(--package-row-height)}
+#updates-body tr[data-key] td,#packages-body tr[data-key] td{height:var(--package-row-height);padding-top:9px;padding-bottom:9px}
 tbody tr:hover{background:color-mix(in srgb,var(--surface-strong) 70%,var(--surface))}
 tr.updating-current{background:color-mix(in srgb,var(--blue) 14%,var(--surface))}
 td strong{font-weight:800}
