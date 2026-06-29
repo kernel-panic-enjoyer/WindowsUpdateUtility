@@ -115,6 +115,41 @@ Microsoft Visual C++ 2010  x64 Redistributable - 10.0.40219  Microsoft.VCRedist.
 	}
 }
 
+func TestParseWingetTableSkipsWrappedContinuationRows(t *testing.T) {
+	output := `
+Name               ID                                 Version       VerfÃ¼gbar     Quelle
+----------------------------------------------------------------------------------------
+(TM) S             E Deve                             lopmen        t Kit 17.0.1 ... Oracle.JDK.17 17.0.10 17.0.12 winget
+-2-Vid             eoerwe                             iterun        g MSIX\Microsoft.MPEG2VideoExtension_... 1.2.13.0
+-Bilde             rweite                             rung          MSIX\Microsoft.HEIFImageExtension_... 1.2.36.0
+4K Capture Utility Elgato.4KCaptureUtility            1.7.2.4692    1.7.16.10419  winget
+Audacity 2.4.2     Audacity.Audacity                  2.4.2        3.7.8         winget
+PokeMMO            PokeMMO.PokeMMO                    Unknown      1.0           winget
+`
+	got := parseWingetTable(output)
+	if len(got) != 3 {
+		t.Fatalf("expected only complete rows, got %d: %#v", len(got), got)
+	}
+	byID := map[string]Package{}
+	for _, pkg := range got {
+		byID[pkg.ID] = pkg
+	}
+	if byID["Elgato.4KCaptureUtility"].AvailableVersion != "1.7.16.10419" {
+		t.Fatalf("expected complete Elgato row, got %#v", byID)
+	}
+	if byID["Audacity.Audacity"].AvailableVersion != "3.7.8" {
+		t.Fatalf("expected complete Audacity row, got %#v", byID)
+	}
+	if !byID["PokeMMO.PokeMMO"].UnknownVersion || byID["PokeMMO.PokeMMO"].AvailableVersion != "1.0" {
+		t.Fatalf("expected explicit unknown-version row to remain usable, got %#v", byID["PokeMMO.PokeMMO"])
+	}
+	for _, bad := range []string{"E Deve", "eoerwe", "rweite"} {
+		if _, ok := byID[bad]; ok {
+			t.Fatalf("wrapped continuation fragment became package ID %q: %#v", bad, got)
+		}
+	}
+}
+
 func TestParseWingetExactIDSearchTableWithoutSourceColumn(t *testing.T) {
 	output := `
 Name                          ID                                     Version
