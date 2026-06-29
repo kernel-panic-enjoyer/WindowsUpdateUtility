@@ -25,6 +25,12 @@ const (
 type elevatedWorkerInvocation struct {
 	Operation string
 	Payload   any
+	Progress  func(elevatedWorkerProgress)
+}
+
+type elevatedWorkerOperationResult struct {
+	Result  CommandResult
+	Results []UpdateResult
 }
 
 type elevatedWorkerProcess struct {
@@ -47,38 +53,50 @@ func runElevatedWorkerOperation(ctx context.Context, invocation elevatedWorkerIn
 	if err := validateWorkerOperationPayloadFromAny(invocation.Operation, invocation.Payload); err != nil {
 		return validationCommandResult(invocation.Operation, err)
 	}
-	requestID, err := randomToken()
+	response, err := runElevatedWorkerInvocation(ctx, invocation)
 	if err != nil {
 		return workerCommandResultError(invocation.Operation, err)
+	}
+	appendWorkerResultLogsContext(ctx, response.Result)
+	return response.Result
+}
+
+func runElevatedWorkerInvocation(ctx context.Context, invocation elevatedWorkerInvocation) (elevatedWorkerResponse, error) {
+	if err := validateWorkerOperationPayloadFromAny(invocation.Operation, invocation.Payload); err != nil {
+		return elevatedWorkerResponse{}, err
+	}
+	requestID, err := randomToken()
+	if err != nil {
+		return elevatedWorkerResponse{}, err
 	}
 	capability, err := randomToken()
 	if err != nil {
-		return workerCommandResultError(invocation.Operation, err)
+		return elevatedWorkerResponse{}, err
 	}
 	userSID, err := currentUserSID()
 	if err != nil {
-		return workerCommandResultError(invocation.Operation, err)
+		return elevatedWorkerResponse{}, err
 	}
 	sessionID, err := currentSessionID()
 	if err != nil {
-		return workerCommandResultError(invocation.Operation, err)
+		return elevatedWorkerResponse{}, err
 	}
 	auth := elevatedWorkerAuthContext{Capability: capability, UserSID: userSID, SessionID: sessionID}
 	request, err := newElevatedWorkerRequest(auth, requestID, invocation.Operation, invocation.Payload)
 	if err != nil {
-		return workerCommandResultError(invocation.Operation, err)
+		return elevatedWorkerResponse{}, err
 	}
 
 	pipeName := `\\.\pipe\WindowsUpdaterWebUI-` + requestID
 	server, err := newElevatedWorkerPipeServer(pipeName, userSID)
 	if err != nil {
-		return workerCommandResultError(invocation.Operation, err)
+		return elevatedWorkerResponse{}, err
 	}
 	defer server.Close()
 
 	process, err := launchElevatedWorkerProcess(pipeName, capability, userSID, sessionID)
 	if err != nil {
-		return workerCommandResultError(invocation.Operation, err)
+		return elevatedWorkerResponse{}, err
 	}
 	defer process.Close()
 
@@ -87,17 +105,16 @@ func runElevatedWorkerOperation(ctx context.Context, invocation elevatedWorkerIn
 	cancelStartup()
 	if err != nil {
 		process.Terminate()
-		return workerCommandResultError(invocation.Operation, fmt.Errorf("elevated worker did not connect: %w", err))
+		return elevatedWorkerResponse{}, fmt.Errorf("elevated worker did not connect: %w", err)
 	}
 	defer conn.Close()
 
-	result, err := exchangeElevatedWorkerRequest(ctx, conn, auth, request)
+	response, err := exchangeElevatedWorkerRequest(ctx, conn, auth, request, invocation.Progress)
 	if err != nil {
 		process.Terminate()
-		return workerCommandResultError(invocation.Operation, err)
+		return elevatedWorkerResponse{}, err
 	}
-	appendWorkerResultLogsContext(ctx, result)
-	return result
+	return response, nil
 }
 
 func validateWorkerOperationPayloadFromAny(operation string, payload any) error {
@@ -108,38 +125,48 @@ func validateWorkerOperationPayloadFromAny(operation string, payload any) error 
 	return validateWorkerOperationPayload(operation, raw)
 }
 
-func exchangeElevatedWorkerRequest(ctx context.Context, conn io.ReadWriteCloser, auth elevatedWorkerAuthContext, request elevatedWorkerMessage) (CommandResult, error) {
+func exchangeElevatedWorkerRequest(ctx context.Context, conn io.ReadWriteCloser, auth elevatedWorkerAuthContext, request elevatedWorkerMessage, progress func(elevatedWorkerProgress)) (elevatedWorkerResponse, error) {
 	encoder := json.NewEncoder(conn)
 	decoder := json.NewDecoder(conn)
 	decoder.DisallowUnknownFields()
 
 	var writeMu sync.Mutex
 	if err := encoder.Encode(request); err != nil {
-		return CommandResult{}, fmt.Errorf("send elevated worker request: %w", err)
+		return elevatedWorkerResponse{}, fmt.Errorf("send elevated worker request: %w", err)
 	}
 
 	responseCh := make(chan elevatedWorkerResponse, 1)
 	errCh := make(chan error, 1)
 	go func() {
-		var response elevatedWorkerResponse
-		if err := decoder.Decode(&response); err != nil {
-			errCh <- err
+		for {
+			var response elevatedWorkerResponse
+			if err := decoder.Decode(&response); err != nil {
+				errCh <- err
+				return
+			}
+			if err := validateElevatedWorkerResponse(response, request.RequestID); err != nil {
+				errCh <- err
+				return
+			}
+			if response.Type == workerResponseProgress {
+				if response.Progress != nil && progress != nil {
+					progress(*response.Progress)
+				}
+				continue
+			}
+			responseCh <- response
 			return
 		}
-		responseCh <- response
 	}()
 
 	select {
 	case response := <-responseCh:
-		if err := validateElevatedWorkerResponse(response, request.RequestID); err != nil {
-			return CommandResult{}, err
-		}
 		if !response.OK && response.Error != "" && response.Result.Stderr == "" {
 			response.Result.Stderr = response.Error
 		}
-		return response.Result, nil
+		return response, nil
 	case err := <-errCh:
-		return CommandResult{}, fmt.Errorf("read elevated worker response: %w", err)
+		return elevatedWorkerResponse{}, fmt.Errorf("read elevated worker response: %w", err)
 	case <-ctx.Done():
 		cancelMessage := newElevatedWorkerCancel(auth, request.RequestID)
 		writeMu.Lock()
@@ -147,14 +174,21 @@ func exchangeElevatedWorkerRequest(ctx context.Context, conn io.ReadWriteCloser,
 		writeMu.Unlock()
 		select {
 		case response := <-responseCh:
-			if err := validateElevatedWorkerResponse(response, request.RequestID); err != nil {
-				return CommandResult{}, err
-			}
-			return response.Result, nil
+			return response, nil
 		case <-errCh:
-			return CommandResult{Code: commandCancelledCode, Command: request.Operation, Stderr: "Cancelled."}, nil
+			return elevatedWorkerResponse{
+				Version:   elevatedWorkerProtocolVersion,
+				RequestID: request.RequestID,
+				OK:        false,
+				Result:    CommandResult{Code: commandCancelledCode, Command: request.Operation, Stderr: "Cancelled."},
+			}, nil
 		case <-time.After(elevatedWorkerCancelTimeout):
-			return CommandResult{Code: commandCancelledCode, Command: request.Operation, Stderr: "Cancelled; elevated worker did not stop before timeout."}, nil
+			return elevatedWorkerResponse{
+				Version:   elevatedWorkerProtocolVersion,
+				RequestID: request.RequestID,
+				OK:        false,
+				Result:    CommandResult{Code: commandCancelledCode, Command: request.Operation, Stderr: "Cancelled; elevated worker did not stop before timeout."},
+			}, nil
 		}
 	}
 }
@@ -165,6 +199,9 @@ func validateElevatedWorkerResponse(response elevatedWorkerResponse, requestID s
 	}
 	if response.RequestID != requestID {
 		return errors.New("elevated worker response request_id mismatch")
+	}
+	if response.Type != "" && response.Type != workerResponseProgress {
+		return fmt.Errorf("unknown elevated worker response type %q", response.Type)
 	}
 	return nil
 }
@@ -332,15 +369,31 @@ func serveElevatedWorkerConnection(conn io.ReadWriter, auth elevatedWorkerAuthCo
 		}
 	}()
 
-	result := executeElevatedWorkerOperation(ctx, request.Operation, request.Payload)
+	progress := func(index int, pkg Package) {
+		_ = encoder.Encode(elevatedWorkerResponse{
+			Version:   elevatedWorkerProtocolVersion,
+			Type:      workerResponseProgress,
+			RequestID: request.RequestID,
+			Progress: &elevatedWorkerProgress{
+				CurrentIndex:   index,
+				Total:          packageUpdateBatchProgressTotal(request.Operation, request.Payload),
+				PackageKey:     normalizedJobPackageKey(pkg),
+				PackageName:    updateJobPackageName(pkg),
+				PackageID:      pkg.ID,
+				PackageManager: pkg.Manager,
+			},
+		})
+	}
+	result := executeElevatedWorkerOperation(ctx, request.Operation, request.Payload, auth, progress)
 	response := elevatedWorkerResponse{
 		Version:   elevatedWorkerProtocolVersion,
 		RequestID: request.RequestID,
-		OK:        result.OK,
-		Result:    result,
+		OK:        result.Result.OK,
+		Result:    result.Result,
+		Results:   result.Results,
 	}
-	if !result.OK {
-		response.Error = strings.TrimSpace(result.Stderr)
+	if !result.Result.OK {
+		response.Error = strings.TrimSpace(result.Result.Stderr)
 	}
 	_ = encoder.Encode(response)
 	cancel()
@@ -351,47 +404,188 @@ func serveElevatedWorkerConnection(conn io.ReadWriter, auth elevatedWorkerAuthCo
 	return nil
 }
 
-func executeElevatedWorkerOperation(ctx context.Context, operation string, payload json.RawMessage) CommandResult {
+func executeElevatedWorkerOperation(ctx context.Context, operation string, payload json.RawMessage, auth elevatedWorkerAuthContext, progress func(int, Package)) elevatedWorkerOperationResult {
 	if err := validateWorkerOperationPayload(operation, payload); err != nil {
-		return validationCommandResult(operation, err)
+		return elevatedWorkerOperationResult{Result: validationCommandResult(operation, err)}
 	}
 	switch operation {
 	case workerOperationPackageInstall:
 		var decoded elevatedWorkerPackageInstallPayload
 		if err := decodeWorkerPayload(payload, &decoded); err != nil {
-			return validationCommandResult(operation, err)
+			return elevatedWorkerOperationResult{Result: validationCommandResult(operation, err)}
 		}
-		return installPackageContext(ctx, decoded.Manager, decoded.PackageID)
+		return elevatedWorkerOperationResult{Result: installPackageContext(ctx, decoded.Manager, decoded.PackageID)}
 	case workerOperationPackageUpdate:
 		var decoded elevatedWorkerPackageUpdatePayload
 		if err := decodeWorkerPayload(payload, &decoded); err != nil {
-			return validationCommandResult(operation, err)
+			return elevatedWorkerOperationResult{Result: validationCommandResult(operation, err)}
 		}
 		pkg := decoded.Package
 		pkg.AllowUnknownVersionUpdate = decoded.AllowUnknownVersion
 		pkg.AllowPinnedUpdate = decoded.AllowPinned
-		return updatePackageWithMetadataContext(ctx, pkg)
+		return elevatedWorkerOperationResult{Result: updatePackageWithMetadataContext(ctx, pkg)}
+	case workerOperationPackageUpdateBatch:
+		var decoded elevatedWorkerPackageUpdateBatchPayload
+		if err := decodeWorkerPayload(payload, &decoded); err != nil {
+			return elevatedWorkerOperationResult{Result: validationCommandResult(operation, err)}
+		}
+		if err := validateBatchWorkerIdentity(auth, decoded.Packages); err != nil {
+			return elevatedWorkerOperationResult{Result: validationCommandResult(operation, err)}
+		}
+		return executeElevatedPackageUpdateBatch(ctx, decoded.Packages, progress)
 	case workerOperationManagerInstall:
 		var decoded elevatedWorkerManagerInstallPayload
 		if err := decodeWorkerPayload(payload, &decoded); err != nil {
-			return validationCommandResult(operation, err)
+			return elevatedWorkerOperationResult{Result: validationCommandResult(operation, err)}
 		}
-		return installManagerContext(ctx, decoded.Manager)
+		return elevatedWorkerOperationResult{Result: installManagerContext(ctx, decoded.Manager)}
 	case workerOperationStartupTask:
 		var decoded elevatedWorkerTaskPayload
 		if err := decodeWorkerPayload(payload, &decoded); err != nil {
-			return validationCommandResult(operation, err)
+			return elevatedWorkerOperationResult{Result: validationCommandResult(operation, err)}
 		}
-		return setStartupTaskDirect(decoded.Enabled)
+		return elevatedWorkerOperationResult{Result: setStartupTaskDirect(decoded.Enabled)}
 	case workerOperationAutoUpdateTask:
 		var decoded elevatedWorkerTaskPayload
 		if err := decodeWorkerPayload(payload, &decoded); err != nil {
-			return validationCommandResult(operation, err)
+			return elevatedWorkerOperationResult{Result: validationCommandResult(operation, err)}
 		}
-		return setAutoUpdateTaskDirect(decoded.Enabled)
+		return elevatedWorkerOperationResult{Result: setAutoUpdateTaskDirect(decoded.Enabled)}
 	default:
-		return validationCommandResult(operation, fmt.Errorf("unknown worker operation %q", operation))
+		return elevatedWorkerOperationResult{Result: validationCommandResult(operation, fmt.Errorf("unknown worker operation %q", operation))}
 	}
+}
+
+func validateBatchWorkerIdentity(auth elevatedWorkerAuthContext, packages []Package) error {
+	if !packageBatchIncludesManager(packages, managerWinget) {
+		return nil
+	}
+	actualSID, err := currentUserSID()
+	if err != nil {
+		return fmt.Errorf("validate elevated WinGet worker user: %w", err)
+	}
+	if !strings.EqualFold(actualSID, auth.UserSID) {
+		return fmt.Errorf("elevated WinGet batch refused because worker user SID %s does not match requester %s", actualSID, auth.UserSID)
+	}
+	actualSession, err := currentSessionID()
+	if err != nil {
+		return fmt.Errorf("validate elevated WinGet worker session: %w", err)
+	}
+	if actualSession != auth.SessionID {
+		return fmt.Errorf("elevated WinGet batch refused because worker session %d does not match requester session %d", actualSession, auth.SessionID)
+	}
+	return nil
+}
+
+func packageUpdateBatchProgressTotal(operation string, payload json.RawMessage) int {
+	if operation != workerOperationPackageUpdateBatch {
+		return 0
+	}
+	var decoded elevatedWorkerPackageUpdateBatchPayload
+	if err := decodeWorkerPayload(payload, &decoded); err != nil {
+		return 0
+	}
+	return len(decoded.Packages)
+}
+
+func executeElevatedPackageUpdateBatch(ctx context.Context, packages []Package, progress func(int, Package)) elevatedWorkerOperationResult {
+	results := make([]UpdateResult, 0, len(packages))
+	for index, pkg := range packages {
+		if ctx.Err() != nil {
+			break
+		}
+		key := normalizedJobPackageKey(pkg)
+		if key == "" {
+			key = packageKey(pkg.Manager, pkg.ID)
+		}
+		pkg.Key = key
+		if progress != nil {
+			progress(index+1, pkg)
+		}
+		result := updatePackageWithMetadataContext(ctx, pkg)
+		results = append(results, UpdateResult{Key: key, Result: result})
+		if ctx.Err() != nil || result.Code == commandCancelledCode {
+			break
+		}
+	}
+	return elevatedWorkerOperationResult{
+		Result:  aggregatePackageUpdateBatchResult(results, ctx.Err()),
+		Results: results,
+	}
+}
+
+func aggregatePackageUpdateBatchResult(results []UpdateResult, err error) CommandResult {
+	result := CommandResult{OK: true, Command: workerOperationPackageUpdateBatch}
+	if err != nil {
+		result.OK = false
+		result.Code = commandCancelledCode
+		result.Stderr = "Cancelled."
+	}
+	if len(results) == 0 && err == nil {
+		return validationCommandResult(workerOperationPackageUpdateBatch, errors.New("package update batch returned no results"))
+	}
+	var stdout []string
+	var stderr []string
+	for _, item := range results {
+		if item.Result.Stdout != "" {
+			stdout = append(stdout, strings.TrimSpace(item.Result.Stdout))
+		}
+		if item.Result.Stderr != "" {
+			stderr = append(stderr, strings.TrimSpace(item.Result.Stderr))
+		}
+		if !item.Result.OK && result.OK {
+			result.OK = false
+			result.Code = item.Result.Code
+		}
+	}
+	if result.OK {
+		result.Stdout = fmt.Sprintf("Elevated package batch updated %d package(s).", len(results))
+	} else if result.Code == 0 {
+		result.Code = 1
+	}
+	if len(stdout) > 0 {
+		result.Stdout = strings.TrimSpace(strings.Join(append([]string{result.Stdout}, stdout...), "\n"))
+	}
+	if len(stderr) > 0 {
+		result.Stderr = strings.TrimSpace(strings.Join(append([]string{result.Stderr}, stderr...), "\n"))
+	}
+	return result
+}
+
+func runElevatedPackageUpdateBatch(ctx context.Context, packages []Package, progress func(int, Package)) ([]UpdateResult, CommandResult) {
+	payload := elevatedWorkerPackageUpdateBatchPayload{Packages: packages}
+	if err := validateWorkerOperationPayloadFromAny(workerOperationPackageUpdateBatch, payload); err != nil {
+		return nil, validationCommandResult(workerOperationPackageUpdateBatch, err)
+	}
+	response, err := runElevatedWorkerInvocation(ctx, elevatedWorkerInvocation{
+		Operation: workerOperationPackageUpdateBatch,
+		Payload:   payload,
+		Progress: func(workerProgress elevatedWorkerProgress) {
+			index := workerProgress.CurrentIndex
+			if index < 1 || index > len(packages) || progress == nil {
+				return
+			}
+			pkg := packages[index-1]
+			if pkg.Key == "" {
+				pkg.Key = normalizedJobPackageKey(pkg)
+			}
+			progress(index, pkg)
+		},
+	})
+	if err != nil {
+		return nil, workerCommandResultError(workerOperationPackageUpdateBatch, err)
+	}
+	appendWorkerResultLogsContext(ctx, response.Result)
+	return response.Results, response.Result
+}
+
+func packageBatchIncludesManager(packages []Package, manager string) bool {
+	for _, pkg := range packages {
+		if pkg.Manager == manager {
+			return true
+		}
+	}
+	return false
 }
 
 func appendWorkerResultLogs(result CommandResult) {

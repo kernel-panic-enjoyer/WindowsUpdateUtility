@@ -5,20 +5,25 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 )
 
 const (
-	elevatedWorkerProtocolVersion = 1
+	elevatedWorkerProtocolVersion               = 1
+	elevatedWorkerPackageUpdateBatchMaxPackages = 100
 
 	workerMessageRequest = "request"
 	workerMessageCancel  = "cancel"
 
-	workerOperationPackageInstall = "package_install"
-	workerOperationPackageUpdate  = "package_update"
-	workerOperationManagerInstall = "manager_install"
-	workerOperationStartupTask    = "startup_task"
-	workerOperationAutoUpdateTask = "auto_update_task"
+	workerResponseProgress = "progress"
+
+	workerOperationPackageInstall     = "package_install"
+	workerOperationPackageUpdate      = "package_update"
+	workerOperationPackageUpdateBatch = "package_update_batch"
+	workerOperationManagerInstall     = "manager_install"
+	workerOperationStartupTask        = "startup_task"
+	workerOperationAutoUpdateTask     = "auto_update_task"
 )
 
 type elevatedWorkerMessage struct {
@@ -33,11 +38,23 @@ type elevatedWorkerMessage struct {
 }
 
 type elevatedWorkerResponse struct {
-	Version   int           `json:"version"`
-	RequestID string        `json:"request_id"`
-	OK        bool          `json:"ok"`
-	Error     string        `json:"error,omitempty"`
-	Result    CommandResult `json:"result"`
+	Version   int                     `json:"version"`
+	Type      string                  `json:"type,omitempty"`
+	RequestID string                  `json:"request_id"`
+	OK        bool                    `json:"ok"`
+	Error     string                  `json:"error,omitempty"`
+	Result    CommandResult           `json:"result"`
+	Results   []UpdateResult          `json:"results,omitempty"`
+	Progress  *elevatedWorkerProgress `json:"progress,omitempty"`
+}
+
+type elevatedWorkerProgress struct {
+	CurrentIndex   int    `json:"current_index"`
+	Total          int    `json:"total"`
+	PackageKey     string `json:"package_key,omitempty"`
+	PackageName    string `json:"package_name,omitempty"`
+	PackageID      string `json:"package_id,omitempty"`
+	PackageManager string `json:"package_manager,omitempty"`
 }
 
 type elevatedWorkerPackageInstallPayload struct {
@@ -49,6 +66,10 @@ type elevatedWorkerPackageUpdatePayload struct {
 	Package             Package `json:"package"`
 	AllowUnknownVersion bool    `json:"allow_unknown_version"`
 	AllowPinned         bool    `json:"allow_pinned"`
+}
+
+type elevatedWorkerPackageUpdateBatchPayload struct {
+	Packages []Package `json:"packages"`
 }
 
 type elevatedWorkerManagerInstallPayload struct {
@@ -156,6 +177,12 @@ func validateWorkerOperationPayload(operation string, payload json.RawMessage) e
 			return errors.New("package update worker operation only allows winget or choco")
 		}
 		return validateManagerAndID(decoded.Package.Manager, decoded.Package.ID)
+	case workerOperationPackageUpdateBatch:
+		var decoded elevatedWorkerPackageUpdateBatchPayload
+		if err := decodeWorkerPayload(payload, &decoded); err != nil {
+			return err
+		}
+		return validateElevatedWorkerPackageUpdateBatchPayload(decoded)
 	case workerOperationManagerInstall:
 		var decoded elevatedWorkerManagerInstallPayload
 		if err := decodeWorkerPayload(payload, &decoded); err != nil {
@@ -173,6 +200,24 @@ func validateWorkerOperationPayload(operation string, payload json.RawMessage) e
 	}
 }
 
+func validateElevatedWorkerPackageUpdateBatchPayload(payload elevatedWorkerPackageUpdateBatchPayload) error {
+	if len(payload.Packages) == 0 {
+		return errors.New("package update batch requires at least one package")
+	}
+	if len(payload.Packages) > elevatedWorkerPackageUpdateBatchMaxPackages {
+		return fmt.Errorf("package update batch has %d packages; maximum is %d", len(payload.Packages), elevatedWorkerPackageUpdateBatchMaxPackages)
+	}
+	for _, pkg := range payload.Packages {
+		if pkg.Manager != managerWinget && pkg.Manager != managerChoco {
+			return errors.New("package update batch only allows winget or choco packages")
+		}
+		if err := validateManagerAndID(pkg.Manager, pkg.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func decodeWorkerPayload(data json.RawMessage, target any) error {
 	if len(data) == 0 {
 		return errors.New("worker operation payload is required")
@@ -182,7 +227,8 @@ func decodeWorkerPayload(data json.RawMessage, target any) error {
 	if err := decoder.Decode(target); err != nil {
 		return err
 	}
-	if decoder.More() {
+	var trailing struct{}
+	if err := decoder.Decode(&trailing); err != io.EOF {
 		return errors.New("worker operation payload contains multiple values")
 	}
 	return nil

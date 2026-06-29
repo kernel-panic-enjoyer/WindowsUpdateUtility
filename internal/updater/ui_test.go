@@ -201,6 +201,8 @@ func TestRenderedHTMLContainsAsyncUpdateHooks(t *testing.T) {
 		`renderUpdatePreflight`,
 		`confirmPendingUpdateJob`,
 		`hideUpdatePreflight`,
+		`bulkElevationPreflightNote`,
+		`WinGet and Chocolatey packages will use one UAC prompt when elevation is needed.`,
 		`packageRiskNotes`,
 		`pinned-package override`,
 		`id="update-results-panel"`,

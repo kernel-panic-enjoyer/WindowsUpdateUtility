@@ -190,6 +190,234 @@ func TestUpdateJobBulkIncludesUnknownVersionWithGlobalOption(t *testing.T) {
 	}
 }
 
+func TestUpdateAllBatchesWingetAndChocolateyWithOneElevatedRunner(t *testing.T) {
+	batchCalls := 0
+	restore := replaceBulkUpdateBatchHooks(
+		func(pkg Package) bool { return pkg.Manager == managerWinget || pkg.Manager == managerChoco },
+		func(ctx context.Context, packages []Package, progress func(int, Package)) ([]UpdateResult, CommandResult) {
+			batchCalls++
+			results := make([]UpdateResult, 0, len(packages))
+			for index, pkg := range packages {
+				progress(index+1, pkg)
+				results = append(results, UpdateResult{Key: pkg.Key, Result: CommandResult{OK: true, Command: "batch " + pkg.ID}})
+			}
+			return results, CommandResult{OK: true, Command: "package_update_batch"}
+		},
+		func(ctx context.Context, manager, id string) CommandResult {
+			t.Fatalf("package %s:%s should have used elevated batch", manager, id)
+			return CommandResult{}
+		},
+	)
+	defer restore()
+
+	app := &App{inventory: Inventory{PackageLookup: PackageLookup{Packages: []Package{
+		updatableTestPackage(managerWinget, "Vendor.One", "Vendor One"),
+		updatableTestPackage(managerWinget, "Vendor.Two", "Vendor Two"),
+		updatableTestPackage(managerChoco, "gh", "GitHub CLI"),
+	}}}}
+	if _, err := app.startUpdateJob(nil); err != nil {
+		t.Fatal(err)
+	}
+	status := waitForUpdateJobStopped(t, app)
+	if status.State != jobStateSucceeded || len(status.Results) != 3 {
+		t.Fatalf("expected one successful result per batched package, got %#v", status)
+	}
+	if batchCalls != 1 {
+		t.Fatalf("expected exactly one batch runner call, got %d", batchCalls)
+	}
+	for _, result := range status.Results {
+		if !strings.HasPrefix(result.Result.Command, "batch ") {
+			t.Fatalf("expected batched command result, got %#v", status.Results)
+		}
+	}
+}
+
+func TestUpdateAllBatchesMultipleChocolateyPackages(t *testing.T) {
+	batchCalls := 0
+	restore := replaceBulkUpdateBatchHooks(
+		func(pkg Package) bool { return pkg.Manager == managerChoco },
+		func(ctx context.Context, packages []Package, progress func(int, Package)) ([]UpdateResult, CommandResult) {
+			batchCalls++
+			for index, pkg := range packages {
+				progress(index+1, pkg)
+			}
+			return []UpdateResult{
+				{Key: packages[0].Key, Result: CommandResult{OK: true, Command: "batch " + packages[0].ID}},
+				{Key: packages[1].Key, Result: CommandResult{OK: true, Command: "batch " + packages[1].ID}},
+			}, CommandResult{OK: true, Command: "package_update_batch"}
+		},
+		func(ctx context.Context, manager, id string) CommandResult {
+			t.Fatalf("Chocolatey package %s should have used elevated batch", id)
+			return CommandResult{}
+		},
+	)
+	defer restore()
+
+	app := &App{inventory: Inventory{PackageLookup: PackageLookup{Packages: []Package{
+		updatableTestPackage(managerChoco, "gh", "GitHub CLI"),
+		updatableTestPackage(managerChoco, "git", "Git"),
+	}}}}
+	if _, err := app.startUpdateJob(nil); err != nil {
+		t.Fatal(err)
+	}
+	status := waitForUpdateJobStopped(t, app)
+	if status.State != jobStateSucceeded || len(status.Results) != 2 || batchCalls != 1 {
+		t.Fatalf("expected one Chocolatey batch with two results, status=%#v batchCalls=%d", status, batchCalls)
+	}
+}
+
+func TestUpdateSelectedUsesElevatedBatchPath(t *testing.T) {
+	var got []Package
+	batchCalls := 0
+	restore := replaceBulkUpdateBatchHooks(
+		func(pkg Package) bool { return pkg.Manager == managerWinget || pkg.Manager == managerChoco },
+		func(ctx context.Context, packages []Package, progress func(int, Package)) ([]UpdateResult, CommandResult) {
+			batchCalls++
+			got = append([]Package(nil), packages...)
+			for index, pkg := range packages {
+				progress(index+1, pkg)
+			}
+			return []UpdateResult{
+				{Key: packages[0].Key, Result: CommandResult{OK: true, Command: "batch " + packages[0].ID}},
+				{Key: packages[1].Key, Result: CommandResult{OK: true, Command: "batch " + packages[1].ID}},
+			}, CommandResult{OK: true, Command: "package_update_batch"}
+		},
+		func(ctx context.Context, manager, id string) CommandResult {
+			t.Fatalf("package %s:%s should have used elevated batch", manager, id)
+			return CommandResult{}
+		},
+	)
+	defer restore()
+
+	app := &App{inventory: Inventory{PackageLookup: PackageLookup{Packages: []Package{
+		updatableTestPackage(managerWinget, "Vendor.One", "Vendor One"),
+		updatableTestPackage(managerChoco, "gh", "GitHub CLI"),
+		updatableTestPackage(managerWinget, "Vendor.Three", "Vendor Three"),
+	}}}}
+	if _, err := app.startUpdateJob([]string{"winget:Vendor.One", "choco:gh"}); err != nil {
+		t.Fatal(err)
+	}
+	status := waitForUpdateJobStopped(t, app)
+	if status.State != jobStateSucceeded || batchCalls != 1 || len(got) != 2 || got[0].Key != "winget:Vendor.One" || got[1].Key != "choco:gh" {
+		t.Fatalf("expected selected packages to use one batch, got status=%#v batchCalls=%d batch=%#v", status, batchCalls, got)
+	}
+}
+
+func TestSingleWingetUpdateStaysOnExistingPath(t *testing.T) {
+	var singleCalls []string
+	restore := replaceBulkUpdateBatchHooks(
+		func(pkg Package) bool { return true },
+		func(ctx context.Context, packages []Package, progress func(int, Package)) ([]UpdateResult, CommandResult) {
+			t.Fatalf("single-package update should not use elevated batch: %#v", packages)
+			return nil, CommandResult{}
+		},
+		func(ctx context.Context, manager, id string) CommandResult {
+			singleCalls = append(singleCalls, packageKey(manager, id))
+			return CommandResult{OK: true, Command: "single " + id}
+		},
+	)
+	defer restore()
+
+	app := &App{inventory: Inventory{PackageLookup: PackageLookup{Packages: []Package{
+		updatableTestPackage(managerWinget, "Vendor.One", "Vendor One"),
+	}}}}
+	if _, err := app.startUpdateJob([]string{"winget:Vendor.One"}); err != nil {
+		t.Fatal(err)
+	}
+	status := waitForUpdateJobStopped(t, app)
+	if status.State != jobStateSucceeded || len(singleCalls) != 1 || singleCalls[0] != "winget:Vendor.One" {
+		t.Fatalf("expected existing single update path, status=%#v calls=%#v", status, singleCalls)
+	}
+}
+
+func TestWingetBatchFallsBackWhenSameUserElevationIneligible(t *testing.T) {
+	var singleCalls []string
+	restore := replaceBulkUpdateBatchHooks(
+		func(pkg Package) bool { return pkg.Manager == managerChoco },
+		func(ctx context.Context, packages []Package, progress func(int, Package)) ([]UpdateResult, CommandResult) {
+			t.Fatalf("ineligible winget packages should not use elevated batch: %#v", packages)
+			return nil, CommandResult{}
+		},
+		func(ctx context.Context, manager, id string) CommandResult {
+			singleCalls = append(singleCalls, packageKey(manager, id))
+			return CommandResult{OK: true, Command: "single " + id}
+		},
+	)
+	defer restore()
+
+	app := &App{inventory: Inventory{PackageLookup: PackageLookup{Packages: []Package{
+		updatableTestPackage(managerWinget, "Vendor.One", "Vendor One"),
+		updatableTestPackage(managerWinget, "Vendor.Two", "Vendor Two"),
+	}}}}
+	if _, err := app.startUpdateJob(nil); err != nil {
+		t.Fatal(err)
+	}
+	status := waitForUpdateJobStopped(t, app)
+	if status.State != jobStateSucceeded || len(singleCalls) != 2 {
+		t.Fatalf("expected current-user winget fallback, status=%#v calls=%#v", status, singleCalls)
+	}
+}
+
+func TestElevatedBatchPlanExcludesStorePackages(t *testing.T) {
+	packages := []Package{
+		updatableTestPackage(managerWinget, "Vendor.One", "Vendor One"),
+		updatableTestPackage(managerChoco, "gh", "GitHub CLI"),
+		{
+			Key:                        "store:OpenAI.Codex_abc123",
+			Manager:                    managerStore,
+			ID:                         "OpenAI.Codex_abc123",
+			Name:                       "Codex",
+			UpdateAvailable:            true,
+			UpdateSupported:            true,
+			UpdateState:                string(StoreUpdateAvailable),
+			ExactActionTargetAvailable: true,
+			CanUpdateNow:               true,
+		},
+	}
+	batch, remaining := planElevatedPackageUpdateBatch(packages, func(pkg Package) bool {
+		return pkg.Manager == managerWinget || pkg.Manager == managerChoco
+	})
+	if len(batch) != 2 || len(remaining) != 1 || remaining[0].Manager != managerStore {
+		t.Fatalf("expected Store package to stay outside batch, batch=%#v remaining=%#v", batch, remaining)
+	}
+}
+
+func TestElevatedBatchCancellationRecordsCompletedResults(t *testing.T) {
+	started := make(chan struct{})
+	restore := replaceBulkUpdateBatchHooks(
+		func(pkg Package) bool { return true },
+		func(ctx context.Context, packages []Package, progress func(int, Package)) ([]UpdateResult, CommandResult) {
+			close(started)
+			progress(1, packages[0])
+			<-ctx.Done()
+			return []UpdateResult{{Key: packages[0].Key, Result: CommandResult{OK: true, Command: "batch " + packages[0].ID}}}, CommandResult{Code: commandCancelledCode, Command: "package_update_batch", Stderr: "Cancelled."}
+		},
+		func(ctx context.Context, manager, id string) CommandResult {
+			t.Fatalf("package %s:%s should have used elevated batch", manager, id)
+			return CommandResult{}
+		},
+	)
+	defer restore()
+
+	app := &App{inventory: Inventory{PackageLookup: PackageLookup{Packages: []Package{
+		updatableTestPackage(managerWinget, "Vendor.One", "Vendor One"),
+		updatableTestPackage(managerChoco, "gh", "GitHub CLI"),
+	}}}}
+	if _, err := app.startUpdateJob(nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("batch runner did not start")
+	}
+	app.cancelUpdateJob()
+	status := waitForUpdateJobStopped(t, app)
+	if status.State != jobStateCancelled || len(status.Results) != 1 || status.Results[0].Key != "winget:Vendor.One" {
+		t.Fatalf("expected completed batch results to be retained on cancellation, got %#v", status)
+	}
+}
+
 func TestUpdateJobCancelStopsQueuedPackages(t *testing.T) {
 	started := make(chan struct{})
 	var once sync.Once

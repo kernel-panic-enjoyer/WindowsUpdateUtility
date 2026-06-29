@@ -17,13 +17,53 @@ func replaceUpdateJobHooks(runner func(context.Context, string, string) CommandR
 func replaceUpdateJobHooksWithRefresh(runner func(context.Context, string, string) CommandResult, refresh func(context.Context, *App, []Package) error) func() {
 	oldRunner := updatePackageRunner
 	oldRefresh := refreshInventoryAfterUpdateJob
+	oldEligible := elevatedPackageUpdateBatchEligible
 	updatePackageRunner = func(ctx context.Context, pkg Package) CommandResult {
 		return runner(ctx, pkg.Manager, pkg.ID)
 	}
 	refreshInventoryAfterUpdateJob = refresh
+	elevatedPackageUpdateBatchEligible = func(Package) bool { return false }
 	return func() {
 		updatePackageRunner = oldRunner
 		refreshInventoryAfterUpdateJob = oldRefresh
+		elevatedPackageUpdateBatchEligible = oldEligible
+	}
+}
+
+func replaceBulkUpdateBatchHooks(
+	eligible func(Package) bool,
+	batchRunner func(context.Context, []Package, func(int, Package)) ([]UpdateResult, CommandResult),
+	singleRunner func(context.Context, string, string) CommandResult,
+) func() {
+	oldEligible := elevatedPackageUpdateBatchEligible
+	oldBatchRunner := elevatedPackageUpdateBatchRunner
+	oldSingleRunner := updatePackageRunner
+	oldRefresh := refreshInventoryAfterUpdateJob
+	elevatedPackageUpdateBatchEligible = eligible
+	elevatedPackageUpdateBatchRunner = batchRunner
+	updatePackageRunner = func(ctx context.Context, pkg Package) CommandResult {
+		return singleRunner(ctx, pkg.Manager, pkg.ID)
+	}
+	refreshInventoryAfterUpdateJob = func(ctx context.Context, app *App, packages []Package) error { return nil }
+	return func() {
+		elevatedPackageUpdateBatchEligible = oldEligible
+		elevatedPackageUpdateBatchRunner = oldBatchRunner
+		updatePackageRunner = oldSingleRunner
+		refreshInventoryAfterUpdateJob = oldRefresh
+	}
+}
+
+func updatableTestPackage(manager, id, name string) Package {
+	return Package{
+		Key:              packageKey(manager, id),
+		Manager:          manager,
+		ID:               id,
+		Name:             name,
+		Version:          "1.0.0",
+		AvailableVersion: "2.0.0",
+		UpdateAvailable:  true,
+		UpdateSupported:  true,
+		CanUpdateNow:     true,
 	}
 }
 

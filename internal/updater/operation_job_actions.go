@@ -143,33 +143,47 @@ func (app *App) startBulkUpdateJob(packageKeys []string, options UpdateOptions) 
 func (app *App) startUpdatePackagesOperation(jobType, mode string, packages []Package) OperationJobStatus {
 	keys := updateJobPackageKeys(packages)
 	return app.startOperationJobWithPackageSnapshot(jobType, mode, len(packages), keys, packages, func(ctx context.Context, job *OperationJob) {
-		for index, pkg := range packages {
-			packageCtx := withLogMetadata(ctx, logMetadata{PackageKey: pkg.Key, Manager: pkg.Manager})
-			app.mutateOperationJob(job, func(status *OperationJobStatus) {
-				status.CurrentIndex = index + 1
-				status.CurrentKey = pkg.Key
-				status.CurrentPackage = updateJobPackageName(pkg)
-			})
-			if packageCtx.Err() != nil {
+		batchPackages, remainingPackages := planElevatedPackageUpdateBatch(packages, elevatedPackageUpdateBatchEligible)
+		if len(batchPackages) > 0 {
+			result := app.updateElevatedPackageBatchForJob(ctx, job, batchPackages)
+			if ctx.Err() != nil || result.Code == commandCancelledCode {
 				app.mutateOperationJob(job, func(status *OperationJobStatus) {
 					status.CancelRequested = true
 					status.State = jobStateCancelled
 					status.Notice = "Update cancelled."
 				})
-				break
 			}
-			result := app.updatePackageForJob(packageCtx, job, pkg)
-			app.mutateOperationJob(job, func(status *OperationJobStatus) {
-				status.Results = append(status.Results, UpdateResult{Key: pkg.Key, Result: result})
-				status.Result = &result
-				if packageCtx.Err() != nil || result.Code == commandCancelledCode {
-					status.CancelRequested = true
-					status.State = jobStateCancelled
-					status.Notice = "Update cancelled."
+		}
+		if ctx.Err() == nil && app.jobCanContinue(job) {
+			for _, pkg := range remainingPackages {
+				packageCtx := withLogMetadata(ctx, logMetadata{PackageKey: pkg.Key, Manager: pkg.Manager})
+				nextIndex := app.nextUpdateJobPackageIndex(job)
+				app.mutateOperationJob(job, func(status *OperationJobStatus) {
+					status.CurrentIndex = nextIndex
+					status.CurrentKey = pkg.Key
+					status.CurrentPackage = updateJobPackageName(pkg)
+				})
+				if packageCtx.Err() != nil {
+					app.mutateOperationJob(job, func(status *OperationJobStatus) {
+						status.CancelRequested = true
+						status.State = jobStateCancelled
+						status.Notice = "Update cancelled."
+					})
+					break
 				}
-			})
-			if packageCtx.Err() != nil || result.Code == commandCancelledCode {
-				break
+				result := app.updatePackageForJob(packageCtx, job, pkg)
+				app.mutateOperationJob(job, func(status *OperationJobStatus) {
+					status.Results = append(status.Results, UpdateResult{Key: pkg.Key, Result: result})
+					status.Result = &result
+					if packageCtx.Err() != nil || result.Code == commandCancelledCode {
+						status.CancelRequested = true
+						status.State = jobStateCancelled
+						status.Notice = "Update cancelled."
+					}
+				})
+				if packageCtx.Err() != nil || result.Code == commandCancelledCode {
+					break
+				}
 			}
 		}
 		app.mutateOperationJob(job, func(status *OperationJobStatus) {
@@ -212,6 +226,65 @@ func (app *App) startUpdatePackagesOperation(jobType, mode string, packages []Pa
 			status.Notice = "Update completed. Refreshing package status..."
 		})
 	})
+}
+
+func (app *App) jobCanContinue(job *OperationJob) bool {
+	status := app.updateJobSnapshot(job)
+	return status.State != jobStateCancelled
+}
+
+func (app *App) nextUpdateJobPackageIndex(job *OperationJob) int {
+	status := app.updateJobSnapshot(job)
+	return len(status.Results) + 1
+}
+
+func (app *App) updateJobSnapshot(job *OperationJob) OperationJobStatus {
+	app.jobsMu.Lock()
+	defer app.jobsMu.Unlock()
+	return cloneOperationJobStatus(job.status)
+}
+
+func (app *App) updateElevatedPackageBatchForJob(ctx context.Context, job *OperationJob, packages []Package) CommandResult {
+	first := packages[0]
+	nextIndex := app.nextUpdateJobPackageIndex(job)
+	app.mutateOperationJob(job, func(status *OperationJobStatus) {
+		status.State = jobStateStarting
+		status.CurrentIndex = nextIndex
+		status.CurrentKey = first.Key
+		status.CurrentPackage = updateJobPackageName(first)
+		status.Notice = "Starting elevated package batch..."
+	})
+	results, result := elevatedPackageUpdateBatchRunner(ctx, packages, func(index int, pkg Package) {
+		app.mutateOperationJob(job, func(status *OperationJobStatus) {
+			status.CurrentIndex = nextIndex + index - 1
+			status.CurrentKey = pkg.Key
+			status.CurrentPackage = updateJobPackageName(pkg)
+			status.Notice = "Starting elevated package batch..."
+		})
+	})
+	app.mutateOperationJob(job, func(status *OperationJobStatus) {
+		status.Results = append(status.Results, results...)
+		status.Result = &result
+		if len(results) > 0 {
+			last := results[len(results)-1]
+			status.CurrentIndex = len(status.Results)
+			status.CurrentKey = last.Key
+			status.CurrentPackage = updateJobPackageName(packageByUpdateResultKey(packages, last.Key))
+		}
+	})
+	return result
+}
+
+func packageByUpdateResultKey(packages []Package, key string) Package {
+	for _, pkg := range packages {
+		if pkg.Key == key || normalizedJobPackageKey(pkg) == key {
+			return pkg
+		}
+	}
+	if len(packages) == 0 {
+		return Package{}
+	}
+	return packages[len(packages)-1]
 }
 
 func (app *App) updatePackageForJob(ctx context.Context, job *OperationJob, pkg Package) CommandResult {

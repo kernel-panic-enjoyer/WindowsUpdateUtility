@@ -50,6 +50,7 @@ type shellExecuteInfo struct {
 }
 
 const seeMaskNoCloseProcess = 0x00000040
+const tokenElevationTypeLimited = 3
 
 func shellExecuteRunasProcess(file string, params string) (windows.Handle, error) {
 	shell32 := syscall.NewLazyDLL("shell32.dll")
@@ -98,6 +99,22 @@ func currentSessionID() (uint32, error) {
 		return 0, err
 	}
 	return sessionID, nil
+}
+
+func currentUserCanElevateSameUser() bool {
+	if isAdmin() {
+		return false
+	}
+	var elevationType uint32
+	var outLen uint32
+	err := windows.GetTokenInformation(
+		windows.GetCurrentProcessToken(),
+		windows.TokenElevationType,
+		(*byte)(unsafe.Pointer(&elevationType)),
+		uint32(unsafe.Sizeof(elevationType)),
+		&outLen,
+	)
+	return err == nil && outLen == uint32(unsafe.Sizeof(elevationType)) && elevationType == tokenElevationTypeLimited
 }
 
 func launchElevatedWorkerProcess(pipeName, capability, userSID string, sessionID uint32) (elevatedWorkerProcess, error) {

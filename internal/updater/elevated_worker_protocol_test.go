@@ -127,6 +127,28 @@ func TestElevatedWorkerOperationAllowlist(t *testing.T) {
 			operation: workerOperationAutoUpdateTask,
 			payload:   elevatedWorkerTaskPayload{Enabled: true},
 		},
+		{
+			name:      "winget choco package update batch allowed",
+			operation: workerOperationPackageUpdateBatch,
+			payload: elevatedWorkerPackageUpdateBatchPayload{Packages: []Package{
+				{Manager: managerWinget, ID: "Git.Git"},
+				{Manager: managerChoco, ID: "gh"},
+			}},
+		},
+		{
+			name:      "store package update batch rejected",
+			operation: workerOperationPackageUpdateBatch,
+			payload: elevatedWorkerPackageUpdateBatchPayload{Packages: []Package{
+				{Manager: managerStore, ID: "OpenAI.Codex_abc123"},
+			}},
+			wantError: true,
+		},
+		{
+			name:      "empty package update batch rejected",
+			operation: workerOperationPackageUpdateBatch,
+			payload:   elevatedWorkerPackageUpdateBatchPayload{},
+			wantError: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -143,6 +165,44 @@ func TestElevatedWorkerOperationAllowlist(t *testing.T) {
 				t.Fatalf("unexpected allowlist rejection: %v", err)
 			}
 		})
+	}
+}
+
+func TestElevatedWorkerPackageUpdateBatchRejectsUnsafePayloads(t *testing.T) {
+	oversized := make([]Package, elevatedWorkerPackageUpdateBatchMaxPackages+1)
+	for i := range oversized {
+		oversized[i] = Package{Manager: managerWinget, ID: "Vendor.App"}
+	}
+	tests := []struct {
+		name    string
+		payload json.RawMessage
+	}{
+		{
+			name:    "unknown field",
+			payload: json.RawMessage(`{"packages":[{"manager":"winget","id":"Git.Git"}],"exe":"cmd.exe"}`),
+		},
+		{
+			name:    "invalid package id",
+			payload: json.RawMessage(`{"packages":[{"manager":"winget","id":"--all"}]}`),
+		},
+		{
+			name:    "store package",
+			payload: json.RawMessage(`{"packages":[{"manager":"store","id":"OpenAI.Codex_abc123"}]}`),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := validateWorkerOperationPayload(workerOperationPackageUpdateBatch, tt.payload); err == nil {
+				t.Fatal("expected batch payload rejection")
+			}
+		})
+	}
+	raw, err := marshalWorkerPayload(elevatedWorkerPackageUpdateBatchPayload{Packages: oversized})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateWorkerOperationPayload(workerOperationPackageUpdateBatch, raw); err == nil {
+		t.Fatal("expected oversized batch rejection")
 	}
 }
 
@@ -208,11 +268,11 @@ func TestExchangeElevatedWorkerRequestSendsCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan CommandResult, 1)
 	go func() {
-		result, err := exchangeElevatedWorkerRequest(ctx, client, auth, request)
+		response, err := exchangeElevatedWorkerRequest(ctx, client, auth, request, nil)
 		if err != nil {
 			t.Errorf("exchange returned error: %v", err)
 		}
-		done <- result
+		done <- response.Result
 	}()
 	cancel()
 
@@ -228,5 +288,67 @@ func TestExchangeElevatedWorkerRequestSendsCancel(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("expected cancelled result")
+	}
+}
+
+func TestExchangeElevatedWorkerRequestReportsProgress(t *testing.T) {
+	auth := elevatedWorkerAuthContext{Capability: "capability", UserSID: "S-1-5-21-test-1001", SessionID: 7}
+	request, err := newElevatedWorkerRequest(auth, "request-1", workerOperationPackageUpdateBatch, elevatedWorkerPackageUpdateBatchPayload{Packages: []Package{
+		{Manager: managerWinget, ID: "Git.Git"},
+		{Manager: managerChoco, ID: "gh"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	go func() {
+		decoder := json.NewDecoder(server)
+		decoder.DisallowUnknownFields()
+		encoder := json.NewEncoder(server)
+		var gotRequest elevatedWorkerMessage
+		if err := decoder.Decode(&gotRequest); err != nil {
+			return
+		}
+		_ = encoder.Encode(elevatedWorkerResponse{
+			Version:   elevatedWorkerProtocolVersion,
+			Type:      workerResponseProgress,
+			RequestID: gotRequest.RequestID,
+			Progress: &elevatedWorkerProgress{
+				CurrentIndex:   2,
+				Total:          2,
+				PackageKey:     "choco:gh",
+				PackageName:    "GitHub CLI",
+				PackageID:      "gh",
+				PackageManager: managerChoco,
+			},
+		})
+		_ = encoder.Encode(elevatedWorkerResponse{
+			Version:   elevatedWorkerProtocolVersion,
+			RequestID: gotRequest.RequestID,
+			OK:        true,
+			Result:    CommandResult{OK: true, Command: gotRequest.Operation},
+		})
+	}()
+
+	progressCh := make(chan elevatedWorkerProgress, 1)
+	response, err := exchangeElevatedWorkerRequest(context.Background(), client, auth, request, func(progress elevatedWorkerProgress) {
+		progressCh <- progress
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !response.OK {
+		t.Fatalf("expected final response ok, got %#v", response)
+	}
+	select {
+	case progress := <-progressCh:
+		if progress.CurrentIndex != 2 || progress.PackageKey != "choco:gh" || progress.PackageManager != managerChoco {
+			t.Fatalf("unexpected progress: %#v", progress)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected progress callback")
 	}
 }

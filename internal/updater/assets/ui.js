@@ -2091,6 +2091,19 @@
     if(options.allowPinned){ enabled.push("pinned-package override enabled"); }
     return enabled.length ? enabled.join("; ") : "No unknown-version or pinned-package overrides enabled.";
   }
+  function bulkElevationPreflightNote(preflight){
+    if(!preflight || !Array.isArray(preflight.affected)){ return ""; }
+    var eligibleCount = preflight.affected.filter(function(pkg){
+      return pkg && (pkg.manager === "winget" || pkg.manager === "choco");
+    }).length;
+    if(eligibleCount < 2){ return ""; }
+    return "WinGet and Chocolatey packages will use one UAC prompt when elevation is needed.";
+  }
+  function updatePreflightSummaryText(preflight){
+    var summary = updateOptionsSummary(preflight ? preflight.options : null);
+    var elevationNote = bulkElevationPreflightNote(preflight);
+    return elevationNote ? summary + " " + elevationNote : summary;
+  }
   function packageUpdateTarget(pkg){
     return pkg.offered_version || pkg.available_version || "Unknown target";
   }
@@ -2179,7 +2192,7 @@
     }
     panel.classList.remove("hidden");
     setText("update-preflight-summary", (preflight.mode === "selected" ? "Update Selected" : "Update All") + " will affect " + preflight.affected.length + " package(s): " + preflight.affected.map(function(pkg){ return pkg.name || pkg.id || pkg.key; }).join(", ") + ".");
-    setText("update-preflight-overrides", updateOptionsSummary(preflight.options));
+    setText("update-preflight-overrides", updatePreflightSummaryText(preflight));
     $("update-preflight-body").innerHTML = preflight.affected.map(function(pkg){ return preflightPackageRow(pkg, preflight.options); }).join("");
     var excluded = $("update-preflight-excluded");
     if(excluded){

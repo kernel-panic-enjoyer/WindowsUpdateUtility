@@ -1,5 +1,6 @@
 [PLANS]
 
+- 2026-06-29T23:35:56+02:00 [USER] Active objective: make bulk WinGet and Chocolatey updates use one elevated same-binary worker/UAC prompt when eligible, including Update All and Update Selected, while preserving Store exact update flow and single-package behavior.
 - 2026-06-29T22:00:54+02:00 [USER] Objective completed: remediate the 7 Codex Security findings from `C:\Users\User\AppData\Local\Temp\codex-security-scans\Updater\131d62542c94_20260629T135310Z\report.md` in the repository source and rebuild `dist\WindowsUpdaterWebUI.exe`.
 - 2026-06-29T16:04:04+02:00 [USER] Active objective: explain and fix why pre-scan/unknown Microsoft Store packages appear in `Updates Available` and why the available cell duplicates `Unknown`.
 - 2026-06-29T15:53:10+02:00 [USER] Active objective: run a Codex Security repository-wide scan on `C:\Users\User\Documents\Updater` and produce the final scan report.
@@ -61,6 +62,7 @@
 
 [DECISIONS]
 
+- 2026-06-29T23:35:56+02:00 [CODE] Bulk update jobs now plan one `package_update_batch` elevated worker operation for two or more eligible WinGet/Chocolatey packages, then run remaining packages through existing paths; Store packages are excluded and WinGet batches require same-user/same-session elevation safety.
 - 2026-06-29T22:00:54+02:00 [CODE] Security remediation rejects shell metacharacters and option-shaped values at package search/action boundaries, keeps generic truncated WinGet desktop IDs non-actionable, validates Store Product IDs before mapping/target/execution, requires configured loopback ports for mutating origins, and only creates the high-integrity auto-update task from Program Files/Windows install roots.
 - 2026-06-29T16:04:04+02:00 [CODE] Store packages without an active assessment, and Store assessments with state `unknown`, are diagnostics/health states only; they must not populate the primary update queue. The Available cell renders a single unknown badge/placeholder rather than badge plus duplicate `Unknown` text.
 - 2026-06-29T15:53:10+02:00 [TOOL] Codex Security scan uses terminal/chat artifact workflow because dedicated setup continuation tools were not exposed; preflight passed with native `multi_agent_v1`, 6 usable worker slots, goal tools available, and scan id `131d62542c94_20260629T135310Z`.
@@ -192,6 +194,7 @@
 
 [DISCOVERIES]
 
+- 2026-06-29T23:45:00+02:00 [TOOL] Log export `2026-06-29_23-24-22_windows-updater-webui-logs.zip` predates the bulk worker progress change and has no dropped log entries; package progress appeared stuck because individual WinGet installers ran for minutes (`GoLang.Go` about 4m41s, `Hashicorp.Vagrant` about 14m12s, later large JetBrains/Maxon installers), so old UI progress could only advance at package boundaries.
 - 2026-06-29T22:14:16+02:00 [CODE] Root cause for corrupted `Updates Available` rows: wrapped WinGet table continuation lines could still split into at least three fields, so fragments like `E Deve`/`lopmen` were accepted as package ID/version evidence.
 - 2026-06-29T21:08:09+02:00 [TOOL] Log export `2026-06-29_19-50-28_windows-updater-webui-logs.zip` showed Windows Sound Recorder, Camera, and Calculator were installed, but `winget upgrade --source msstore` found no matching update and read-only targeted `store.exe update <PFN> --apply false` checks reported each app already up to date; the Microsoft Store UI was showing paused local queue entries, not exact actionable catalog offers.
 - 2026-06-28T17:18:03+02:00 [TOOL] Live read-only Store CLI evidence: `store.exe updates --apply false` reported `Updates available (1 found)` for `Codex` without PFN/Product ID, while `store.exe update OpenAI.Codex_2p2nqsd0c76g0 --apply false` reported the Codex update for the exact PFN.
@@ -239,6 +242,7 @@
 
 [OUTCOMES]
 
+- 2026-06-29T23:35:56+02:00 [TOOL] Bulk WinGet/Chocolatey one-UAC implementation validation passed: regression first failed with missing batch worker symbols, then `go test -count=1 ./internal/updater`, `go test -count=1 ./...`, `go vet ./...`, bundled Node `--check internal/updater/assets/ui.js`, `git diff --check` (CRLF warnings only), and `powershell -NoProfile -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1` passed. Rebuilt `dist\WindowsUpdaterWebUI.exe` SHA-256 `3c7e7c11649f28b09df07b4736e2cc6d11a46ab58897007bd39709593f0edac1`.
 - 2026-06-29T22:53:23+02:00 [TOOL] GitHub release descriptions for `v0.0.1`, `v0.1.0`, `v0.1.1`, and `v0.1.2` were refreshed after reviewing each tag's commit range. Tags, release names, target commits, and CI-built assets were unchanged; release bodies now include summaries, highlights/changes, assets where relevant, and commit-basis notes.
 - 2026-06-29T22:43:26+02:00 [TOOL] Action-cell spacing validation passed: focused UI static test, bundled Node `--check internal/updater/assets/ui.js`, focused browser row-height regression, `go test -count=1 ./internal/updater`, `go test -count=1 ./...`, `go vet ./...`, full browser `go test -tags uitestsupport -count=1 ./...`, `git diff --check` (CRLF warnings only), and `powershell -NoProfile -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1` passed. Rebuilt `dist\WindowsUpdaterWebUI.exe` SHA-256 `089cdb361a133e1ca39bfc3b7cc7ff52267f0005c8a5f45b2058a4d8e0c7b81b`.
 - 2026-06-29T22:38:26+02:00 [TOOL] Uniform package-row validation passed: focused UI static test, focused browser row-height regression `TestBrowserPackageRowsUseUniformHeight`, `go test -count=1 ./internal/updater`, `go test -count=1 ./...`, `go vet ./...`, full browser `go test -tags uitestsupport -count=1 ./...`, bundled Node `--check internal/updater/assets/ui.js`, `git diff --check` (CRLF warnings only), and `powershell -NoProfile -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1` passed. Rebuilt `dist\WindowsUpdaterWebUI.exe` SHA-256 `c3a0465307f635ce7512863a8dbb9e004bdb7a71382dfb41ad58f2aba73cda0f`.
