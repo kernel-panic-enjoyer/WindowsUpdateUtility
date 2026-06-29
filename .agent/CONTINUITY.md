@@ -123,6 +123,7 @@
 
 [PROGRESS]
 
+- 2026-06-29T22:14:16+02:00 [CODE] WinGet table parsing now rejects wrapped continuation fragments with invalid IDs/version cells and retries both simple and header-based splits before dropping a row; no regex was introduced.
 - 2026-06-29T21:08:09+02:00 [CODE] Store scan command summaries now run after `CommandResult` is finalized, so successful suppressed `store.exe updates --apply false` commands log the correct current/available/incomplete state.
 - 2026-06-29T17:28:25+02:00 [CODE] UI update-queue predicate names were clarified: generic `packageNeedsUpdateAttention`/`packageBulkUpdateable`/`packageAutoUpdateable` names were replaced with queue-membership, bulk-update, and auto-update-preference names; the unused fresh Store assessment helper was removed.
 - 2026-06-29T17:40:10+02:00 [CODE] Sub-agent read-only audit identified additional misleading names; applied low-risk renames for command-attempt merging, inventory state/capability projection, deterministic sorted-map value selection, non-PFN Store update-ID conflicts, effective manager mapping, and `updatable` user/test copy.
@@ -188,6 +189,7 @@
 
 [DISCOVERIES]
 
+- 2026-06-29T22:14:16+02:00 [CODE] Root cause for corrupted `Updates Available` rows: wrapped WinGet table continuation lines could still split into at least three fields, so fragments like `E Deve`/`lopmen` were accepted as package ID/version evidence.
 - 2026-06-29T21:08:09+02:00 [TOOL] Log export `2026-06-29_19-50-28_windows-updater-webui-logs.zip` showed Windows Sound Recorder, Camera, and Calculator were installed, but `winget upgrade --source msstore` found no matching update and read-only targeted `store.exe update <PFN> --apply false` checks reported each app already up to date; the Microsoft Store UI was showing paused local queue entries, not exact actionable catalog offers.
 - 2026-06-28T17:18:03+02:00 [TOOL] Live read-only Store CLI evidence: `store.exe updates --apply false` reported `Updates available (1 found)` for `Codex` without PFN/Product ID, while `store.exe update OpenAI.Codex_2p2nqsd0c76g0 --apply false` reported the Codex update for the exact PFN.
 - 2026-06-25T18:03:00+02:00 [CODE] Store scan command-volume root cause: default scans launched `store-cli-exact` concurrently with aggregate Store CLI/WinGet providers, so aggregate no-update coverage could not prevent per-family `store show` plus `store update --apply false`; source baseline was `2*N` exact commands for `N` product-like PFNs.
@@ -234,6 +236,7 @@
 
 [OUTCOMES]
 
+- 2026-06-29T22:14:16+02:00 [TOOL] WinGet parser validation passed: focused `TestParseWinget|TestMergeWinget`, `go test -count=1 ./internal/updater`, `go test -count=1 ./...`, `go vet ./...`, bundled Node `--check internal/updater/assets/ui.js`, `git diff --check`, and `powershell -NoProfile -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1`; rebuilt `dist\WindowsUpdaterWebUI.exe` SHA-256 `00c3e40a1280a9ce4d80e040922a60d64df6a0882e52698c69143d198077b4d9`.
 - 2026-06-29T22:00:54+02:00 [TOOL] Codex Security remediation validation passed: focused regressions for package search/action injection, WinGet truncation, Store Product ID binding, request Origin, and scheduled-task roots; `go test -count=1 ./internal/updater`, `go test -count=1 ./...`, `go vet ./...`, bundled Node `--check internal/updater/assets/ui.js`, `git diff --check` (CRLF warning only for edited Store fixture), and `powershell -NoProfile -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1` passed. Rebuilt `dist\WindowsUpdaterWebUI.exe` at 16,032,256 bytes with SHA-256 `08815f7998d4382d8db1acb5230916a56dce19d5b999fae351cd5772a975fe49`.
 - 2026-06-29T21:08:09+02:00 [TOOL] Store detection diagnostic validation passed: regression first reproduced the false incomplete Store summary, then focused regression, `go test -count=1 ./internal/updater`, `go test -count=1 ./...`, `go vet ./...`, bundled Node `--check internal/updater/assets/ui.js`, `git diff --check`, and `powershell -NoProfile -ExecutionPolicy Bypass -File .\dev\scripts\Build-Workspace.ps1` passed; rebuilt `dist\WindowsUpdaterWebUI.exe` SHA-256 `6111feeb3362c39653cd74f3c13e212816053d56911d8f4c22bf4c33a687767b`.
 - 2026-06-29T17:28:25+02:00 [TOOL] Maintainability naming pass validation passed: `go test -count=1 ./internal/updater`, bundled `node --check internal/updater/assets/ui.js`, `git diff --check`, and `dev/scripts/Build-Workspace.ps1` all succeeded. Rebuilt `dist\WindowsUpdaterWebUI.exe` SHA-256 `741d252a893f35b5dc99405e1d3dc15435f190b9abfd5a8449c4c3293652ff11`.
