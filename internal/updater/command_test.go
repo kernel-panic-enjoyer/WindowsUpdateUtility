@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -357,6 +358,50 @@ func TestStoreDetectionSummaryOmitsMarketingOutput(t *testing.T) {
 	}
 	if !strings.Contains(joined, "Store scan show") || !strings.Contains(joined, "OpenAI.Codex_2p2nqsd0c76g0") {
 		t.Fatalf("summary missing concise scan details: %q", joined)
+	}
+}
+
+func TestRunCommandContextLogsSuccessfulStoreNoUpdatesAsCurrent(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows command summary test")
+	}
+	oldLogs := sessionLogs
+	sessionLogs = &LogBuffer{}
+	defer func() { sessionLogs = oldLogs }()
+
+	bin := t.TempDir()
+	helperSource := filepath.Join(bin, "main.go")
+	if err := os.WriteFile(helperSource, []byte(`package main
+
+import "fmt"
+
+func main() {
+	fmt.Println("Checking for updates...")
+	fmt.Println()
+	fmt.Println("No updates found.")
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	storeExe := filepath.Join(bin, "store.exe")
+	build := exec.Command("go", "build", "-o", storeExe, helperSource)
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build fake store helper: %v\n%s", err, output)
+	}
+	if _, err := os.Stat(storeExe); err != nil {
+		t.Fatal(err)
+	}
+
+	result := runCommandContext(context.Background(), 5*time.Second, storeExe, "updates", "--apply", "false")
+	if !result.OK {
+		t.Fatalf("expected fake Store command to succeed, got %#v", result)
+	}
+	joined := joinLogMessages(sessionLogs.Snapshot())
+	if !strings.Contains(joined, "Store scan update-check summary") || !strings.Contains(joined, "state=current") {
+		t.Fatalf("successful no-updates summary should be current, got %q", joined)
+	}
+	if strings.Contains(joined, "state=incomplete") {
+		t.Fatalf("successful no-updates summary was logged as incomplete: %q", joined)
 	}
 }
 

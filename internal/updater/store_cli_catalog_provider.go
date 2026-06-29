@@ -961,16 +961,16 @@ func (provider storeCLIExactCatalogQueryProvider) QueryExact(ctx context.Context
 	}
 	if !strings.EqualFold(metadata.PFN, request.Identity.PackageFamilyName) {
 		result := CommandResult{Command: show.Command, Code: 2, Stderr: fmt.Sprintf("Store CLI show returned PFN %q for requested PFN %q", metadata.PFN, request.Identity.PackageFamilyName)}
-		return StoreExactCatalogResult{Authoritative: false, Diagnostics: sanitizeProviderDiagnostic(result.Stderr)}, mergeCommandResults(show, result, "Store CLI exact catalog identity check")
+		return StoreExactCatalogResult{Authoritative: false, Diagnostics: sanitizeProviderDiagnostic(result.Stderr)}, mergeCommandAttemptsWithFinalResult(show, result, "Store CLI exact catalog identity check")
 	}
 	if request.ProductID != "" && !strings.EqualFold(metadata.ProductID, request.ProductID) {
 		result := CommandResult{Command: show.Command, Code: 2, Stderr: fmt.Sprintf("Store CLI show returned Product ID %q for requested Product ID %q", metadata.ProductID, request.ProductID)}
-		return StoreExactCatalogResult{Authoritative: false, Diagnostics: sanitizeProviderDiagnostic(result.Stderr)}, mergeCommandResults(show, result, "Store CLI exact catalog identity check")
+		return StoreExactCatalogResult{Authoritative: false, Diagnostics: sanitizeProviderDiagnostic(result.Stderr)}, mergeCommandAttemptsWithFinalResult(show, result, "Store CLI exact catalog identity check")
 	}
 
 	update := runner.run(ctx, storeCLIExactProviderTimeout, storeUpdateCommand(request.Identity.PackageFamilyName, false)...)
 	state, err := parseStoreCLIUpdateCheckResult(ctx, update.Stdout+"\n"+update.Stderr, update)
-	update = mergeCommandResults(show, update, "Store CLI exact catalog state check")
+	update = mergeCommandAttemptsWithFinalResult(show, update, "Store CLI exact catalog state check")
 	if err != nil {
 		update.OK = false
 		if update.Code == 0 {

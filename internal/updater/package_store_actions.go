@@ -35,7 +35,7 @@ func runStoreInstallWithFallbackContext(ctx context.Context, id string) CommandR
 		}
 		appLog("Store install for %q failed; trying winget msstore fallback.", id)
 		fallback := runPackageActionCommand(ctx, managerWinget, packageActionTimeout, wingetInstallCommand(managerStore, id, false)...)
-		return mergeCommandResults(result, fallback, "winget msstore fallback")
+		return mergeCommandAttemptsWithFinalResult(result, fallback, "winget msstore fallback")
 	}
 	if packageActionManagerAvailable(managerWinget) {
 		return runPackageActionCommand(ctx, managerWinget, packageActionTimeout, wingetInstallCommand(managerStore, id, false)...)
@@ -52,7 +52,7 @@ func runStoreUpdateCommandWithApplyFallback(ctx context.Context, target string) 
 	appLog("Store update command rejected --apply; retrying without that option.")
 	retry := runPackageActionCommand(ctx, managerStore, packageActionTimeout, storeUpdateWithoutApplyCommand(target)...)
 	retry = normalizeStoreUpdateCommandResult(retry)
-	return mergeCommandResults(result, retry, "store update without apply flag")
+	return mergeCommandAttemptsWithFinalResult(result, retry, "store update without apply flag")
 }
 
 func normalizeStoreUpdateCommandResult(result CommandResult) CommandResult {

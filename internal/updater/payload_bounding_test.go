@@ -164,11 +164,11 @@ func TestTerminalJobsCompactPackagesAndCommandOutput(t *testing.T) {
 	}
 }
 
-func TestMergeCommandResultsAppliesFinalOutputCap(t *testing.T) {
+func TestMergeCommandAttemptsWithFinalResultAppliesFinalOutputCap(t *testing.T) {
 	huge := strings.Repeat("output-", commandResultStreamLimitBytes*3)
 	primary := CommandResult{Command: strings.Repeat("primary ", maxCommandResultCommandBytes), Stdout: huge, Stderr: huge}
 	fallback := CommandResult{Command: strings.Repeat("fallback ", maxCommandResultCommandBytes), Stdout: huge, Stderr: huge}
-	merged := mergeCommandResults(primary, fallback, "retry")
+	merged := mergeCommandAttemptsWithFinalResult(primary, fallback, "retry")
 	if len(merged.Stdout) > commandResultStreamLimitBytes+128 || len(merged.Stderr) > commandResultStreamLimitBytes+128 || len(merged.Command) > maxCommandResultCommandBytes+128 {
 		t.Fatalf("merged result exceeded caps: command=%d stdout=%d stderr=%d", len(merged.Command), len(merged.Stdout), len(merged.Stderr))
 	}

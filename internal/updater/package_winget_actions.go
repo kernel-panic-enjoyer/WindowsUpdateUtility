@@ -84,7 +84,7 @@ func runWingetUpgradePackageWithInstallFallbackContext(ctx context.Context, mana
 	}
 	appLog("Winget update targets for %s missed; trying exact package name %q.", updateJobPackageName(pkg), name)
 	nameResult := runWingetUpgradeNameWithInstallFallbackContext(ctx, manager, name, pkg.AllowUnknownVersionUpdate, pkg.AllowPinnedUpdate)
-	return mergeCommandResults(result, nameResult, "winget name fallback")
+	return mergeCommandAttemptsWithFinalResult(result, nameResult, "winget name fallback")
 }
 
 func runWingetUpgradeTargetWithInstallFallbackContext(ctx context.Context, manager, id string, allowUnknownVersion bool, allowPinned bool) CommandResult {
@@ -137,7 +137,7 @@ func runWingetUpgradeAttemptWithFallbacks(ctx context.Context, attempt wingetUpg
 		}
 		appLog("Winget upgrade for %s reported an unknown installed version; retrying with --include-unknown.", attempt.Description)
 		retry := runPackageActionCommand(ctx, managerWinget, packageActionTimeout, attempt.UpgradeCommand("--include-unknown")...)
-		result = mergeCommandResults(result, retry, attempt.UnknownVersionRetryLabel)
+		result = mergeCommandAttemptsWithFinalResult(result, retry, attempt.UnknownVersionRetryLabel)
 		if retry.OK || ctx.Err() != nil {
 			return result
 		}
@@ -151,7 +151,7 @@ func runWingetUpgradeAttemptWithFallbacks(ctx context.Context, attempt wingetUpg
 		}
 		appLog("Winget upgrade for %s reported a pinned package; retrying with --include-pinned.", attempt.Description)
 		retry := runPackageActionCommand(ctx, managerWinget, packageActionTimeout, attempt.UpgradeCommand("--include-pinned")...)
-		result = mergeCommandResults(result, retry, attempt.PinnedRetryLabel)
+		result = mergeCommandAttemptsWithFinalResult(result, retry, attempt.PinnedRetryLabel)
 		if retry.OK || ctx.Err() != nil {
 			return result
 		}
@@ -162,7 +162,7 @@ func runWingetUpgradeAttemptWithFallbacks(ctx context.Context, attempt wingetUpg
 		}
 		appLog("Winget upgrade for %s reported no applicable upgrade; trying forced install fallback.", attempt.Description)
 		fallback := runPackageActionCommand(ctx, managerWinget, packageActionTimeout, attempt.ForcedInstallCommand()...)
-		return mergeCommandResults(result, fallback, attempt.ForcedInstallLabel)
+		return mergeCommandAttemptsWithFinalResult(result, fallback, attempt.ForcedInstallLabel)
 	}
 	return result
 }

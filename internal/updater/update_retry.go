@@ -29,14 +29,14 @@ func (app *App) updatePackageWithInventoryRetry(ctx context.Context, pkg Package
 			Command: "inventory refresh",
 			Stdout:  "Inventory refresh no longer reports an available update for " + updateJobPackageName(pkg) + ".",
 		}
-		return mergeCommandResults(result, noUpdate, "fresh inventory no-update")
+		return mergeCommandAttemptsWithFinalResult(result, noUpdate, "fresh inventory no-update")
 	}
 	if samePackageUpdateTarget(pkg, fresh) {
 		return result
 	}
 	appLog("Update target for %q failed; refreshed inventory found %q. Retrying once with fresh metadata.", updateJobPackageName(pkg), updateJobPackageName(fresh))
 	retry := updatePackageRunner(ctx, fresh)
-	return mergeCommandResults(result, retry, "fresh inventory retry")
+	return mergeCommandAttemptsWithFinalResult(result, retry, "fresh inventory retry")
 }
 
 func findPackageForUpdateRetry(packages []Package, original Package) (Package, bool) {

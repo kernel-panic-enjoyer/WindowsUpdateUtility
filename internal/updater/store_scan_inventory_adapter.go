@@ -79,7 +79,7 @@ func applyPublishedStoreScanAssessments(ctx context.Context, state State, invent
 }
 
 func loadLatestPublishedStoreProjection(ctx context.Context, state State, inventory Inventory, freshAfter time.Time) StoreInventoryProjectionResult {
-	inventory = applyInventoryState(state, inventory.DeepCopy())
+	inventory = applyStateAndCapabilitiesToInventory(state, inventory.DeepCopy())
 	result := StoreInventoryProjectionResult{Inventory: inventory}
 	repository, openErr := openStoreTransactionalStoreForInventory()
 	if openErr != nil {

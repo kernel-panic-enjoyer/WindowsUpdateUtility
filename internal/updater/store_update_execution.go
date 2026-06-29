@@ -175,7 +175,7 @@ func (executor StoreExactUpdateExecutor) ExecuteWithCallbacks(ctx context.Contex
 		callbacks.Verifying(request)
 	}
 	verification := executor.verifyAcceptedActionWithEvents(verifyCtx, request, pre, pollEvery, actionStartedAt, subscription)
-	merged := mergeCommandResults(action, verification.Result, "Store post-action verification")
+	merged := mergeCommandAttemptsWithFinalResult(action, verification.Result, "Store post-action verification")
 	merged = appendStoreExecutionDiagnostic(merged, "post-action", verification.Post, verification.PostResult)
 	if verification.Verified {
 		merged.OK = true
@@ -226,7 +226,7 @@ func (executor StoreExactUpdateExecutor) verifyAcceptedAction(ctx context.Contex
 func (executor StoreExactUpdateExecutor) verifyAcceptedActionWithEvents(ctx context.Context, request StoreExactUpdateRequest, pre StoreExactPackageSnapshot, pollEvery time.Duration, actionStartedAt time.Time, subscription storePackageEventSubscription) storeExactVerificationResult {
 	result := CommandResult{OK: true, Command: "store exact post-action verification"}
 	if subscription.err != nil {
-		result = mergeCommandResults(result, CommandResult{Command: "PackageCatalog event subscription", Code: 1, Stderr: sanitizeProviderDiagnostic(subscription.err.Error())}, "PackageCatalog events unavailable")
+		result = mergeCommandAttemptsWithFinalResult(result, CommandResult{Command: "PackageCatalog event subscription", Code: 1, Stderr: sanitizeProviderDiagnostic(subscription.err.Error())}, "PackageCatalog events unavailable")
 	}
 	ticker := time.NewTicker(pollEvery)
 	defer ticker.Stop()
@@ -238,7 +238,7 @@ func (executor StoreExactUpdateExecutor) verifyAcceptedActionWithEvents(ctx cont
 			return storeExactVerificationResult{Verified: true, Message: message, Result: result, Post: post, PostResult: postResult}
 		}
 		catalog, catalogResult := executor.Catalog.QueryExact(ctx, request)
-		result = mergeCommandResults(result, catalogResult, "targeted Store catalog query")
+		result = mergeCommandAttemptsWithFinalResult(result, catalogResult, "targeted Store catalog query")
 		if storeCatalogVerifiesUpdate(request, pre, catalog, post) {
 			return storeExactVerificationResult{Verified: true, Message: "Store update verified because the exact offer disappeared after a fresh targeted catalog query.", Result: result, Post: post, PostResult: postResult}
 		}
@@ -585,7 +585,7 @@ func (storeProductIDFirstExactUpdateRunner) RunStoreUpdate(ctx context.Context, 
 	}
 	appLog("WinGet msstore exact Product ID target %q was not accepted; trying Store CLI exact targets.", productID)
 	storeResult := storeCLIExactUpdateRunner{}.RunStoreUpdate(ctx, request)
-	return mergeCommandResults(wingetResult, storeResult, "Store CLI exact target fallback")
+	return mergeCommandAttemptsWithFinalResult(wingetResult, storeResult, "Store CLI exact target fallback")
 }
 
 func exactStoreUpdateRequestTargets(request StoreExactUpdateRequest) []string {
@@ -618,7 +618,7 @@ func (provider storeProductIDFirstExactCatalogQueryProvider) QueryExact(ctx cont
 		return wingetCatalog, wingetResult
 	}
 	storeCatalog, storeResult := storeProvider.QueryExact(ctx, request)
-	merged := mergeCommandResults(wingetResult, storeResult, "Store CLI exact catalog fallback")
+	merged := mergeCommandAttemptsWithFinalResult(wingetResult, storeResult, "Store CLI exact catalog fallback")
 	if storeCatalog.Authoritative {
 		return storeCatalog, merged
 	}

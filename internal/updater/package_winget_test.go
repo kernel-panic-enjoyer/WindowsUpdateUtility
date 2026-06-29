@@ -106,7 +106,7 @@ Microsoft Visual C++ 2010  x64 Redistributable - 10.0.40219  Microsoft.VCRedist.
 		updates:       map[string]string{},
 		updateDetails: map[string]Package{},
 	}
-	got := packagesFromManagerInventory(State{}, map[string]ManagerStatus{managerWinget: {Available: true}}, inventory)
+	got := packagesFromManagerInventory(State{}, inventory)
 	if len(got) != 1 {
 		t.Fatalf("expected 1 package, got %d: %#v", len(got), got)
 	}

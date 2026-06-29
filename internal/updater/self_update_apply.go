@@ -39,7 +39,7 @@ func validateSelfUpdateApplyRequest(request selfUpdateApplyRequest) error {
 	return nil
 }
 
-func applySelfUpdateFiles(request selfUpdateApplyRequest) error {
+func replaceExecutableForSelfUpdate(request selfUpdateApplyRequest) error {
 	if err := validateSelfUpdateApplyRequest(request); err != nil {
 		return err
 	}
@@ -76,7 +76,7 @@ func applySelfUpdateFiles(request selfUpdateApplyRequest) error {
 	if err := os.Chmod(tempPath, 0o755); err != nil {
 		return err
 	}
-	if err := replaceStateFile(tempPath, request.TargetPath, request.TargetPath+".bak"); err != nil {
+	if err := replaceFileKeepingBackup(tempPath, request.TargetPath, request.TargetPath+".bak"); err != nil {
 		return err
 	}
 	cleanup = false

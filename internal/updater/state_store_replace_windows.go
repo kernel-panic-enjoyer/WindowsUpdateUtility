@@ -15,7 +15,7 @@ const replaceFileWriteThrough = 0x00000001
 
 var procReplaceFileW = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReplaceFileW")
 
-func replaceStateFile(tempPath, targetPath, backupPath string) error {
+func replaceFileKeepingBackup(tempPath, targetPath, backupPath string) error {
 	tempPtr, err := windows.UTF16PtrFromString(tempPath)
 	if err != nil {
 		return err

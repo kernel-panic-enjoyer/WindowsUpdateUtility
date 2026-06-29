@@ -159,7 +159,7 @@ func TestStateStoreFailureBeforeReplacementLeavesOriginal(t *testing.T) {
 	if err := saveStateToStore(t, store, original); err != nil {
 		t.Fatal(err)
 	}
-	store.replace = func(tempPath, targetPath, backupPath string) error {
+	store.replaceFile = func(tempPath, targetPath, backupPath string) error {
 		return errors.New("before replace failure")
 	}
 	if _, err := setThemePreferenceWithStore(context.Background(), store, "light"); err == nil {
@@ -178,7 +178,7 @@ func TestStateStoreFailureDuringReplacementLeavesOriginalOrBackup(t *testing.T) 
 	if err := saveStateToStore(t, store, original); err != nil {
 		t.Fatal(err)
 	}
-	store.replace = func(tempPath, targetPath, backupPath string) error {
+	store.replaceFile = func(tempPath, targetPath, backupPath string) error {
 		data, readErr := os.ReadFile(targetPath)
 		if readErr != nil {
 			return readErr

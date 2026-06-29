@@ -130,7 +130,7 @@ func openStoreScanFileRepository(root string) (*StoreScanFileRepository, error) 
 		retention:   storeScanRetentionRunsUser,
 		mu:          lockAny.(*sync.Mutex),
 		readFile:    os.ReadFile,
-		replaceFile: func(tempPath, targetPath string) error { return replaceStateFile(tempPath, targetPath, "") },
+		replaceFile: func(tempPath, targetPath string) error { return replaceFileKeepingBackup(tempPath, targetPath, "") },
 	}, nil
 }
 
@@ -163,7 +163,7 @@ func (repo *StoreScanFileRepository) PersistCompletedScanSnapshot(ctx context.Co
 	defer repo.mu.Unlock()
 
 	_ = repo.migrateOldLayoutLocked(ctx, snapshot.Scan.UserSID)
-	existing, err := repo.validSnapshotsLocked(ctx, snapshot.Scan.UserSID)
+	existing, err := repo.loadUsableSnapshotsLocked(ctx, snapshot.Scan.UserSID)
 	if err != nil {
 		return false, err
 	}
@@ -239,7 +239,7 @@ func (repo *StoreScanFileRepository) LoadPreviousSnapshot(ctx context.Context, u
 	}
 	repo.mu.Lock()
 	defer repo.mu.Unlock()
-	snapshots, err := repo.validSnapshotsLocked(ctx, userSID)
+	snapshots, err := repo.loadUsableSnapshotsLocked(ctx, userSID)
 	if err != nil {
 		return StoreScanSnapshot{}, false, err
 	}
@@ -324,7 +324,7 @@ func (repo *StoreScanFileRepository) loadLatestPublishedSnapshotLocked(ctx conte
 }
 
 func (repo *StoreScanFileRepository) recoverLatestPublishedSnapshotLocked(ctx context.Context, userSID string) (StoreScanSnapshot, bool, error) {
-	snapshots, err := repo.validSnapshotsLocked(ctx, userSID)
+	snapshots, err := repo.loadUsableSnapshotsLocked(ctx, userSID)
 	if err != nil {
 		return StoreScanSnapshot{}, false, err
 	}
@@ -401,7 +401,7 @@ func (repo *StoreScanFileRepository) readPointedGeneration(ctx context.Context, 
 	return snapshot, nil
 }
 
-func (repo *StoreScanFileRepository) validSnapshotsLocked(ctx context.Context, userSID string) ([]StoreScanSnapshot, error) {
+func (repo *StoreScanFileRepository) loadUsableSnapshotsLocked(ctx context.Context, userSID string) ([]StoreScanSnapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -659,7 +659,7 @@ func (repo *StoreScanFileRepository) pruneLocked(ctx context.Context, userSID st
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	snapshots, err := repo.validSnapshotsLocked(ctx, userSID)
+	snapshots, err := repo.loadUsableSnapshotsLocked(ctx, userSID)
 	if err != nil {
 		return err
 	}
@@ -743,7 +743,7 @@ func (repo *StoreScanFileRepository) replaceFileFunc() func(string, string) erro
 	if repo != nil && repo.replaceFile != nil {
 		return repo.replaceFile
 	}
-	return func(tempPath, targetPath string) error { return replaceStateFile(tempPath, targetPath, "") }
+	return func(tempPath, targetPath string) error { return replaceFileKeepingBackup(tempPath, targetPath, "") }
 }
 
 func (repo *StoreScanFileRepository) snapshotMaxBytes() int64 {

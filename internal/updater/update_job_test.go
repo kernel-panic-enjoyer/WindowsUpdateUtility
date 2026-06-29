@@ -183,7 +183,7 @@ func TestUpdateJobBulkIncludesUnknownVersionWithGlobalOption(t *testing.T) {
 		t.Fatal(err)
 	}
 	if mode != updateJobModeAll || len(packages) != 3 {
-		t.Fatalf("expected all updateable packages including unknown version, mode=%q packages=%#v", mode, packages)
+		t.Fatalf("expected all updatable packages including unknown version, mode=%q packages=%#v", mode, packages)
 	}
 	if packages[2].Key != "winget:Vendor.Unknown" || !packages[2].AllowUnknownVersionUpdate {
 		t.Fatalf("expected unknown package with global option applied, got %#v", packages)

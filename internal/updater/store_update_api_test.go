@@ -222,7 +222,7 @@ func TestStoreAssessmentBrowserSmokeStrings(t *testing.T) {
 	surface := uiJS + "\n" + uiCSS
 	for _, expected := range []string{
 		"storeUpdateState",
-		`return storeUpdateState(pkg) === "available" && !pkg.stale;`,
+		`if(pkg.stale){ return false; }`,
 		"return !!pkg.can_update_now;",
 		"Stale evidence",
 		`? "Stale"`,
@@ -254,13 +254,13 @@ func TestStoreAssessmentBrowserSmokeStrings(t *testing.T) {
 }
 
 func TestStoreStaleEvidenceHiddenFromPrimaryUpdateQueueAssets(t *testing.T) {
-	start := strings.Index(uiJS, "function packageNeedsUpdateAttentionBase(pkg){")
+	start := strings.Index(uiJS, "function packageShouldAppearInUpdateQueueBeforeSessionSuppression(pkg){")
 	if start < 0 {
-		t.Fatal("packageNeedsUpdateAttentionBase function not found")
+		t.Fatal("packageShouldAppearInUpdateQueueBeforeSessionSuppression function not found")
 	}
-	end := strings.Index(uiJS[start:], "\n  function packageSuppressedByCompletedUpdate")
+	end := strings.Index(uiJS[start:], "\n  function packageHiddenAfterSuccessfulUpdate")
 	if end < 0 {
-		t.Fatal("packageNeedsUpdateAttentionBase function end not found")
+		t.Fatal("packageShouldAppearInUpdateQueueBeforeSessionSuppression function end not found")
 	}
 	body := uiJS[start : start+end]
 	for _, expected := range []string{
@@ -269,7 +269,7 @@ func TestStoreStaleEvidenceHiddenFromPrimaryUpdateQueueAssets(t *testing.T) {
 		`return !!pkg.can_update_now || state === "conflict" || state === "pending";`,
 	} {
 		if !strings.Contains(body, expected) {
-			t.Fatalf("packageNeedsUpdateAttentionBase should contain %q; body:\n%s", expected, body)
+			t.Fatalf("packageShouldAppearInUpdateQueueBeforeSessionSuppression should contain %q; body:\n%s", expected, body)
 		}
 	}
 	if strings.Contains(body, "|| !!pkg.stale") {

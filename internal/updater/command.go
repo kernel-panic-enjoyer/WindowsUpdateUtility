@@ -133,13 +133,17 @@ func runCommandContext(parent context.Context, timeout time.Duration, args ...st
 
 	result.Stdout = stdout.String()
 	result.Stderr = stderr.String()
-	if suppressDetectionOutput {
+	logSuppressedDetectionSummary := func() {
+		if !suppressDetectionOutput {
+			return
+		}
 		logStoreDetectionCommandSummary(ctx, args, result, categories, time.Since(startedAt))
 	}
 	if ctx.Err() == context.DeadlineExceeded {
 		result.Code = 124
 		result.Stderr += "\nTimed out."
 		logCommand("stderr", "Timed out.")
+		logSuppressedDetectionSummary()
 		logCommand("exit", fmt.Sprintf("%s exited with code 124", result.Command))
 		return result
 	}
@@ -147,6 +151,7 @@ func runCommandContext(parent context.Context, timeout time.Duration, args ...st
 		result.Code = commandCancelledCode
 		result.Stderr += "\nCancelled."
 		logCommand("stderr", "Cancelled.")
+		logSuppressedDetectionSummary()
 		logCommand("exit", fmt.Sprintf("%s cancelled with code %d", result.Command, result.Code))
 		return result
 	}
@@ -159,10 +164,12 @@ func runCommandContext(parent context.Context, timeout time.Duration, args ...st
 				result.Stderr = err.Error()
 			}
 		}
+		logSuppressedDetectionSummary()
 		logCommand("exit", fmt.Sprintf("%s exited with code %d", result.Command, result.Code))
 		return result
 	}
 	result.OK = true
+	logSuppressedDetectionSummary()
 	logCommand("exit", fmt.Sprintf("%s exited with code 0", result.Command))
 	return result
 }

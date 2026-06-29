@@ -658,11 +658,11 @@ func TestWingetNoApplicableUpgradeUsesFallbackDetection(t *testing.T) {
 	}
 }
 
-func TestMergeCommandResultsKeepsPrimaryFailureContext(t *testing.T) {
+func TestMergeCommandAttemptsWithFinalResultKeepsPrimaryFailureContext(t *testing.T) {
 	primary := CommandResult{Code: 1, Command: "winget upgrade", Stdout: "No applicable upgrade found.", Stderr: "primary stderr"}
 	fallback := CommandResult{OK: true, Code: 0, Command: "winget install --force", Stdout: "Successfully installed", Stderr: ""}
 
-	merged := mergeCommandResults(primary, fallback, "fallback")
+	merged := mergeCommandAttemptsWithFinalResult(primary, fallback, "fallback")
 
 	if !merged.OK || merged.Code != 0 {
 		t.Fatalf("expected fallback success to win, got %#v", merged)

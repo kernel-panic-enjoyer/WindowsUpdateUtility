@@ -164,7 +164,7 @@ func TestApplySelfUpdateCopiesExecutableAndKeepsBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256([]byte("new"))
-	err := applySelfUpdateFiles(selfUpdateApplyRequest{
+	err := replaceExecutableForSelfUpdate(selfUpdateApplyRequest{
 		SourcePath:     source,
 		TargetPath:     target,
 		ExpectedSHA256: hex.EncodeToString(sum[:]),

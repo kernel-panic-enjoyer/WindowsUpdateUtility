@@ -331,11 +331,11 @@ func (app *App) effectiveInventoryCacheSnapshot(ctx context.Context) (inventoryC
 }
 
 func effectiveInventoryFromBase(ctx context.Context, state State, inventory Inventory) Inventory {
-	inventory = applyInventoryState(state, inventory.DeepCopy())
+	inventory = applyStateAndCapabilitiesToInventory(state, inventory.DeepCopy())
 	return applyPublishedStoreScanAssessments(ctx, state, inventory)
 }
 
-func applyInventoryState(state State, inventory Inventory) Inventory {
+func applyStateAndCapabilitiesToInventory(state State, inventory Inventory) Inventory {
 	for index := range inventory.Packages {
 		inventory.Packages[index].AutoUpdate = packageAutoUpdateEnabled(state, inventory.Packages[index])
 		inventory.Packages[index] = applyPackageCapabilities(inventory.Packages[index])

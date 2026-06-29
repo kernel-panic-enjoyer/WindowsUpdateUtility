@@ -1102,7 +1102,7 @@ func TestStoreScanPublishesVerifiedProductIDForAuthoritativeNegative(t *testing.
 		t.Fatalf("verified Product ID should be published for current assessment: %#v", got)
 	}
 	if got.ExactActionTargetAvailable {
-		t.Fatalf("current assessment must not become updateable just because Product ID is known: %#v", got)
+		t.Fatalf("current assessment must not become updatable just because Product ID is known: %#v", got)
 	}
 	persistedSnapshot, ok, err := store.LoadLatestPublishedSnapshot(context.Background(), userSID)
 	if err != nil || !ok {
@@ -1152,7 +1152,7 @@ func TestStoreScanPublishesVerifiedProductIDForUnknownIncompleteAssessment(t *te
 		t.Fatalf("verified Product ID should be published for unknown assessment: %#v", got)
 	}
 	if got.ExactActionTargetAvailable {
-		t.Fatalf("unknown assessment must not become updateable just because Product ID is known: %#v", got)
+		t.Fatalf("unknown assessment must not become updatable just because Product ID is known: %#v", got)
 	}
 }
 

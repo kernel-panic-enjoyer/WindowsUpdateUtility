@@ -25,15 +25,15 @@ func setThemePreferenceWithStore(ctx context.Context, store StateStore, theme st
 	})
 }
 
-func setAppUpdatePromptDismissedVersion(version string) (State, error) {
+func setAppUpdatePromptSuppressedVersion(version string) (State, error) {
 	store, err := defaultStateStore()
 	if err != nil {
 		return State{}, err
 	}
-	return setAppUpdatePromptDismissedVersionWithStore(context.Background(), store, version)
+	return setAppUpdatePromptSuppressedVersionWithStore(context.Background(), store, version)
 }
 
-func setAppUpdatePromptDismissedVersionWithStore(ctx context.Context, store StateStore, version string) (State, error) {
+func setAppUpdatePromptSuppressedVersionWithStore(ctx context.Context, store StateStore, version string) (State, error) {
 	version = strings.TrimSpace(version)
 	return store.Update(ctx, func(state *State) error {
 		state.AppUpdatePromptDismissedVersion = version
@@ -168,7 +168,7 @@ func (app *App) handleAppUpdatePromptSettingsAPI(w http.ResponseWriter, r *http.
 		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	state, err := setAppUpdatePromptDismissedVersion(version)
+	state, err := setAppUpdatePromptSuppressedVersion(version)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return

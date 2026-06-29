@@ -106,8 +106,8 @@ type StateStore interface {
 }
 
 type FileStateStore struct {
-	dir     string
-	replace func(tempPath, targetPath, backupPath string) error
+	dir         string
+	replaceFile func(tempPath, targetPath, backupPath string) error
 }
 
 var statePathLocks sync.Map
@@ -121,7 +121,7 @@ func defaultStateStore() (StateStore, error) {
 }
 
 func NewFileStateStore(dir string) *FileStateStore {
-	return &FileStateStore{dir: dir, replace: replaceStateFile}
+	return &FileStateStore{dir: dir, replaceFile: replaceFileKeepingBackup}
 }
 
 func (store *FileStateStore) Load(ctx context.Context) (State, error) {
@@ -268,7 +268,7 @@ func normalizeState(state *State, legacyAssessments map[string]legacyAssessmentC
 	if state.AutoUpdatePackages == nil {
 		state.AutoUpdatePackages = map[string]bool{}
 	}
-	normalizeAutoUpdatePackageKeys(state, legacyAssessments)
+	migrateAndNormalizeAutoUpdatePackageKeys(state, legacyAssessments)
 	if state.RegistryApps == nil {
 		state.RegistryApps = map[string]ScannedApp{}
 	}
@@ -338,9 +338,9 @@ func (store *FileStateStore) writeBytesLocked(ctx context.Context, dir string, d
 	if err := temp.Close(); err != nil {
 		return err
 	}
-	replacer := replaceStateFile
-	if store != nil && store.replace != nil {
-		replacer = store.replace
+	replacer := replaceFileKeepingBackup
+	if store != nil && store.replaceFile != nil {
+		replacer = store.replaceFile
 	}
 	backupPath := ""
 	if backupName != "" {

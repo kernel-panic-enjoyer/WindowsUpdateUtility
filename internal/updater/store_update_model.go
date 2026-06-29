@@ -399,7 +399,7 @@ func reconcilePositiveStoreTargets(identity StoreInstalledIdentity, positives []
 	if len(productIDs) > 1 {
 		return positiveStoreTargetConsensus{}, storeTargetConflictError("product_id", descriptors)
 	}
-	if incompatibleUpdateIDConflict(identity.PackageFamilyName, updateIDs) {
+	if hasConflictingNonPFNUpdateIDs(identity.PackageFamilyName, updateIDs) {
 		return positiveStoreTargetConsensus{}, storeTargetConflictError("update_id", descriptors)
 	}
 	if len(knownVersions) > 1 {
@@ -407,14 +407,14 @@ func reconcilePositiveStoreTargets(identity StoreInstalledIdentity, positives []
 	}
 	canonical := descriptors[0]
 	target := *canonical.Observation.Target
-	target.ProductID = firstMapValue(productIDs)
+	target.ProductID = firstValueBySortedKey(productIDs)
 	target.UpdateID = preferredUpdateID(identity.PackageFamilyName, updateIDs)
 	target.Provider = canonical.Observation.Target.Provider
 	target.VerifiedBy = canonical.VerificationBy
 	target.VerifiedAt = canonical.VerifiedAt
 	return positiveStoreTargetConsensus{
 		Target:           &target,
-		AvailableVersion: firstMapValue(knownVersions),
+		AvailableVersion: firstValueBySortedKey(knownVersions),
 		Observation:      canonical.Observation,
 	}, nil
 }
@@ -429,7 +429,7 @@ func positiveStoreTargetSortKey(descriptor positiveStoreTargetDescriptor) string
 	}, "|"))
 }
 
-func incompatibleUpdateIDConflict(pfn string, updateIDs map[string]string) bool {
+func hasConflictingNonPFNUpdateIDs(pfn string, updateIDs map[string]string) bool {
 	if len(updateIDs) <= 1 {
 		return false
 	}
@@ -453,10 +453,10 @@ func preferredUpdateID(pfn string, updateIDs map[string]string) string {
 	if value, ok := updateIDs[strings.ToLower(strings.TrimSpace(pfn))]; ok {
 		return value
 	}
-	return firstMapValue(updateIDs)
+	return firstValueBySortedKey(updateIDs)
 }
 
-func firstMapValue(values map[string]string) string {
+func firstValueBySortedKey(values map[string]string) string {
 	if len(values) == 0 {
 		return ""
 	}

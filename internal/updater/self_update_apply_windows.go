@@ -45,7 +45,7 @@ func runSelfUpdateApply(request selfUpdateApplyRequest) error {
 			return err
 		}
 	}
-	if err := applySelfUpdateFiles(request); err != nil {
+	if err := replaceExecutableForSelfUpdate(request); err != nil {
 		if !request.Elevated && isSelfUpdatePermissionError(err) {
 			return relaunchSelfUpdateApplyElevated(request)
 		}

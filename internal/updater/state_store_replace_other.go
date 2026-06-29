@@ -7,7 +7,7 @@ import (
 	"os"
 )
 
-func replaceStateFile(tempPath, targetPath, backupPath string) error {
+func replaceFileKeepingBackup(tempPath, targetPath, backupPath string) error {
 	if backupPath != "" {
 		if data, err := os.ReadFile(targetPath); err == nil {
 			if writeErr := os.WriteFile(backupPath, data, 0o644); writeErr != nil {

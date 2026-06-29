@@ -2,18 +2,18 @@ package updater
 
 import "strings"
 
-func mergeCommandResults(primary, fallback CommandResult, label string) CommandResult {
-	merged := fallback
-	merged.Command = primary.Command + "\n" + label + ": " + fallback.Command
-	merged.Stdout = strings.TrimRight(primary.Stdout, "\r\n")
-	if merged.Stdout != "" && fallback.Stdout != "" {
+func mergeCommandAttemptsWithFinalResult(priorAttempt, finalAttempt CommandResult, label string) CommandResult {
+	merged := finalAttempt
+	merged.Command = priorAttempt.Command + "\n" + label + ": " + finalAttempt.Command
+	merged.Stdout = strings.TrimRight(priorAttempt.Stdout, "\r\n")
+	if merged.Stdout != "" && finalAttempt.Stdout != "" {
 		merged.Stdout += "\n"
 	}
-	merged.Stdout += fallback.Stdout
-	merged.Stderr = strings.TrimRight(primary.Stderr, "\r\n")
-	if merged.Stderr != "" && fallback.Stderr != "" {
+	merged.Stdout += finalAttempt.Stdout
+	merged.Stderr = strings.TrimRight(priorAttempt.Stderr, "\r\n")
+	if merged.Stderr != "" && finalAttempt.Stderr != "" {
 		merged.Stderr += "\n"
 	}
-	merged.Stderr += fallback.Stderr
+	merged.Stderr += finalAttempt.Stderr
 	return compactCommandResult(merged, commandResultStreamLimitBytes, maxCommandResultCommandBytes)
 }

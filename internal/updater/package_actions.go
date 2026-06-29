@@ -136,7 +136,7 @@ func runPackageActionCommand(ctx context.Context, manager string, timeout time.D
 	if manager == managerWinget && isWingetSourceFailure(result) {
 		appLog("Winget command failed because source metadata looked stale or unavailable; updating sources before retry.")
 		repair := runNormalizedPackageAction(ctx, managerWinget, managerDetectionTimeout, wingetSourceUpdateCommand()...)
-		merged := mergeCommandResults(result, repair, "winget source update")
+		merged := mergeCommandAttemptsWithFinalResult(result, repair, "winget source update")
 		if ctx.Err() != nil {
 			return merged
 		}
@@ -146,16 +146,16 @@ func runPackageActionCommand(ctx context.Context, manager string, timeout time.D
 			}
 			appLog("Winget source update failed with source metadata errors; resetting sources before retry.")
 			reset := runNormalizedPackageAction(ctx, managerWinget, managerDetectionTimeout, wingetSourceResetCommand()...)
-			merged = mergeCommandResults(merged, reset, "winget source reset")
+			merged = mergeCommandAttemptsWithFinalResult(merged, reset, "winget source reset")
 			if ctx.Err() != nil || !reset.OK {
 				return merged
 			}
 			retry := runNormalizedPackageAction(ctx, manager, timeout, args...)
-			result = mergeCommandResults(merged, retry, "winget retry after source reset")
+			result = mergeCommandAttemptsWithFinalResult(merged, retry, "winget retry after source reset")
 			return retryTransientPackageAction(ctx, manager, timeout, result, args...)
 		}
 		retry := runNormalizedPackageAction(ctx, manager, timeout, args...)
-		result = mergeCommandResults(merged, retry, "winget retry after source update")
+		result = mergeCommandAttemptsWithFinalResult(merged, retry, "winget retry after source update")
 	}
 	return retryTransientPackageAction(ctx, manager, timeout, result, args...)
 }
@@ -174,7 +174,7 @@ func retryTransientPackageAction(ctx context.Context, manager string, timeout ti
 			return result
 		}
 		retry := runNormalizedPackageAction(ctx, manager, timeout, args...)
-		result = mergeCommandResults(result, retry, fmt.Sprintf("%s retry %d", manager, attempt-1))
+		result = mergeCommandAttemptsWithFinalResult(result, retry, fmt.Sprintf("%s retry %d", manager, attempt-1))
 	}
 	return result
 }

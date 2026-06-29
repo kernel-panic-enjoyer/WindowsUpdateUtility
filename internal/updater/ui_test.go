@@ -148,7 +148,7 @@ func TestRenderedHTMLContainsAsyncUpdateHooks(t *testing.T) {
 		`appendGlobalUpdateOptions`,
 		`allowUnknownVersionUpdates`,
 		`allowPinnedUpdates`,
-		`packageBulkUpdateable`,
+		`packageCanBeIncludedInBulkUpdate`,
 		`storeAssessmentActive`,
 		`storeUpdateState`,
 		`if(pkg && pkg.manager === "store"){`,
@@ -323,7 +323,7 @@ func TestRenderedHTMLContainsAsyncUpdateHooks(t *testing.T) {
 		`syncManagerFilterOptions`,
 		`data.store_loading`,
 		`data.loading || data.store_loading`,
-		`packages.filter(packageNeedsUpdateAttention)`,
+		`packages.filter(packageShouldAppearInUpdateQueue)`,
 		`packageMatchesInstalledSearch`,
 		`packageAvailableCell`,
 		`packageAvailableCell(pkg, {statusBadge:false, compact:true})`,
@@ -470,8 +470,8 @@ func TestSuccessfulUpdateResultsSuppressPrimaryUpdateRows(t *testing.T) {
 		`function recordSucceededUpdateResults(status){`,
 		`if(job.job_id && completedJobIDs[job.job_id]){ return; }`,
 		`completedUpdateKeys[row.key] = true;`,
-		`function packageSuppressedByCompletedUpdate(pkg){`,
-		`if(packageSuppressedByCompletedUpdate(pkg)){ return false; }`,
+		`function packageHiddenAfterSuccessfulUpdate(pkg){`,
+		`if(packageHiddenAfterSuccessfulUpdate(pkg)){ return false; }`,
 		`if(jobsInitialized){ recordSucceededUpdateResults(serverJobs); }`,
 	} {
 		if !strings.Contains(uiJS, expected) {

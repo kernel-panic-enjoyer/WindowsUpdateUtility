@@ -778,14 +778,14 @@
     if(allowPinnedUpdates()){ params.set("allow_pinned", "true"); }
     return params;
   }
-  function packageAutoUpdateable(pkg){
+  function packageCanUseAutoUpdatePreference(pkg){
     return !!(pkg && pkg.preference_eligible) && !pkg.unknown_version && !pkg.pinned;
   }
-  function packageBulkUpdateable(pkg){
+  function packageCanBeIncludedInBulkUpdate(pkg){
     var options = arguments.length > 1 && arguments[1] ? arguments[1] : {allowUnknown:allowUnknownVersionUpdates(), allowPinned:allowPinnedUpdates()};
     if(!pkg){ return false; }
     if(pkg.can_update_now){ return true; }
-    return packageHasUpdate(pkg) &&
+    return packageHasUpdateCandidate(pkg) &&
       (!pkg.cannot_update_reason || pkg.cannot_update_reason.indexOf("override") !== -1) &&
       (!pkg.unknown_version || options.allowUnknown) &&
       (!pkg.pinned || options.allowPinned);
@@ -847,29 +847,24 @@
     if(!storeAssessmentActive(pkg)){ return true; }
     return !!pkg.exact_action_target_available && !!pkg.installed_package_family_name && String(pkg.exact_target_kind || "none") !== "none";
   }
-  function packageHasFreshStoreAssessment(pkg){
-    if(pkg && pkg.manager === "store" && !storeAssessmentActive(pkg)){ return false; }
-    if(!storeAssessmentActive(pkg)){ return true; }
-    return storeUpdateState(pkg) === "available" && !pkg.stale;
-  }
-  function packageHasUpdate(pkg){
+  function packageHasUpdateCandidate(pkg){
     if(storeAssessmentActive(pkg)){ return !!pkg.can_update_now; }
     if(pkg && pkg.manager === "store"){ return false; }
     return !!pkg.update_available;
   }
-  function packageNeedsUpdateAttentionBase(pkg){
+  function packageShouldAppearInUpdateQueueBeforeSessionSuppression(pkg){
     if(pkg && pkg.manager === "store" && !storeAssessmentActive(pkg)){ return false; }
     if(!storeAssessmentActive(pkg)){ return !!pkg.update_available; }
     var state = storeUpdateState(pkg);
     if(pkg.stale){ return false; }
     return !!pkg.can_update_now || state === "conflict" || state === "pending";
   }
-  function packageSuppressedByCompletedUpdate(pkg){
-    return !!(pkg && pkg.key && completedUpdateKeys[pkg.key] && packageNeedsUpdateAttentionBase(pkg));
+  function packageHiddenAfterSuccessfulUpdate(pkg){
+    return !!(pkg && pkg.key && completedUpdateKeys[pkg.key] && packageShouldAppearInUpdateQueueBeforeSessionSuppression(pkg));
   }
-  function packageNeedsUpdateAttention(pkg){
-    if(packageSuppressedByCompletedUpdate(pkg)){ return false; }
-    return packageNeedsUpdateAttentionBase(pkg);
+  function packageShouldAppearInUpdateQueue(pkg){
+    if(packageHiddenAfterSuccessfulUpdate(pkg)){ return false; }
+    return packageShouldAppearInUpdateQueueBeforeSessionSuppression(pkg);
   }
   function packageReasonText(pkg){
     return String((pkg && pkg.update_reason) || "").trim();
@@ -1083,23 +1078,23 @@
     var managerMap = latestStatus && latestStatus.managers ? latestStatus.managers : {};
     var managerNames = Object.keys(managerMap);
     var availableManagers = managerNames.filter(function(name){ return managerMap[name] && managerMap[name].available; }).length;
-    var updates = packages.filter(packageHasUpdate);
-    var supportedUpdates = updates.filter(packageBulkUpdateable);
-    var updateablePackages = packages.filter(packageAutoUpdateable);
+    var updateCandidates = packages.filter(packageHasUpdateCandidate);
+    var bulkUpdateCandidates = updateCandidates.filter(packageCanBeIncludedInBulkUpdate);
+    var autoPreferencePackages = packages.filter(packageCanUseAutoUpdatePreference);
     var inventoryOnly = packages.filter(function(pkg){ return pkg.update_supported === false; }).length;
     var statusLoading = !!(latestStatus && latestStatus.loading);
     var loading = latestPackagesLoading || statusLoading;
 
-    setText("summary-updates", loading ? "-" : String(updates.length));
+    setText("summary-updates", loading ? "-" : String(updateCandidates.length));
     var updatesDetail = $("summary-updates-detail");
     if(updatesDetail){
       if(loading){ updatesDetail.innerHTML = loadingText("Checking package status"); }
-      else if(!storeCoverageHealthy()){ updatesDetail.innerHTML = html(supportedUpdates.length + " updateable; Store status not authoritative"); }
-      else{ updatesDetail.innerHTML = html(supportedUpdates.length + " updateable"); }
+      else if(!storeCoverageHealthy()){ updatesDetail.innerHTML = html(bulkUpdateCandidates.length + " updatable; Store status not authoritative"); }
+      else{ updatesDetail.innerHTML = html(bulkUpdateCandidates.length + " updatable"); }
     }
     setText("summary-packages", loading ? "-" : String(packages.length));
     var packagesDetail = $("summary-packages-detail");
-    if(packagesDetail){ packagesDetail.innerHTML = loading ? loadingText("Inventory loading") : html(updateablePackages.length + " managed, " + inventoryOnly + " inventory-only"); }
+    if(packagesDetail){ packagesDetail.innerHTML = loading ? loadingText("Inventory loading") : html(autoPreferencePackages.length + " auto-update eligible, " + inventoryOnly + " inventory-only"); }
     setText("summary-managers", statusLoading ? "-" : availableManagers + "/" + managerNames.length);
     var managersDetail = $("summary-managers-detail");
     if(managersDetail){ managersDetail.innerHTML = statusLoading ? loadingText("Checking tools") : "Available package managers"; }
@@ -1392,7 +1387,7 @@
     return manager === "all" || (!!pkg && pkg.manager === manager);
   }
   function visibleUpdates(){
-    return packages.filter(packageNeedsUpdateAttention).filter(function(pkg){
+    return packages.filter(packageShouldAppearInUpdateQueue).filter(function(pkg){
       return packageMatchesManagerFilter(pkg, updatesManagerFilter);
     });
   }
@@ -1424,7 +1419,7 @@
     var page = pagedItems(updates, updatePage, updatePageSize);
     updatePage = page.page;
     target.innerHTML = page.items.map(function(pkg){
-      var selectable = packageBulkUpdateable(pkg);
+      var selectable = packageCanBeIncludedInBulkUpdate(pkg);
       var rowClass = rowUpdateState(pkg.key) === "active" ? ' class="updating-current"' : '';
       return '<tr data-key="' + attr(pkg.key) + '"' + rowClass + '><td><input form="update-selected-form" type="checkbox" name="package_key" value="' + attr(pkg.key) + '" aria-label="Select ' + attr(pkg.name) + ' for update"' + ((updateBusy || !selectable) ? ' disabled' : '') + '></td><td>' + packageNameCell(pkg) + '</td><td>' + managerCell(pkg, {compact:true}) + '</td><td>' + html(pkg.version) + '</td><td>' + packageAvailableCell(pkg) + '</td><td>' + autoButton(pkg) + '</td><td>' + updateActionCell(pkg) + '</td></tr>';
     }).join("");
@@ -1455,16 +1450,16 @@
     renderPager(page, status, prev, next, hasFilter ? " matches" : "");
   }
   function renderPackageTables(){
-    var allUpdates = packages.filter(packageNeedsUpdateAttention);
-    var updateablePackages = packages.filter(packageAutoUpdateable);
+    var updateQueuePackages = packages.filter(packageShouldAppearInUpdateQueue);
+    var autoPreferencePackages = packages.filter(packageCanUseAutoUpdatePreference);
     var updateJobRunning = activeUpdateJobRunning();
-    $("auto-all").disabled = updateBusy || updateablePackages.length === 0;
-    $("auto-none").disabled = updateBusy || updateablePackages.length === 0;
+    $("auto-all").disabled = updateBusy || autoPreferencePackages.length === 0;
+    $("auto-none").disabled = updateBusy || autoPreferencePackages.length === 0;
     renderUpdatesTable(visibleUpdates(), latestPackagesLoading);
     renderInstalledTable(latestPackagesLoading);
-    var supportedUpdates = allUpdates.filter(packageBulkUpdateable);
-    $("update-all-button").disabled = updateBusy || updateJobRunning || supportedUpdates.length === 0;
-    $("update-selected-button").disabled = updateBusy || updateJobRunning || supportedUpdates.length === 0;
+    var bulkUpdatePackages = updateQueuePackages.filter(packageCanBeIncludedInBulkUpdate);
+    $("update-all-button").disabled = updateBusy || updateJobRunning || bulkUpdatePackages.length === 0;
+    $("update-selected-button").disabled = updateBusy || updateJobRunning || bulkUpdatePackages.length === 0;
     renderDashboardSummary();
   }
   function renderStoreLoadingNotes(loading){
@@ -1479,7 +1474,7 @@
       if(!select){ return; }
       var current = spec[1] === "updates" ? updatesManagerFilter : installedManagerFilter;
       var present = {};
-      var sourcePackages = spec[1] === "updates" ? packages.filter(packageNeedsUpdateAttention) : packages;
+      var sourcePackages = spec[1] === "updates" ? packages.filter(packageShouldAppearInUpdateQueue) : packages;
       sourcePackages.forEach(function(pkg){
         if(pkg && pkg.manager){ present[pkg.manager] = true; }
       });
@@ -1987,7 +1982,7 @@
     packages.forEach(function(pkg){
       if(!pkg || !pkg.key){ return; }
       present[pkg.key] = true;
-      if(completedUpdateKeys[pkg.key] && !packageNeedsUpdateAttentionBase(pkg)){
+      if(completedUpdateKeys[pkg.key] && !packageShouldAppearInUpdateQueueBeforeSessionSuppression(pkg)){
         delete completedUpdateKeys[pkg.key];
       }
     });
@@ -2069,8 +2064,8 @@
     }
     return status.notice || "Update completed. Refreshing package status...";
   }
-  function updateableUpdateKeys(){
-    return packages.filter(packageBulkUpdateable).map(function(pkg){ return pkg.key; });
+  function bulkUpdatePackageKeys(){
+    return packages.filter(packageCanBeIncludedInBulkUpdate).map(function(pkg){ return pkg.key; });
   }
   function updateOptionsFromParams(params){
     params = params || new URLSearchParams();
@@ -2112,14 +2107,14 @@
     if(fallback){ notes.push(fallback); }
     return notes.join("; ");
   }
-  function selectedKeyMap(keys){
-    var map = {};
-    (keys || []).forEach(function(key){ map[key] = true; });
-    return map;
+  function selectedPackageKeySet(packageKeys){
+    var selected = {};
+    (packageKeys || []).forEach(function(key){ selected[key] = true; });
+    return selected;
   }
-  function exclusionReason(pkg, mode, selectedMap, options){
-    if(mode === "selected" && !selectedMap[pkg.key]){ return "Not selected."; }
-    if(!packageHasUpdate(pkg)){ return pkg.manager === "store" ? "Store state is " + stateLabel(storeUpdateState(pkg)) + "." : "No update available."; }
+  function bulkUpdateExclusionReason(pkg, mode, selectedPackageKeys, options){
+    if(mode === "selected" && !selectedPackageKeys[pkg.key]){ return "Not selected."; }
+    if(!packageHasUpdateCandidate(pkg)){ return pkg.manager === "store" ? "Store state is " + stateLabel(storeUpdateState(pkg)) + "." : "No update available."; }
     if(pkg.update_supported === false){ return "Updates are not supported for this package."; }
     if(!packageHasExactStoreTarget(pkg)){ return "Store update requires an exact verified action target."; }
     if(pkg.unknown_version && !options.allowUnknown){ return "Unknown installed version requires the global unknown-version override."; }
@@ -2128,18 +2123,18 @@
   }
   function buildUpdatePreflight(mode, keys, params, message){
     var options = updateOptionsFromParams(params);
-    var selected = selectedKeyMap(keys || []);
-    var updates = packages.filter(packageNeedsUpdateAttention);
+    var selectedPackageKeys = selectedPackageKeySet(keys || []);
+    var updateQueuePackages = packages.filter(packageShouldAppearInUpdateQueue);
     var affected = [];
     var excluded = [];
-    updates.forEach(function(pkg){
-      var reason = exclusionReason(pkg, mode, selected, options);
+    updateQueuePackages.forEach(function(pkg){
+      var reason = bulkUpdateExclusionReason(pkg, mode, selectedPackageKeys, options);
       if(reason){
         excluded.push({pkg:pkg, reason:reason});
         return;
       }
-      if(mode === "selected" && !selected[pkg.key]){ return; }
-      if(packageBulkUpdateable(pkg, options)){
+      if(mode === "selected" && !selectedPackageKeys[pkg.key]){ return; }
+      if(packageCanBeIncludedInBulkUpdate(pkg, options)){
         affected.push(pkg);
       }
     });
@@ -2521,7 +2516,7 @@
     var params = new URLSearchParams();
     params.set("global", enabled ? "true" : "false");
     params.set("package_enabled", enabled ? "true" : "false");
-    packages.forEach(function(pkg){ if(packageAutoUpdateable(pkg)){ params.append("package_key", pkg.key); } });
+    packages.forEach(function(pkg){ if(packageCanUseAutoUpdatePreference(pkg)){ params.append("package_key", pkg.key); } });
     showNotice("Updating auto-update settings...", true);
     try{
       await postCommandPayload("/api/settings/auto-update", params, "Could not update auto-update settings");
@@ -2692,7 +2687,7 @@
     }
     if(form.matches(".update-all-form")){
       event.preventDefault();
-      var allKeys = updateableUpdateKeys();
+      var allKeys = bulkUpdatePackageKeys();
       renderUpdatePreflight(buildUpdatePreflight("all", allKeys, appendGlobalUpdateOptions(new URLSearchParams(new FormData(form))), "Updating all packages..."));
     }
   });

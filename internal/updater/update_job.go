@@ -11,7 +11,7 @@ const updateJobModeAll = "all"
 const updateJobModeSelected = "selected"
 
 var errUpdateJobRunning = errors.New("an update job is already running")
-var errNoUpdateCandidates = errors.New("no updateable packages found")
+var errNoUpdateCandidates = errors.New("no updatable packages found")
 
 var errStoreScanRefreshTimeout = errors.New("timed out waiting for Microsoft Store scan to finish")
 

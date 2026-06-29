@@ -18,7 +18,7 @@ func runPackageUpdateCandidates(ctx context.Context, candidates []string, label 
 		if index == 0 {
 			merged = result
 		} else {
-			merged = mergeCommandResults(merged, result, fmt.Sprintf("%s %q", label, target))
+			merged = mergeCommandAttemptsWithFinalResult(merged, result, fmt.Sprintf("%s %q", label, target))
 		}
 		if result.OK || ctx.Err() != nil || !shouldTryAlternatePackageTarget(result) {
 			return merged

@@ -66,7 +66,7 @@ func normalizeStoreScanAppKeys(state *State) {
 	state.StoreApps = normalized
 }
 
-func normalizeAutoUpdatePackageKeys(state *State, legacyAssessments map[string]legacyAssessmentCacheEntry) {
+func migrateAndNormalizeAutoUpdatePackageKeys(state *State, legacyAssessments map[string]legacyAssessmentCacheEntry) {
 	normalized := map[string]bool{}
 	report := StoreAutoUpdateMigrationReport{LastRun: utcNow()}
 	for key, enabled := range state.AutoUpdatePackages {

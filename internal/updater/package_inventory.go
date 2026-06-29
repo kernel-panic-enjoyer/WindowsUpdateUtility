@@ -42,7 +42,7 @@ func getInventoryContext(ctx context.Context) Inventory {
 	for _, inventory := range inputs.managerInventories {
 		commandResults[inventory.listKey] = inventory.listResult
 		commandResults[inventory.updateKey] = inventory.updateResult
-		packages = append(packages, packagesFromManagerInventory(state, managers, inventory)...)
+		packages = append(packages, packagesFromManagerInventory(state, inventory)...)
 	}
 
 	if inputs.appxResult.OK || len(inputs.appxPackages) > 0 {
