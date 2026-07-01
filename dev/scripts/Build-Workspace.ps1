@@ -55,11 +55,16 @@ if (-not $SkipVet) {
     Assert-NativeSuccess "go vet"
 }
 
-$nodeCandidates = @(
-    (Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe'),
-    'node'
-)
-$node = $nodeCandidates | Where-Object { $_ -eq 'node' -or (Test-Path -LiteralPath $_) } | Select-Object -First 1
+$bundledNode = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe'
+$node = $null
+if (Test-Path -LiteralPath $bundledNode) {
+    $node = $bundledNode
+} else {
+    $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
+    if ($nodeCommand) {
+        $node = $nodeCommand.Source
+    }
+}
 if ($node) {
     & $node --check internal/updater/assets/ui.js
     Assert-NativeSuccess "node --check"

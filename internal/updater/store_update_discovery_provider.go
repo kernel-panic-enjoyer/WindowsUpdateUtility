@@ -129,6 +129,7 @@ func (provider storeWinRTDiscoveryCatalogProvider) Observe(ctx context.Context, 
 	if !result.OK || response.Partial || !response.Completed || len(response.Errors) > 0 {
 		run.Health = StoreProviderIncomplete
 		run.Error = sanitizeProviderDiagnostic(firstNonEmpty(result.Stderr, strings.Join(response.Errors, "; "), "WinRT Store update discovery returned incomplete results"))
+		return run
 	}
 	observedAt := run.CompletedAt
 	if observedAt.IsZero() {

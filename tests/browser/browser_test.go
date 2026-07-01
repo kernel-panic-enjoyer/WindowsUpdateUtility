@@ -718,6 +718,82 @@ func TestBrowserPackageRowsUseUniformHeight(t *testing.T) {
 	}
 }
 
+func TestBrowserUpdateSelectedPersistsAcrossPages(t *testing.T) {
+	app := updater.NewBrowserTestApp()
+	packages := make([]updater.Package, 0, 11)
+	for i := 1; i <= 11; i++ {
+		id := fmt.Sprintf("Paged.App%02d", i)
+		packages = append(packages, updater.Package{
+			Key:                "winget:" + id,
+			Manager:            updater.ManagerWinget,
+			ID:                 id,
+			Name:               fmt.Sprintf("Paged App %02d", i),
+			Version:            "1.0.0",
+			AvailableVersion:   "1.1.0",
+			UpdateAvailable:    true,
+			UpdateSupported:    true,
+			Installed:          true,
+			Source:             updater.SourceWinget,
+			PreferenceEligible: true,
+			CanUpdateNow:       true,
+		})
+	}
+	server := startBrowserTestServerWithRoutes(t, app, map[string]http.HandlerFunc{
+		"/api/packages": func(w http.ResponseWriter, r *http.Request) {
+			writeAuthenticatedBrowserTestJSON(app, w, r, http.StatusOK, updater.InventoryResponse{
+				Inventory: updater.Inventory{PackageLookup: updater.PackageLookup{Packages: packages}},
+			})
+		},
+	})
+
+	ctx, cancel := newBrowserContext(t)
+	defer cancel()
+
+	navigateAuthenticated(t, ctx, server.URL)
+	waitForText(t, ctx, `#updates-body`, "Paged App 01")
+	var selectedDisabled bool
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`document.querySelector("#update-selected-button").disabled`, &selectedDisabled),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !selectedDisabled {
+		t.Fatal("Update Selected should be disabled before any package is selected")
+	}
+	if err := chromedp.Run(ctx,
+		chromedp.Click(`#updates-body input[name="package_key"]`, chromedp.ByQuery),
+		chromedp.Evaluate(`document.querySelector("#update-selected-button").disabled`, &selectedDisabled),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if selectedDisabled {
+		t.Fatal("Update Selected should enable after selecting a package")
+	}
+	if err := chromedp.Run(ctx,
+		chromedp.Click(`#updates-next`, chromedp.ByQuery),
+	); err != nil {
+		t.Fatal(err)
+	}
+	waitForText(t, ctx, `#updates-body`, "Paged App 11")
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`document.querySelector("#update-selected-button").disabled`, &selectedDisabled),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if selectedDisabled {
+		t.Fatal("Update Selected should stay enabled when selected package is on another page")
+	}
+	if err := chromedp.Run(ctx,
+		chromedp.Click(`#update-selected-button`, chromedp.ByQuery),
+	); err != nil {
+		t.Fatal(err)
+	}
+	preflightSummary := waitForText(t, ctx, `#update-preflight-summary`, "Paged App 01")
+	if strings.Contains(preflightSummary, "Paged App 11") {
+		t.Fatalf("preflight summary should include only the selected package, got:\n%s", preflightSummary)
+	}
+}
+
 func TestBrowserHidesStaleStoreEvidenceFromUpdatesQueue(t *testing.T) {
 	app := updater.NewBrowserTestApp()
 	server := startBrowserTestServerWithRoutes(t, app, map[string]http.HandlerFunc{

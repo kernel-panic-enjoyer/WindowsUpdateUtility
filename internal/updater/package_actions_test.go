@@ -690,6 +690,53 @@ func TestWingetNoApplicableUpgradeRequiresForcedUpgradeRetry(t *testing.T) {
 	}
 }
 
+func TestWingetUnknownAndPinnedRetriesAccumulateFlags(t *testing.T) {
+	var commands []string
+	restore := replacePackageActionHooks(
+		func(ctx context.Context, timeout time.Duration, args ...string) CommandResult {
+			command := strings.Join(args, " ")
+			commands = append(commands, command)
+			hasUnknown := containsString(args, "--include-unknown")
+			hasPinned := containsString(args, "--include-pinned")
+			switch {
+			case hasUnknown && hasPinned:
+				return CommandResult{OK: true, Command: command, Stdout: "Successfully upgraded"}
+			case hasUnknown:
+				return CommandResult{Code: 1, Command: command, Stderr: "Package is pinned. Use --include-pinned to include pinned packages."}
+			default:
+				return CommandResult{Code: 1, Command: command, Stdout: "No applicable upgrade found for packages with unknown installed version. Use --include-unknown to include packages with unknown versions."}
+			}
+		},
+		func(string) bool { return true },
+	)
+	defer restore()
+
+	result := runWingetUpgradePlanWithFallbacks(context.Background(), wingetUpgradePlan{
+		TargetDescription:        "Example.App",
+		AllowUnknownVersionRetry: true,
+		AllowPinnedRetry:         true,
+		BuildUpgradeCommand: func(extraArgs ...string) []string {
+			args := []string{"winget", "upgrade", "--id", "Example.App"}
+			return append(args, extraArgs...)
+		},
+		UnknownVersionRetryMergeLabel: "include unknown retry",
+		PinnedRetryMergeLabel:         "include pinned retry",
+	})
+
+	if !result.OK {
+		t.Fatalf("expected accumulated retry flags to succeed, result=%#v commands=%#v", result, commands)
+	}
+	if len(commands) != 3 {
+		t.Fatalf("expected initial plus two retries, got %#v", commands)
+	}
+	finalCommand := commands[len(commands)-1]
+	for _, expected := range []string{"--include-unknown", "--include-pinned"} {
+		if !strings.Contains(finalCommand, expected) {
+			t.Fatalf("final retry command missing %s: %#v", expected, commands)
+		}
+	}
+}
+
 func TestMergeCommandAttemptsWithFinalResultKeepsPrimaryFailureContext(t *testing.T) {
 	primary := CommandResult{Code: 1, Command: "winget upgrade", Stdout: "No applicable upgrade found.", Stderr: "primary stderr"}
 	fallback := CommandResult{OK: true, Code: 0, Command: "winget install --force", Stdout: "Successfully installed", Stderr: ""}

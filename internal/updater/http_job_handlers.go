@@ -47,8 +47,8 @@ func (app *App) handleJobsAPI(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodGet) {
 		return
 	}
-	jobStatuses := app.operationJobsSnapshot()
-	writeJSON(w, http.StatusOK, jobsAPIResponse{Jobs: jobStatuses, Revision: latestJobRevision(jobStatuses)})
+	jobStatuses, revision := app.operationJobsSnapshotWithRevision()
+	writeJSON(w, http.StatusOK, jobsAPIResponse{Jobs: jobStatuses, Revision: revision})
 }
 
 func (app *App) handleJobLogAPI(w http.ResponseWriter, r *http.Request) {
@@ -129,8 +129,7 @@ func (app *App) handleEventsAPI(w http.ResponseWriter, r *http.Request) {
 		return true
 	}
 
-	initialJobStatuses := app.operationJobsSnapshot()
-	lastJobRevision := latestJobRevision(initialJobStatuses)
+	initialJobStatuses, lastJobRevision := app.operationJobsSnapshotWithRevision()
 	sendEvent("jobs", jobsAPIResponse{Jobs: initialJobStatuses, Revision: lastJobRevision})
 	initialLogQuery := sessionLogs.Query(lastSentLogID)
 	initialLogEntries := initialLogQuery.Entries
@@ -146,7 +145,7 @@ func (app *App) handleEventsAPI(w http.ResponseWriter, r *http.Request) {
 	heartbeatInterval := 10 * time.Second
 	nextHeartbeatAt := time.Now().Add(heartbeatInterval)
 	for {
-		jobStatuses := app.operationJobsSnapshot()
+		jobStatuses, _ := app.operationJobsSnapshotWithRevision()
 		hasActiveJobs := false
 		for _, job := range jobStatuses {
 			if !operationJobComplete(job) {
@@ -164,11 +163,11 @@ func (app *App) handleEventsAPI(w http.ResponseWriter, r *http.Request) {
 			timer.Stop()
 			return
 		case <-timer.C:
-			jobStatuses = app.operationJobsSnapshot()
+			var jobRevision int64
+			jobStatuses, jobRevision = app.operationJobsSnapshotWithRevision()
 			logQuery := sessionLogs.Query(lastSentLogID)
 			logEntries := logQuery.Entries
 			latestLogID := logQuery.LatestID
-			jobRevision := latestJobRevision(jobStatuses)
 			if jobRevision != lastJobRevision {
 				if !sendEvent("jobs", jobsAPIResponse{Jobs: jobStatuses, Revision: jobRevision}) {
 					return
@@ -194,14 +193,4 @@ func (app *App) handleEventsAPI(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-}
-
-func latestJobRevision(jobs []OperationJobStatus) int64 {
-	var revision int64
-	for _, job := range jobs {
-		if job.Revision > revision {
-			revision = job.Revision
-		}
-	}
-	return revision
 }

@@ -147,6 +147,7 @@ func (repo *StoreScanFileRepository) PersistCompletedScanSnapshot(ctx context.Co
 	if snapshot.SchemaVersion != storeScanSchemaVersion {
 		return false, fmt.Errorf("unsupported Store scan snapshot schema version %d", snapshot.SchemaVersion)
 	}
+	normalizeStoreScanSnapshotExactTargets(&snapshot)
 	if err := validateStoreScanSnapshot(snapshot); err != nil {
 		return false, err
 	}
@@ -485,6 +486,7 @@ func (repo *StoreScanFileRepository) decodeSnapshotData(data []byte, path, expec
 	if snapshot.Scan.UserSID != expectedUserSID {
 		return StoreScanSnapshot{}, storeScanRepositoryError{Kind: storeScanRepositoryErrorWrongUser, Path: path, Err: errors.New("snapshot belongs to a different user")}
 	}
+	normalizeStoreScanSnapshotExactTargets(&snapshot)
 	if err := validateStoreScanSnapshot(snapshot); err != nil {
 		return StoreScanSnapshot{}, storeScanRepositoryError{Kind: storeScanRepositoryErrorInvalidGenerationContents, Path: path, Err: err}
 	}

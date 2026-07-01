@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -104,6 +105,14 @@ func (app *App) startSingleUpdateJob(manager, packageID string, options UpdateOp
 	targetPackage.AllowPinnedUpdate = options.AllowPinned
 	if targetPackage.Key == "" {
 		targetPackage.Key = packageKey(manager, packageID)
+	}
+	if policy := packageUpdatePolicy(targetPackage, options); !policy.CanUpdateNow {
+		reason := strings.TrimSpace(policy.CannotUpdateReason)
+		if reason == "" {
+			reason = "Package cannot be updated now."
+		}
+		result := validationCommandResult("update", fmt.Errorf("%s", reason))
+		return app.startRejectedUpdateJob(targetPackage, result)
 	}
 	if !packageHasExactStoreUpdateTarget(targetPackage) {
 		result := validationCommandResult("update", fmt.Errorf("%s has no exact verified Store update target", targetPackage.Key))
@@ -265,6 +274,9 @@ func (app *App) runElevatedPackageUpdateBatchForJob(ctx context.Context, job *Op
 		})
 	})
 	appLogContext(ctx, "Elevated package batch finished with code %d.", batchResult.Code)
+	if !batchResult.OK && len(batchResults) == 0 {
+		batchResults = failedBatchUpdateResults(updatePackages, batchResult)
+	}
 	app.mutateOperationJob(job, func(status *OperationJobStatus) {
 		status.Results = append(status.Results, batchResults...)
 		status.Result = &batchResult
@@ -276,6 +288,14 @@ func (app *App) runElevatedPackageUpdateBatchForJob(ctx context.Context, job *Op
 		}
 	})
 	return batchResult
+}
+
+func failedBatchUpdateResults(updatePackages []Package, result CommandResult) []UpdateResult {
+	results := make([]UpdateResult, 0, len(updatePackages))
+	for _, updatePackage := range updatePackages {
+		results = append(results, UpdateResult{Key: updatePackage.Key, Result: result})
+	}
+	return results
 }
 
 func packageForUpdateResultKey(updatePackages []Package, resultKey string) Package {

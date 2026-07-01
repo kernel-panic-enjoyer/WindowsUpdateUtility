@@ -542,3 +542,41 @@ func TestStoreUnknownRowsStayOutOfPrimaryUpdateQueue(t *testing.T) {
 		}
 	}
 }
+
+func TestUpdateSelectedUsesPersistentSelectionState(t *testing.T) {
+	for _, expected := range []string{
+		`var selectedUpdateKeys = new Set();`,
+		`function selectedUpdatePackageKeys()`,
+		`selectedUpdateKeys.add(key);`,
+		`selectedUpdateKeys.delete(key);`,
+		`var keys = selectedUpdatePackageKeys();`,
+		`keys.forEach(function(key){ params.append("package_key", key); });`,
+		`button.disabled = updateBusy || activeUpdateJobRunning() || selectedUpdatePackageKeys().length === 0;`,
+		`checked ? ' checked' : ''`,
+	} {
+		if !strings.Contains(uiJS, expected) {
+			t.Fatalf("expected persistent update selection support to contain %q", expected)
+		}
+	}
+	if strings.Contains(uiJS, `var params = appendGlobalUpdateOptions(new URLSearchParams(new FormData(form)));
+      var keys = params.getAll("package_key");`) {
+		t.Fatal("update selected submit must not depend only on currently rendered checkbox DOM")
+	}
+}
+
+func TestUIConsistencyLabelsAndHealthFallbacks(t *testing.T) {
+	for _, expected := range []string{
+		`"native-appx": "AppX inventory"`,
+		`counts.pending === 0`,
+		`var updateCandidates = packages.filter(packageShouldAppearInUpdateQueue);`,
+		`var installedReason = searchPackageInstalledInCurrentSession(pkg) ? "Installed from this search session." : "Already installed.";`,
+		`function packageByKey(key)`,
+	} {
+		if !strings.Contains(uiJS, expected) {
+			t.Fatalf("expected UI consistency fix to contain %q", expected)
+		}
+	}
+	if strings.Count(uiJS, `function packageByKey(key)`) != 1 {
+		t.Fatalf("expected exactly one packageByKey implementation")
+	}
+}

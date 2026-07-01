@@ -441,6 +441,17 @@ func (buffer *LogBuffer) JobQuery(jobID string, since int64) LogQueryResult {
 	return ring.query(since, buffer.nextID)
 }
 
+func (buffer *LogBuffer) RetainJobRings(retainedJobIDs map[string]bool) {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	buffer.ensureLocked()
+	for jobID := range buffer.jobRings {
+		if !retainedJobIDs[jobID] {
+			delete(buffer.jobRings, jobID)
+		}
+	}
+}
+
 func (buffer *LogBuffer) LatestID() int64 {
 	buffer.mu.Lock()
 	defer buffer.mu.Unlock()

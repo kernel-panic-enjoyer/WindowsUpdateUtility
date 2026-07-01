@@ -356,10 +356,18 @@ func verifyPublishedStoreUpdateAssessment(ctx context.Context, request StoreExac
 		if !freshness.Fresh {
 			return fmt.Errorf("published Store assessment is not fresh: %s", freshness.Reason)
 		}
-		if assessment.StoreProductID != "" && request.ProductID != "" && assessment.StoreProductID != request.ProductID {
+		assessmentProductID := strings.TrimSpace(assessment.StoreProductID)
+		if assessmentProductID == "" && assessment.Target != nil {
+			assessmentProductID = strings.TrimSpace(assessment.Target.ProductID)
+		}
+		if request.ProductID != "" && assessmentProductID != request.ProductID {
 			return errors.New("Store update Product ID does not match the verified published assessment")
 		}
-		if assessment.UpdateID != "" && request.UpdateID != "" && assessment.UpdateID != request.UpdateID {
+		assessmentUpdateID := strings.TrimSpace(assessment.UpdateID)
+		if assessmentUpdateID == "" && assessment.Target != nil {
+			assessmentUpdateID = strings.TrimSpace(assessment.Target.UpdateID)
+		}
+		if request.UpdateID != "" && assessmentUpdateID != request.UpdateID {
 			return errors.New("Store update ID does not match the verified published assessment")
 		}
 		return nil

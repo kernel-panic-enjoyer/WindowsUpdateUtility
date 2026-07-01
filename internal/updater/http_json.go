@@ -3,6 +3,7 @@ package updater
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 )
@@ -96,7 +97,15 @@ func requestIsJSON(r *http.Request) bool {
 }
 
 func decodeJSONRequest(r *http.Request, target any) error {
-	if err := json.NewDecoder(r.Body).Decode(target); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(target); err != nil {
+		return fmt.Errorf("invalid JSON body: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("invalid JSON body: trailing data")
+		}
 		return fmt.Errorf("invalid JSON body: %w", err)
 	}
 	return nil

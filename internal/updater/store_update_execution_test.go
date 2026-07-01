@@ -809,6 +809,19 @@ func TestVerifyPublishedStoreUpdateAssessmentEnforcesFreshness(t *testing.T) {
 	}
 }
 
+func TestVerifyPublishedStoreUpdateAssessmentRejectsUnpublishedRequestTarget(t *testing.T) {
+	t.Setenv("UPDATER_STATE_DIR", t.TempDir())
+	restoreSID := replaceStoreScanSID("S-1-5-21-exec")
+	defer restoreSID()
+	writePublishedExactStoreAssessment(t, testExactStorePackage(), storeScanNow(), nil)
+
+	request := testExactStoreRequest()
+	request.UpdateID = "unverified-update-id"
+	if err := verifyPublishedStoreUpdateAssessment(context.Background(), request); err == nil || !strings.Contains(err.Error(), "update ID") {
+		t.Fatalf("expected unpublished request Update ID to be rejected, got %v", err)
+	}
+}
+
 func executeStoreExactUpdateForTest(t *testing.T, executor StoreExactUpdateExecutor, pkg Package) CommandResult {
 	t.Helper()
 	return executeStoreExactUpdateForTestWithContext(t, context.Background(), executor, pkg)

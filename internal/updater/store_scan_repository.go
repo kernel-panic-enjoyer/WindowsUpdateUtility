@@ -169,8 +169,53 @@ func validateStoreScanSnapshot(snapshot StoreScanSnapshot) error {
 		if assessment.ScanID != snapshot.Scan.ScanID || assessment.Identity.UserSID != snapshot.Scan.UserSID || !assessment.Identity.Resolved() {
 			return errors.New("Store scan snapshot contains cross-user or cross-generation assessment")
 		}
+		if assessment.ExactActionTargetAvailable && !storeAssessmentExactTargetValid(assessment) {
+			return errors.New("Store scan snapshot contains unverifiable exact action target")
+		}
 	}
 	return nil
+}
+
+func normalizeStoreScanSnapshotExactTargets(snapshot *StoreScanSnapshot) {
+	if snapshot == nil {
+		return
+	}
+	for index := range snapshot.Assessments {
+		assessment := &snapshot.Assessments[index]
+		if !assessment.ExactActionTargetAvailable {
+			continue
+		}
+		if !storeAssessmentExactTargetValid(*assessment) {
+			clearStoreAssessmentExactTarget(assessment)
+			continue
+		}
+		assessment.StoreProductID = strings.TrimSpace(firstNonEmpty(assessment.StoreProductID, assessment.Target.ProductID))
+		assessment.UpdateID = strings.TrimSpace(firstNonEmpty(assessment.UpdateID, assessment.Target.UpdateID))
+	}
+}
+
+func storeAssessmentExactTargetValid(assessment StorePublishedAssessment) bool {
+	if assessment.Target == nil || !assessment.Target.ExactFor(assessment.Identity) {
+		return false
+	}
+	targetProductID := strings.TrimSpace(assessment.Target.ProductID)
+	targetUpdateID := strings.TrimSpace(assessment.Target.UpdateID)
+	productID := strings.TrimSpace(assessment.StoreProductID)
+	updateID := strings.TrimSpace(assessment.UpdateID)
+	if productID != "" && productID != targetProductID {
+		return false
+	}
+	if updateID != "" && updateID != targetUpdateID {
+		return false
+	}
+	return true
+}
+
+func clearStoreAssessmentExactTarget(assessment *StorePublishedAssessment) {
+	assessment.ExactActionTargetAvailable = false
+	assessment.Target = nil
+	assessment.StoreProductID = ""
+	assessment.UpdateID = ""
 }
 
 func sortStoreScanSnapshot(snapshot *StoreScanSnapshot) {

@@ -102,6 +102,7 @@ func (app *App) startOperationJobWithPackageSnapshot(jobType, mode string, total
 	}
 	app.jobs[operationJob.status.JobID] = operationJob
 	app.jobQueue = append(app.jobQueue, operationJob.status.JobID)
+	app.bumpJobsRevisionLocked()
 	queuedStatus := cloneOperationJobStatus(operationJob.status)
 	appLog("Job %s queued for %s.", operationJob.status.JobID, jobType)
 	shouldStartQueueRunner := !app.jobActive
@@ -115,11 +116,22 @@ func (app *App) startOperationJobWithPackageSnapshot(jobType, mode string, total
 			app.jobActive = false
 			operationJob.status.CancelRequested = true
 			finishQueuedOperationJobCancellation(&operationJob.status, "Job cancelled by shutdown.")
-			operationJob.status.Revision++
+			app.bumpOperationJobRevisionLocked(operationJob)
 			app.jobsMu.Unlock()
 		}
 	}
 	return queuedStatus
+}
+
+func (app *App) bumpJobsRevisionLocked() {
+	app.jobsRevision++
+}
+
+func (app *App) bumpOperationJobRevisionLocked(job *OperationJob) {
+	if job != nil {
+		job.status.Revision++
+	}
+	app.bumpJobsRevisionLocked()
 }
 
 func packageSnapshotUpdateAllowances(packages []Package) (allowsUnknownVersion, allowsPinnedVersion bool) {
@@ -143,13 +155,13 @@ func (app *App) runOperationJobQueue(queueCtx context.Context) {
 			}
 			if queuedJob.status.CancelRequested {
 				finishQueuedOperationJobCancellation(&queuedJob.status, "")
-				queuedJob.status.Revision++
+				app.bumpOperationJobRevisionLocked(queuedJob)
 				continue
 			}
 			if queueCtx.Err() != nil {
 				queuedJob.status.CancelRequested = true
 				finishQueuedOperationJobCancellation(&queuedJob.status, "Job cancelled by shutdown.")
-				queuedJob.status.Revision++
+				app.bumpOperationJobRevisionLocked(queuedJob)
 				continue
 			}
 			nextJob = queuedJob
@@ -165,7 +177,7 @@ func (app *App) runOperationJobQueue(queueCtx context.Context) {
 		nextJob.status.State = jobStateRunning
 		nextJob.status.Running = true
 		nextJob.status.StartedAt = utcNow()
-		nextJob.status.Revision++
+		app.bumpOperationJobRevisionLocked(nextJob)
 		startedStatus := cloneOperationJobStatus(nextJob.status)
 		app.jobsMu.Unlock()
 
@@ -201,7 +213,7 @@ func (app *App) runOperationJobQueue(queueCtx context.Context) {
 		if operationJobComplete(nextJob.status) {
 			compactTerminalOperationJobStatus(&nextJob.status)
 		}
-		nextJob.status.Revision++
+		app.bumpOperationJobRevisionLocked(nextJob)
 		finishedStatus := cloneOperationJobStatus(nextJob.status)
 		app.pruneOperationJobsLocked()
 		app.jobsMu.Unlock()
@@ -293,7 +305,7 @@ func (app *App) mutateOperationJob(job *OperationJob, mutate func(*OperationJobS
 	app.jobsMu.Lock()
 	defer app.jobsMu.Unlock()
 	mutate(&job.status)
-	job.status.Revision++
+	app.bumpOperationJobRevisionLocked(job)
 	return cloneOperationJobStatus(job.status)
 }
 
@@ -328,6 +340,11 @@ func (app *App) latestOperationJobStatus(jobTypes ...string) OperationJobStatus 
 }
 
 func (app *App) operationJobsSnapshot() []OperationJobStatus {
+	statuses, _ := app.operationJobsSnapshotWithRevision()
+	return statuses
+}
+
+func (app *App) operationJobsSnapshotWithRevision() ([]OperationJobStatus, int64) {
 	app.jobsMu.Lock()
 	defer app.jobsMu.Unlock()
 	app.pruneOperationJobsLocked()
@@ -340,7 +357,7 @@ func (app *App) operationJobsSnapshot() []OperationJobStatus {
 		}
 		statuses = append(statuses, cloneOperationJobStatus(job.status))
 	}
-	return statuses
+	return statuses, app.jobsRevision
 }
 
 func (app *App) activeOperationJobsSnapshot() []OperationJobStatus {
@@ -375,8 +392,8 @@ func (app *App) cancelOperationJob(id string) (OperationJobStatus, bool) {
 		}
 		if job.status.State == jobStateQueued {
 			finishQueuedOperationJobCancellation(&job.status, "Job cancelled.")
-			job.status.Revision++
 		}
+		app.bumpOperationJobRevisionLocked(job)
 		appLog("Job %s cancellation requested.", job.status.JobID)
 	}
 	app.pruneOperationJobsLocked()
@@ -397,8 +414,8 @@ func (app *App) cancelOperationJobsForShutdown() {
 		}
 		if job.status.State == jobStateQueued {
 			finishQueuedOperationJobCancellation(&job.status, "Job cancelled by shutdown.")
-			job.status.Revision++
 		}
+		app.bumpOperationJobRevisionLocked(job)
 	}
 	app.pruneOperationJobsLocked()
 }
@@ -434,15 +451,22 @@ func (app *App) pruneOperationJobsLocked() {
 		retainedJobIDs[jobID] = true
 		recentCompletedRetained++
 	}
+	prunedAny := false
 	for jobID, job := range app.jobs {
 		if retainedJobIDs[jobID] {
 			continue
 		}
 		if job != nil && operationJobComplete(job.status) {
 			delete(app.jobs, jobID)
+			prunedAny = true
 		}
 	}
+	previousQueueLen := len(app.jobQueue)
 	app.jobQueue = filterExistingOperationJobQueueIDs(app.jobQueue, app.jobs)
+	if prunedAny || len(app.jobQueue) != previousQueueLen {
+		app.bumpJobsRevisionLocked()
+		sessionLogs.RetainJobRings(retainedJobIDs)
+	}
 }
 
 func filterExistingOperationJobQueueIDs(queuedJobIDs []string, jobsByID map[string]*OperationJob) []string {

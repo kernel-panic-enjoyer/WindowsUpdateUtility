@@ -97,6 +97,30 @@ func TestUpdateJobAllowsSelectedUnknownVersionPackageWithGlobalOption(t *testing
 	}
 }
 
+func TestSingleUpdateRejectsCurrentPackageBeforeRunner(t *testing.T) {
+	restore := replaceUpdateJobHooks(func(ctx context.Context, manager, id string) CommandResult {
+		t.Fatalf("single update runner should not be called for non-updatable package %s:%s", manager, id)
+		return CommandResult{}
+	})
+	defer restore()
+
+	app := &App{inventory: Inventory{PackageLookup: PackageLookup{Packages: []Package{{
+		Key:             "winget:Vendor.Current",
+		Manager:         managerWinget,
+		ID:              "Vendor.Current",
+		Name:            "Current App",
+		Version:         "1.0.0",
+		UpdateAvailable: false,
+		UpdateSupported: true,
+	}}}}}
+	app.startSingleUpdateJob(managerWinget, "Vendor.Current", UpdateOptions{})
+
+	status := waitForUpdateJobStopped(t, app)
+	if status.State != jobStateFailed || len(status.Results) != 1 || !strings.Contains(status.Results[0].Result.Stderr, "No update available") {
+		t.Fatalf("expected single update to reject current package, got %#v", status)
+	}
+}
+
 func TestUpdateJobRejectsSelectedPinnedPackage(t *testing.T) {
 	app := testUpdateJobApp(t)
 	app.mu.Lock()
@@ -263,6 +287,37 @@ func TestUpdateAllBatchesMultipleChocolateyPackages(t *testing.T) {
 	status := waitForUpdateJobStopped(t, app)
 	if status.State != jobStateSucceeded || len(status.Results) != 2 || batchCalls != 1 {
 		t.Fatalf("expected one Chocolatey batch with two results, status=%#v batchCalls=%d", status, batchCalls)
+	}
+}
+
+func TestElevatedBatchFailureWithoutPackageRowsFailsJob(t *testing.T) {
+	restore := replaceBulkUpdateBatchHooks(
+		func(pkg Package) bool { return pkg.Manager == managerWinget || pkg.Manager == managerChoco },
+		func(ctx context.Context, packages []Package, progress func(int, Package)) ([]UpdateResult, CommandResult) {
+			return nil, CommandResult{Code: 1, Command: "package_update_batch", Stderr: "worker failed before package results"}
+		},
+		func(ctx context.Context, manager, id string) CommandResult {
+			t.Fatalf("package %s:%s should have used elevated batch", manager, id)
+			return CommandResult{}
+		},
+	)
+	defer restore()
+
+	app := &App{inventory: Inventory{PackageLookup: PackageLookup{Packages: []Package{
+		updatableTestPackage(managerWinget, "Vendor.One", "Vendor One"),
+		updatableTestPackage(managerChoco, "gh", "GitHub CLI"),
+	}}}}
+	if _, err := app.startUpdateJob(nil); err != nil {
+		t.Fatal(err)
+	}
+	status := waitForUpdateJobStopped(t, app)
+	if status.State != jobStateFailed || len(status.Results) != 2 {
+		t.Fatalf("expected failed result per batched package, got %#v", status)
+	}
+	for _, result := range status.Results {
+		if result.Result.OK || !strings.Contains(result.Result.Stderr, "worker failed") {
+			t.Fatalf("expected synthesized failed batch result, got %#v", result)
+		}
 	}
 }
 

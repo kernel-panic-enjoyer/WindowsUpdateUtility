@@ -94,6 +94,7 @@ type App struct {
 	appUpdateFetchedAt         time.Time
 	jobsMu                     sync.Mutex
 	jobs                       map[string]*OperationJob
+	jobsRevision               int64
 	jobSeq                     int64
 	jobQueue                   []string
 	jobActive                  bool

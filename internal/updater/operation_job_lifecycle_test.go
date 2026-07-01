@@ -68,6 +68,67 @@ func TestOperationJobRetentionBoundsCompletedHistory(t *testing.T) {
 	}
 }
 
+func TestOperationJobListRevisionIncreasesForNewJobsAfterOlderJobMutations(t *testing.T) {
+	app := testSessionApp()
+	first := app.startOperationJob(jobTypeScan, "", 1, nil, func(ctx context.Context, job *OperationJob) {
+		for i := 0; i < 5; i++ {
+			app.mutateOperationJob(job, func(status *OperationJobStatus) {
+				status.Notice = fmt.Sprintf("mutation %d", i)
+			})
+		}
+		app.mutateOperationJob(job, func(status *OperationJobStatus) {
+			status.State = jobStateSucceeded
+		})
+	})
+	if _, ok := waitForOperationJobState(app, first.JobID, 2*time.Second); !ok {
+		t.Fatal("first job did not finish")
+	}
+	_, beforeRevision := app.operationJobsSnapshotWithRevision()
+
+	second := app.startOperationJob(jobTypeInventoryRefresh, "", 1, nil, func(ctx context.Context, job *OperationJob) {
+		app.mutateOperationJob(job, func(status *OperationJobStatus) {
+			status.State = jobStateSucceeded
+		})
+	})
+	_, afterRevision := app.operationJobsSnapshotWithRevision()
+	if afterRevision <= beforeRevision {
+		t.Fatalf("new job did not advance list revision: before=%d after=%d second=%s", beforeRevision, afterRevision, second.JobID)
+	}
+}
+
+func TestOperationJobRetentionPrunesPerJobLogRings(t *testing.T) {
+	oldLogs := sessionLogs
+	sessionLogs = &LogBuffer{}
+	defer func() { sessionLogs = oldLogs }()
+
+	app := testSessionApp()
+	var latest OperationJobStatus
+	for i := 0; i < 80; i++ {
+		latest = app.startOperationJob(jobTypeUpdate, "", 1, nil, func(ctx context.Context, job *OperationJob) {
+			sessionLogs.AppendContext(ctx, "app", "retained only while job status is retained", nil)
+			app.mutateOperationJob(job, func(status *OperationJobStatus) {
+				status.State = jobStateSucceeded
+			})
+		})
+	}
+	if _, ok := waitForOperationJobState(app, latest.JobID, 5*time.Second); !ok {
+		t.Fatal("latest high-volume job did not finish")
+	}
+	statuses := app.operationJobsSnapshot()
+	retainedJobIDs := map[string]bool{}
+	for _, status := range statuses {
+		retainedJobIDs[status.JobID] = true
+	}
+
+	sessionLogs.mu.Lock()
+	defer sessionLogs.mu.Unlock()
+	for jobID := range sessionLogs.jobRings {
+		if !retainedJobIDs[jobID] {
+			t.Fatalf("log ring for pruned job %s was retained; retained jobs are %#v", jobID, retainedJobIDs)
+		}
+	}
+}
+
 func TestShutdownCancelsRunningAndQueuedJobs(t *testing.T) {
 	app := testSessionApp()
 	started := make(chan struct{})

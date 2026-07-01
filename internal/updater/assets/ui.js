@@ -12,6 +12,7 @@
   var installedManagerFilter = "all";
   var latestStoreLoading = false;
   var searchResults = [];
+  var selectedUpdateKeys = new Set();
   var installedSearchPackageKeys = new Set();
   var searchMetadata = {};
   var searchPage = 1;
@@ -627,6 +628,7 @@
     document.querySelectorAll("tr[data-key]").forEach(function(row){
       row.classList.toggle("updating-current", !!currentKey && row.dataset.key === currentKey);
     });
+    updateSelectedActionState();
   }
   function compactNoticeText(value){
     return String(value || "").replace(/\s+/g, " ").trim();
@@ -743,6 +745,7 @@
       msstore: "Microsoft Store",
       "store-cli": "Store CLI",
       appx: "AppX inventory",
+      "native-appx": "AppX inventory",
       choco: "Chocolatey sources"
     };
     return labels[value] || value || "Unknown source";
@@ -869,6 +872,36 @@
     if(packageHiddenAfterSuccessfulUpdate(pkg)){ return false; }
     return packageShouldAppearInUpdateQueueBeforeSessionSuppression(pkg);
   }
+  function packageByKey(key){
+    key = String(key || "");
+    for(var i = 0; i < packages.length; i++){
+      if(packages[i] && String(packages[i].key || "") === key){ return packages[i]; }
+    }
+    return null;
+  }
+  function pruneSelectedUpdateKeys(){
+    selectedUpdateKeys.forEach(function(key){
+      var pkg = packageByKey(key);
+      if(!packageShouldAppearInUpdateQueue(pkg) || !packageCanBeIncludedInBulkUpdate(pkg)){
+        selectedUpdateKeys.delete(key);
+      }
+    });
+  }
+  function selectedUpdatePackageKeys(){
+    var keys = [];
+    selectedUpdateKeys.forEach(function(key){
+      var pkg = packageByKey(key);
+      if(packageShouldAppearInUpdateQueue(pkg) && packageCanBeIncludedInBulkUpdate(pkg)){
+        keys.push(key);
+      }
+    });
+    return keys;
+  }
+  function updateSelectedActionState(){
+    var button = $("update-selected-button");
+    if(!button){ return; }
+    button.disabled = updateBusy || activeUpdateJobRunning() || selectedUpdatePackageKeys().length === 0;
+  }
   function packageReasonText(pkg){
     return String((pkg && pkg.update_reason) || "").trim();
   }
@@ -941,7 +974,7 @@
       providerIssues = storePackages.slice();
     }
     var active = storePackages.length > 0 || assessed.length > 0;
-    var healthy = active && counts.unknown === 0 && counts.conflict === 0 && counts.inapplicable === 0 && counts.stale === 0;
+    var healthy = active && counts.unknown === 0 && counts.conflict === 0 && counts.inapplicable === 0 && counts.pending === 0 && counts.stale === 0;
     return {active:active, healthy:healthy, storePackages:storePackages, assessed:assessed, counts:counts, providerIssues:providerIssues, providers:[]};
   }
   function storeCoverageHealthy(){
@@ -966,13 +999,6 @@
     if(!modal){ return; }
     modal.classList.add("hidden");
     updateModalOpenState();
-  }
-  function packageByKey(key){
-    key = String(key || "");
-    for(var i = 0; i < packages.length; i++){
-      if(packages[i] && String(packages[i].key || "") === key){ return packages[i]; }
-    }
-    return null;
   }
   function packageDiagnosticsButton(pkg, options){
     options = options || {};
@@ -1081,7 +1107,7 @@
     var managerMap = latestStatus && latestStatus.managers ? latestStatus.managers : {};
     var managerNames = Object.keys(managerMap);
     var availableManagers = managerNames.filter(function(name){ return managerMap[name] && managerMap[name].available; }).length;
-    var updateCandidates = packages.filter(packageHasUpdateCandidate);
+    var updateCandidates = packages.filter(packageShouldAppearInUpdateQueue);
     var bulkUpdateCandidates = updateCandidates.filter(packageCanBeIncludedInBulkUpdate);
     var autoPreferencePackages = packages.filter(packageCanUseAutoUpdatePreference);
     var inventoryOnly = packages.filter(function(pkg){ return pkg.update_supported === false; }).length;
@@ -1370,12 +1396,13 @@
 		if(pkg.manager !== "store" && pkg.update_supported === false){
 			return '<span class="row-message muted" title="Inventory only">Inventory only</span>';
 		}
-    if(!pkg.can_update_now){
+    var options = {allowUnknown:allowUnknownVersionUpdates(), allowPinned:allowPinnedUpdates()};
+    var blockedUnknown = pkg.unknown_version && !options.allowUnknown;
+    var blockedPinned = pkg.pinned && !options.allowPinned;
+    if(!pkg.can_update_now && !packageCanBeIncludedInBulkUpdate(pkg, options)){
       var reason = pkg.cannot_update_reason || "Unavailable";
       return '<span class="row-message muted" title="' + attr(reason || "This package cannot be updated now") + '">' + html(reason) + '</span>';
     }
-    var blockedUnknown = pkg.unknown_version && !allowUnknownVersionUpdates();
-    var blockedPinned = pkg.pinned && !allowPinnedUpdates();
     var updateState = rowUpdateState(pkg.key);
     var disabled = updateBusy || !!updateState || blockedUnknown || blockedPinned;
     var label = updateState === "active" ? "Updating" : (updateState === "queued" ? "Queued" : "Update");
@@ -1444,8 +1471,9 @@
     updatePage = page.page;
     target.innerHTML = page.items.map(function(pkg){
       var selectable = packageCanBeIncludedInBulkUpdate(pkg);
+      var checked = selectable && selectedUpdateKeys.has(pkg.key);
       var rowClass = rowUpdateState(pkg.key) === "active" ? ' class="updating-current"' : '';
-      return '<tr data-key="' + attr(pkg.key) + '"' + rowClass + '><td><input form="update-selected-form" type="checkbox" name="package_key" value="' + attr(pkg.key) + '" aria-label="Select ' + attr(pkg.name) + ' for update"' + ((updateBusy || !selectable) ? ' disabled' : '') + '></td><td>' + packageNameCell(pkg) + '</td><td>' + managerCell(pkg, {compact:true}) + '</td><td>' + clippedCellText(pkg.version) + '</td><td>' + packageAvailableCell(pkg) + '</td><td>' + autoButton(pkg) + '</td><td class="action-cell">' + updateActionCell(pkg) + '</td></tr>';
+      return '<tr data-key="' + attr(pkg.key) + '"' + rowClass + '><td><input form="update-selected-form" type="checkbox" name="package_key" value="' + attr(pkg.key) + '" aria-label="Select ' + attr(pkg.name) + ' for update"' + (checked ? ' checked' : '') + ((updateBusy || !selectable) ? ' disabled' : '') + '></td><td>' + packageNameCell(pkg) + '</td><td>' + managerCell(pkg, {compact:true}) + '</td><td>' + clippedCellText(pkg.version) + '</td><td>' + packageAvailableCell(pkg) + '</td><td>' + autoButton(pkg) + '</td><td class="action-cell">' + updateActionCell(pkg) + '</td></tr>';
     }).join("");
     renderPager(page, status, prev, next);
   }
@@ -1477,13 +1505,14 @@
     var updateQueuePackages = packages.filter(packageShouldAppearInUpdateQueue);
     var autoPreferencePackages = packages.filter(packageCanUseAutoUpdatePreference);
     var updateJobRunning = activeUpdateJobRunning();
+    pruneSelectedUpdateKeys();
     $("auto-all").disabled = updateBusy || autoPreferencePackages.length === 0;
     $("auto-none").disabled = updateBusy || autoPreferencePackages.length === 0;
     renderUpdatesTable(visibleUpdates(), latestPackagesLoading);
     renderInstalledTable(latestPackagesLoading);
     var bulkUpdatePackages = updateQueuePackages.filter(packageCanBeIncludedInBulkUpdate);
     $("update-all-button").disabled = updateBusy || updateJobRunning || bulkUpdatePackages.length === 0;
-    $("update-selected-button").disabled = updateBusy || updateJobRunning || bulkUpdatePackages.length === 0;
+    updateSelectedActionState();
     renderDashboardSummary();
   }
   function renderStoreLoadingNotes(loading){
@@ -1678,11 +1707,16 @@
     installedSearchPackageKeys.add(key);
     renderSearchTable();
   }
+  function searchPackageInstalledInCurrentSession(pkg){
+    var key = installSearchPackageKey(pkg);
+    return !!(key && installedSearchPackageKeys.has(key));
+  }
   function searchActionCell(pkg){
     var managerInput = '<input type="hidden" name="manager" value="' + attr(pkg.manager) + '">';
     var packageInput = '<input type="hidden" name="package_id" value="' + attr(pkg.id) + '">';
     if(searchPackageAlreadyInstalled(pkg)){
-      return '<form class="install-form install-form-installed" method="post" action="/api/install" data-backend-label="' + attr(executionBackendLabel(pkg)) + '">' + managerInput + packageInput + '<button type="button" disabled aria-label="' + attr((pkg.name || pkg.id) + ' is already installed') + '">' + icon("check") + '<span>Installed</span></button><span class="muted install-route">Installed from this search session.</span></form>';
+      var installedReason = searchPackageInstalledInCurrentSession(pkg) ? "Installed from this search session." : "Already installed.";
+      return '<form class="install-form install-form-installed" method="post" action="/api/install" data-backend-label="' + attr(executionBackendLabel(pkg)) + '">' + managerInput + packageInput + '<button type="button" disabled aria-label="' + attr((pkg.name || pkg.id) + ' is already installed') + '">' + icon("check") + '<span>Installed</span></button><span class="muted install-route">' + html(installedReason) + '</span></form>';
     }
     return '<form class="install-form" method="post" action="/api/install" data-backend-label="' + attr(executionBackendLabel(pkg)) + '">' + managerInput + packageInput + '<button type="submit" aria-label="Install ' + attr(pkg.name || pkg.id) + '">' + icon("install") + '<span>Install</span></button><span class="muted install-route">' + html(installRouteText(pkg)) + '</span></form>';
   }
@@ -1842,9 +1876,12 @@
     var response = await postForm("/api/inventory/refresh", {});
     var payload = await response.json();
     if(!response.ok){ throw new Error(payload.error || "Could not start inventory refresh"); }
-    await waitForJob(payload.job_id, function(status){
+    var finalStatus = await waitForJob(payload.job_id, function(status){
       showNotice(status.notice || "Refreshing package status...", true);
     });
+    if(!jobSucceeded(finalStatus)){
+      throw new Error((finalStatus && finalStatus.notice) || "Package status refresh failed");
+    }
     showNotice("Package status refreshed.");
     return loadPackages(false);
   }
@@ -2042,12 +2079,6 @@
     Object.keys(completedUpdateKeys).forEach(function(key){
       if(!present[key]){ delete completedUpdateKeys[key]; }
     });
-  }
-  function packageByKey(key){
-    for(var i = 0; i < packages.length; i++){
-      if(packages[i].key === key){ return packages[i]; }
-    }
-    return null;
   }
   function packageNameForKey(key){
     var pkg = packageByKey(key);
@@ -2746,12 +2777,13 @@
     }
     if(form.id === "update-selected-form"){
       event.preventDefault();
-      var params = appendGlobalUpdateOptions(new URLSearchParams(new FormData(form)));
-      var keys = params.getAll("package_key");
+      var params = appendGlobalUpdateOptions(new URLSearchParams());
+      var keys = selectedUpdatePackageKeys();
       if(keys.length === 0){
         showNotice("Select at least one package to update.");
         return;
       }
+      keys.forEach(function(key){ params.append("package_key", key); });
       renderUpdatePreflight(buildUpdatePreflight("selected", keys, params, "Updating selected packages..."));
       return;
     }
@@ -2820,6 +2852,15 @@
   });
   $("update-allow-unknown").addEventListener("change", function(){ renderPackageTables(); });
   $("update-allow-pinned").addEventListener("change", function(){ renderPackageTables(); });
+  document.addEventListener("change", function(event){
+    var control = event.target;
+    if(!control || control.name !== "package_key" || !control.form || control.form.id !== "update-selected-form"){ return; }
+    var key = control.value || "";
+    if(!key){ return; }
+    if(control.checked){ selectedUpdateKeys.add(key); }
+    else{ selectedUpdateKeys.delete(key); }
+    updateSelectedActionState();
+  });
   $("updates-prev").addEventListener("click", function(){
     updatePage--;
     renderUpdatesTable(visibleUpdates(), latestPackagesLoading);

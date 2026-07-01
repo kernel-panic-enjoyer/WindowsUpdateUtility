@@ -212,9 +212,11 @@ func TestEventsAPIOnlySendsJobsWhenRevisionChanges(t *testing.T) {
 	}()
 	time.Sleep(200 * time.Millisecond)
 	app.jobsMu.Lock()
-	app.jobs["job-1"].status.Notice = "changed"
-	app.jobs["job-1"].status.Revision++
+	job := app.jobs["job-1"]
 	app.jobsMu.Unlock()
+	app.mutateOperationJob(job, func(status *OperationJobStatus) {
+		status.Notice = "changed"
+	})
 	time.Sleep(1200 * time.Millisecond)
 	cancel()
 	<-done

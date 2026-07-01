@@ -596,6 +596,53 @@ func TestSettingsJSONRequestParsers(t *testing.T) {
 	}
 }
 
+func TestJSONRequestParsersRejectTrailingData(t *testing.T) {
+	updateRequest := httptest.NewRequest(http.MethodPost, "/api/update", strings.NewReader(`{"manager":"winget","package_id":"Git.Git"}{"manager":"choco","package_id":"gh"}`))
+	updateRequest.Header.Set("Content-Type", "application/json")
+	if _, _, _, invalidUpdate := parsePackageUpdateAction(updateRequest); invalidUpdate == nil || !strings.Contains(invalidUpdate.Stderr, "trailing data") {
+		t.Fatalf("expected trailing JSON to be rejected, got %#v", invalidUpdate)
+	}
+
+	themeRequest := httptest.NewRequest(http.MethodPost, "/api/settings/theme", strings.NewReader(`{"theme":"light"}{"theme":"dark"}`))
+	themeRequest.Header.Set("Content-Type", "application/json")
+	if _, err := parseThemeRequest(themeRequest); err == nil || !strings.Contains(err.Error(), "trailing data") {
+		t.Fatalf("expected trailing theme JSON to be rejected, got %v", err)
+	}
+}
+
+func TestStartupSettingsRequireExplicitStrictBoolean(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		json bool
+	}{
+		{name: "missing JSON enabled", body: `{}`, json: true},
+		{name: "missing form enabled", body: `theme=light`},
+		{name: "invalid form enabled", body: `enabled=maybe`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/api/settings/startup", strings.NewReader(tc.body))
+			if tc.json {
+				request.Header.Set("Content-Type", "application/json")
+			} else {
+				request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			}
+			_, invalid := parseStartupRequest(request)
+			if invalid == nil || invalid.Code != 2 {
+				t.Fatalf("expected validation failure, got %#v", invalid)
+			}
+		})
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/api/settings/startup", strings.NewReader(`enabled=false`))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	enabled, invalid := parseStartupRequest(request)
+	if invalid != nil || enabled {
+		t.Fatalf("expected explicit false to parse, enabled=%t invalid=%#v", enabled, invalid)
+	}
+}
+
 func TestSettingsAPIsRejectMalformedJSONBeforeSideEffects(t *testing.T) {
 	cases := []struct {
 		name       string

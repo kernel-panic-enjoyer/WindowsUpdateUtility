@@ -126,6 +126,113 @@ func TestStoreScanRepositoryConformancePublicationIsolationAndRejection(t *testi
 	}
 }
 
+func TestStoreScanRepositoryConformanceNormalizesInvalidExactActionTarget(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*StoreScanSnapshot)
+	}{
+		{
+			name: "nil-target",
+			mutate: func(snapshot *StoreScanSnapshot) {
+				snapshot.Assessments[0].Target = nil
+				snapshot.Assessments[0].ExactActionTargetAvailable = true
+			},
+		},
+		{
+			name: "target-identity-mismatch",
+			mutate: func(snapshot *StoreScanSnapshot) {
+				target := *snapshot.Assessments[0].Target
+				target.Identity.UserSID = "S-1-5-21-other-target-user"
+				snapshot.Assessments[0].Target = &target
+			},
+		},
+		{
+			name: "product-id-mismatch",
+			mutate: func(snapshot *StoreScanSnapshot) {
+				snapshot.Assessments[0].StoreProductID = "9NDIFFERENT"
+			},
+		},
+		{
+			name: "update-id-mismatch",
+			mutate: func(snapshot *StoreScanSnapshot) {
+				snapshot.Assessments[0].UpdateID = "different-update-id"
+			},
+		},
+		{
+			name: "invalid-target-product-id",
+			mutate: func(snapshot *StoreScanSnapshot) {
+				target := *snapshot.Assessments[0].Target
+				target.ProductID = "not a product id"
+				snapshot.Assessments[0].Target = &target
+				snapshot.Assessments[0].StoreProductID = target.ProductID
+			},
+		},
+	}
+	for _, repoCase := range storeScanRepositoryConformanceCases() {
+		for _, testCase := range cases {
+			t.Run(repoCase.name+"/"+testCase.name, func(t *testing.T) {
+				store := repoCase.open(t)
+				defer store.Close()
+
+				userSID := "S-1-5-21-repository-target-" + testCase.name
+				pfn := "OpenAI.Codex_abc123"
+				snapshot := testStoreScanSnapshot(userSID, pfn, "repository-invalid-target-"+testCase.name, time.Date(2026, 6, 23, 11, 30, 0, 0, time.UTC), StoreUpdateAvailable)
+				testCase.mutate(&snapshot)
+
+				if published, err := store.PersistCompletedScanSnapshot(context.Background(), snapshot); err != nil || !published {
+					t.Fatalf("publish=%t err=%v", published, err)
+				}
+				loaded, ok, err := store.LoadLatestPublishedSnapshot(context.Background(), userSID)
+				if err != nil || !ok {
+					t.Fatalf("load ok=%t err=%v", ok, err)
+				}
+				assessment := loaded.Assessments[0]
+				if assessment.State != StoreUpdateAvailable {
+					t.Fatalf("diagnostic update state was not retained: %#v", assessment)
+				}
+				if assessment.ExactActionTargetAvailable || assessment.Target != nil || assessment.StoreProductID != "" || assessment.UpdateID != "" {
+					t.Fatalf("invalid exact action target remained actionable: %#v", assessment)
+				}
+
+				restoreNow := replaceStoreScanNow(loaded.Scan.CompletedAt)
+				projected := applyPublishedStoreAssessmentsToInventory(defaultState(), Inventory{
+					PackageLookup: PackageLookup{Packages: []Package{transactionalStoreAPIPackage(pfn)}},
+				}, loaded, map[string]StorePackagedAppFamily{strings.ToLower(pfn): loaded.Inventory.Families[0]}, providerSummariesFromRuns(loaded.ProviderRuns))
+				restoreNow()
+				if len(projected.Packages) != 1 {
+					t.Fatalf("projected package count=%d", len(projected.Packages))
+				}
+				pkg := projected.Packages[0]
+				if pkg.UpdateAvailable || pkg.CanUpdateNow || pkg.ExactActionTargetAvailable || pkg.StoreProductID != "" || pkg.StoreUpdateID != "" {
+					t.Fatalf("invalid exact action target leaked into API projection: %#v", pkg)
+				}
+			})
+		}
+	}
+}
+
+func TestStoreScanFileRepositoryLoadNormalizesInvalidExactActionTarget(t *testing.T) {
+	repo, err := openStoreScanFileRepository(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repo.Close()
+
+	userSID := "S-1-5-21-file-invalid-target-load"
+	snapshot := testStoreScanSnapshot(userSID, "OpenAI.Codex_abc123", "file-invalid-target-load", time.Date(2026, 6, 23, 11, 45, 0, 0, time.UTC), StoreUpdateAvailable)
+	snapshot.Assessments[0].Target = nil
+	snapshot.Assessments[0].ExactActionTargetAvailable = true
+
+	loaded, err := repo.decodeSnapshotData(mustMarshalJSON(t, snapshot), "fixture.json", userSID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assessment := loaded.Assessments[0]
+	if assessment.ExactActionTargetAvailable || assessment.Target != nil || assessment.StoreProductID != "" || assessment.UpdateID != "" {
+		t.Fatalf("loaded malformed snapshot remained actionable: %#v", assessment)
+	}
+}
+
 func assertStoreScanRepositoryPublicationIsolationAndRejection(t *testing.T, store StoreScanRepository) {
 	t.Helper()
 	userSID := "S-1-5-21-repository-order"

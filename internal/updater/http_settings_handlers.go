@@ -2,6 +2,7 @@ package updater
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 )
@@ -51,13 +52,32 @@ func parseStartupRequest(r *http.Request) (bool, *CommandResult) {
 			return false, &result
 		}
 		if startupSettings.Enabled == nil {
-			return false, nil
+			result := validationCommandResult("startup settings", fmt.Errorf("missing enabled setting"))
+			return false, &result
 		}
 		return *startupSettings.Enabled, nil
 	}
 	_ = r.ParseForm()
-	startupEnabled, _ := formBool(r, "enabled")
+	startupEnabled, err := requiredFormBool(r, "enabled")
+	if err != nil {
+		result := validationCommandResult("startup settings", err)
+		return false, &result
+	}
 	return startupEnabled, nil
+}
+
+func requiredFormBool(request *http.Request, fieldName string) (bool, error) {
+	if !request.Form.Has(fieldName) {
+		return false, fmt.Errorf("missing %s setting", fieldName)
+	}
+	switch strings.ToLower(strings.TrimSpace(request.Form.Get(fieldName))) {
+	case "true", "1", "on", "yes":
+		return true, nil
+	case "false", "0", "off", "no":
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid %s setting", fieldName)
+	}
 }
 
 func parseAutoUpdateRequest(r *http.Request) (*bool, []string, *bool, *CommandResult) {

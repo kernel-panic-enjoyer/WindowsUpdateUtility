@@ -45,6 +45,46 @@ func TestWinRTDiscoveryExactPFNPositiveBecomesActionable(t *testing.T) {
 	}
 }
 
+func TestWinRTDiscoveryPartialPositiveIsDiagnosticOnly(t *testing.T) {
+	userSID := "S-1-5-21-winrt-partial"
+	pfn := "Microsoft.WindowsCalculator_8wekyb3d8bbwe"
+	scan := completedStoreScan("scan-winrt-partial", userSID, StoreProviderIdentity{ID: storeWinRTDiscoveryProviderID})
+	families := testStoreInventory(scan, pfn, "1.0.0.0").Families
+
+	provider := storeWinRTDiscoveryCatalogProvider{
+		Discover: func(context.Context, StoreScanGeneration, []StorePackagedAppFamily) (storeUpdateDiscoveryWorkerResponse, CommandResult) {
+			return storeUpdateDiscoveryWorkerResponse{
+				ProtocolVersion: storeUpdateDiscoveryWorkerProtocolVersion,
+				ScanID:          scan.ScanID,
+				UserSID:         userSID,
+				Completed:       true,
+				Partial:         true,
+				Errors:          []string{"worker returned partial Store discovery evidence"},
+				Items: []storeUpdateDiscoveryItem{{
+					PackageFamilyName: pfn,
+					ProductID:         "9WZDNCRFHVN5",
+					OfferAvailable:    true,
+					InstallState:      storeInstallStateReadyToDownload,
+				}},
+			}, CommandResult{OK: true, Command: "fake partial winrt discovery"}
+		},
+		Now: func() time.Time { return scan.CompletedAt },
+	}
+
+	run := provider.Observe(context.Background(), scan, families)
+	if run.Health != StoreProviderIncomplete || len(run.Observations) != 0 || len(run.Mappings) != 0 {
+		t.Fatalf("partial WinRT discovery must stay diagnostic-only, got %#v", run)
+	}
+	assessment := ReconcileStoreUpdate(StoreReconciliationInput{
+		Identity:     StoreInstalledIdentity{UserSID: userSID, PackageFamilyName: pfn},
+		Scan:         scan,
+		Observations: run.Observations,
+	})
+	if assessment.State == StoreUpdateAvailable || assessment.Target != nil {
+		t.Fatalf("partial WinRT positive became actionable: %#v", assessment)
+	}
+}
+
 func TestWinRTDiscoveryPositiveSupersedesStoreCLIAggregateNegative(t *testing.T) {
 	userSID := "S-1-5-21-winrt-negative-guard"
 	pfn := "Microsoft.WindowsCalculator_8wekyb3d8bbwe"

@@ -44,9 +44,13 @@ func TestBuildWorkspaceSupportsReleaseStrippingMetadata(t *testing.T) {
 		"GPL-3.0-only",
 		"repository",
 		"https://github.com/kernel-panic-enjoyer/WindowsUpdateUtility",
+		"Get-Command node -ErrorAction SilentlyContinue",
 	} {
 		if !strings.Contains(script, expected) {
 			t.Fatalf("build script missing %q", expected)
 		}
+	}
+	if strings.Contains(script, "$_ -eq 'node'") {
+		t.Fatal("build script should not select a literal node command without checking PATH")
 	}
 }

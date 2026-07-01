@@ -137,6 +137,7 @@ type wingetUpgradeRetryPlan struct {
 
 func runWingetUpgradePlanWithFallbacks(ctx context.Context, plan wingetUpgradePlan) CommandResult {
 	result := runPackageActionCommand(ctx, managerWinget, packageActionTimeout, plan.BuildUpgradeCommand()...)
+	activeRetryFlags := []string{}
 
 	for _, retryPlan := range []wingetUpgradeRetryPlan{
 		{
@@ -157,7 +158,7 @@ func runWingetUpgradePlanWithFallbacks(ctx context.Context, plan wingetUpgradePl
 		},
 	} {
 		var stopAfterRetry bool
-		result, stopAfterRetry = runWingetUpgradeRetryIfNeeded(ctx, plan, result, retryPlan)
+		result, activeRetryFlags, stopAfterRetry = runWingetUpgradeRetryIfNeeded(ctx, plan, result, retryPlan, activeRetryFlags)
 		if stopAfterRetry {
 			return result
 		}
@@ -168,7 +169,8 @@ func runWingetUpgradePlanWithFallbacks(ctx context.Context, plan wingetUpgradePl
 			return result
 		}
 		appLog("Winget upgrade for %s reported no applicable upgrade; retrying with --force.", plan.TargetDescription)
-		forceUpgradeResult := runPackageActionCommand(ctx, managerWinget, packageActionTimeout, plan.BuildUpgradeCommand("--force")...)
+		forceArgs := append(append([]string{}, activeRetryFlags...), "--force")
+		forceUpgradeResult := runPackageActionCommand(ctx, managerWinget, packageActionTimeout, plan.BuildUpgradeCommand(forceArgs...)...)
 		result = mergeCommandAttemptsWithFinalResult(result, forceUpgradeResult, "winget force upgrade retry")
 		if forceUpgradeResult.OK || ctx.Err() != nil {
 			return result
@@ -186,18 +188,19 @@ func runWingetUpgradePlanWithFallbacks(ctx context.Context, plan wingetUpgradePl
 	return result
 }
 
-func runWingetUpgradeRetryIfNeeded(ctx context.Context, plan wingetUpgradePlan, currentResult CommandResult, retryPlan wingetUpgradeRetryPlan) (CommandResult, bool) {
+func runWingetUpgradeRetryIfNeeded(ctx context.Context, plan wingetUpgradePlan, currentResult CommandResult, retryPlan wingetUpgradeRetryPlan, activeRetryFlags []string) (CommandResult, []string, bool) {
 	if !retryPlan.ShouldRetry(currentResult) {
-		return currentResult, false
+		return currentResult, activeRetryFlags, false
 	}
 	if ctx.Err() != nil {
-		return currentResult, true
+		return currentResult, activeRetryFlags, true
 	}
 	if !retryPlan.AllowedByPolicy {
-		return retryPlan.BuildConsentRequiredResult(currentResult), true
+		return retryPlan.BuildConsentRequiredResult(currentResult), activeRetryFlags, true
 	}
 	appLog(retryPlan.RetryLogMessage, plan.TargetDescription)
-	retryResult := runPackageActionCommand(ctx, managerWinget, packageActionTimeout, plan.BuildUpgradeCommand(retryPlan.CommandFlag)...)
+	retryFlags := append(append([]string{}, activeRetryFlags...), retryPlan.CommandFlag)
+	retryResult := runPackageActionCommand(ctx, managerWinget, packageActionTimeout, plan.BuildUpgradeCommand(retryFlags...)...)
 	currentResult = mergeCommandAttemptsWithFinalResult(currentResult, retryResult, retryPlan.MergeLabel)
-	return currentResult, retryResult.OK || ctx.Err() != nil
+	return currentResult, retryFlags, retryResult.OK || ctx.Err() != nil
 }
