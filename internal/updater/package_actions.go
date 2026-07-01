@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	packageActionRetryGap    = 2 * time.Second
+	packageActionRetryDelay  = 2 * time.Second
 	packageActionMaxAttempts = 3
 	// Mutable package-manager commands can hand off to silent installers. Keep
 	// the timeout tight enough that a hidden installer cannot leave an update
@@ -18,11 +18,11 @@ const (
 )
 
 var packageActionCommandRunner = runCommandContext
-var packageActionManagerAvailable = func(manager string) bool {
-	return detectManager(manager).Available
+var packageActionManagerAvailable = func(packageManager string) bool {
+	return detectManager(packageManager).Available
 }
 var packageActionRetryWait = func(ctx context.Context) bool {
-	timer := time.NewTimer(packageActionRetryGap)
+	timer := time.NewTimer(packageActionRetryDelay)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
@@ -32,13 +32,13 @@ var packageActionRetryWait = func(ctx context.Context) bool {
 	}
 }
 
-func validateManagerAndID(manager, id string) error {
+func validateManagerAndID(manager, packageIDOrQuery string) error {
 	if !isManagedPackageManager(manager) {
 		return managerValidationError()
 	}
-	id = strings.TrimSpace(id)
+	target := strings.TrimSpace(packageIDOrQuery)
 	if manager == managerStore || manager == managerWinget {
-		if id == "" || len(id) > 240 || containsBlockedPackageActionChar(id) || isOptionLikePackageTarget(id) {
+		if target == "" || len(target) > 240 || containsBlockedPackageActionChar(target) || isOptionLikePackageTarget(target) {
 			if manager == managerStore {
 				return errors.New("store package id or query contains unsupported characters")
 			}
@@ -46,18 +46,18 @@ func validateManagerAndID(manager, id string) error {
 		}
 		return nil
 	}
-	if id == "" || isOptionLikePackageTarget(id) || !isSafePackageID(id) {
+	if target == "" || isOptionLikePackageTarget(target) || !isSafePackageID(target) {
 		return errors.New("package id contains unsupported characters")
 	}
 	return nil
 }
 
-func isSafePackageID(id string) bool {
-	if id == "" {
+func isSafePackageID(packageID string) bool {
+	if packageID == "" {
 		return false
 	}
-	for _, r := range id {
-		if isASCIIAlphaNumeric(r) || r == '_' || r == '.' || r == '+' || r == '-' || r == ':' {
+	for _, character := range packageID {
+		if isASCIIAlphaNumeric(character) || character == '_' || character == '.' || character == '+' || character == '-' || character == ':' {
 			continue
 		}
 		return false
@@ -65,9 +65,9 @@ func isSafePackageID(id string) bool {
 	return true
 }
 
-func containsBlockedPackageActionChar(value string) bool {
-	for _, r := range value {
-		switch r {
+func containsBlockedPackageActionChar(target string) bool {
+	for _, character := range target {
+		switch character {
 		case 0, '\r', '\n', '&', '|', '<', '>', '^', '"', '%':
 			return true
 		}
@@ -75,51 +75,51 @@ func containsBlockedPackageActionChar(value string) bool {
 	return false
 }
 
-func isOptionLikePackageTarget(value string) bool {
-	return strings.HasPrefix(strings.TrimSpace(value), "-")
+func isOptionLikePackageTarget(target string) bool {
+	return strings.HasPrefix(strings.TrimSpace(target), "-")
 }
 
-func isASCIIAlphaNumeric(r rune) bool {
-	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+func isASCIIAlphaNumeric(character rune) bool {
+	return (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9')
 }
 
-func installPackageContext(ctx context.Context, manager, id string) CommandResult {
-	if err := validateManagerAndID(manager, id); err != nil {
+func installPackageContext(ctx context.Context, manager, packageIDOrQuery string) CommandResult {
+	if err := validateManagerAndID(manager, packageIDOrQuery); err != nil {
 		return validationCommandResult("install", err)
 	}
-	appLog("Install started for %s:%s.", manager, id)
-	if result := runPrivilegedPackageInstall(ctx, manager, id); result.Command != "" || result.Code != 0 || result.OK {
-		appLog("Install finished for %s:%s with code %d.", manager, id, result.Code)
+	appLog("Install started for %s:%s.", manager, packageIDOrQuery)
+	if result := runPrivilegedPackageInstall(ctx, manager, packageIDOrQuery); result.Command != "" || result.Code != 0 || result.OK {
+		appLog("Install finished for %s:%s with code %d.", manager, packageIDOrQuery, result.Code)
 		return result
 	}
 	defer invalidateManagerDetectionCache()
 	var result CommandResult
 	switch manager {
 	case managerStore:
-		result = runStoreInstallWithFallbackContext(ctx, id)
+		result = runStoreInstallWithFallbackContext(ctx, packageIDOrQuery)
 	case managerWinget:
-		result = runPackageActionCommand(ctx, managerWinget, packageActionTimeout, wingetInstallCommand(manager, id, false)...)
+		result = runPackageActionCommand(ctx, managerWinget, packageActionTimeout, wingetInstallCommand(manager, packageIDOrQuery, false)...)
 	case managerChoco:
-		result = runPackageActionCommand(ctx, managerChoco, packageActionTimeout, chocoPackageCommand("install", id)...)
+		result = runPackageActionCommand(ctx, managerChoco, packageActionTimeout, chocoPackageCommand("install", packageIDOrQuery)...)
 	}
-	appLog("Install finished for %s:%s with code %d.", manager, id, result.Code)
+	appLog("Install finished for %s:%s with code %d.", manager, packageIDOrQuery, result.Code)
 	return result
 }
 
 func updatePackageWithMetadataContext(ctx context.Context, pkg Package) CommandResult {
-	manager := strings.TrimSpace(pkg.Manager)
-	id := strings.TrimSpace(pkg.ID)
-	if err := validateManagerAndID(manager, id); err != nil {
+	packageManager := strings.TrimSpace(pkg.Manager)
+	packageID := strings.TrimSpace(pkg.ID)
+	if err := validateManagerAndID(packageManager, packageID); err != nil {
 		return validationCommandResult("update", err)
 	}
-	appLog("Update started for %s:%s.", manager, id)
+	appLog("Update started for %s:%s.", packageManager, packageID)
 	if result := runPrivilegedPackageUpdate(ctx, pkg); result.Command != "" || result.Code != 0 || result.OK {
-		appLog("Update finished for %s:%s with code %d.", manager, id, result.Code)
+		appLog("Update finished for %s:%s with code %d.", packageManager, packageID, result.Code)
 		return result
 	}
 	defer invalidateManagerDetectionCache()
 	var result CommandResult
-	switch manager {
+	switch packageManager {
 	case managerStore:
 		if pkg.UpdateState != "" {
 			result = runExactStoreUpdateWithVerification(ctx, pkg)
@@ -127,86 +127,85 @@ func updatePackageWithMetadataContext(ctx context.Context, pkg Package) CommandR
 			result = validationCommandResult("update", errors.New("Store update requires the exact assessment path"))
 		}
 	case managerWinget:
-		result = runWingetUpgradePackageWithInstallFallbackContext(ctx, manager, pkg)
+		result = runWingetUpgradePackageWithInstallFallbackContext(ctx, packageManager, pkg)
 	case managerChoco:
 		result = runChocoUpgradePackageWithFallbackContext(ctx, pkg)
 	}
-	appLog("Update finished for %s:%s with code %d.", manager, id, result.Code)
+	appLog("Update finished for %s:%s with code %d.", packageManager, packageID, result.Code)
 	return result
 }
 
-func runPackageActionCommand(ctx context.Context, manager string, timeout time.Duration, args ...string) CommandResult {
-	result := runNormalizedPackageAction(ctx, manager, timeout, args...)
-	if result.OK || ctx.Err() != nil {
-		return result
+func runPackageActionCommand(ctx context.Context, packageManager string, timeout time.Duration, args ...string) CommandResult {
+	actionResult := runPackageActionAttempt(ctx, packageManager, timeout, args...)
+	if actionResult.OK || ctx.Err() != nil {
+		return actionResult
 	}
-	if manager == managerWinget && isWingetSourceFailure(result) {
+	if packageManager == managerWinget && isWingetSourceFailure(actionResult) {
 		appLog("Winget command failed because source metadata looked stale or unavailable; updating sources before retry.")
-		repair := runNormalizedPackageAction(ctx, managerWinget, managerDetectionTimeout, wingetSourceUpdateCommand()...)
-		merged := mergeCommandAttemptsWithFinalResult(result, repair, "winget source update")
+		sourceUpdateResult := runPackageActionAttempt(ctx, managerWinget, managerDetectionTimeout, wingetSourceUpdateCommand()...)
+		actionResult = mergeCommandAttemptsWithFinalResult(actionResult, sourceUpdateResult, "winget source update")
 		if ctx.Err() != nil {
-			return merged
+			return actionResult
 		}
-		if !repair.OK {
-			if !isWingetSourceFailure(repair) {
-				return merged
+		retryLabel := "winget retry after source update"
+		if !sourceUpdateResult.OK {
+			if !isWingetSourceFailure(sourceUpdateResult) {
+				return actionResult
 			}
 			appLog("Winget source update failed with source metadata errors; resetting sources before retry.")
-			reset := runNormalizedPackageAction(ctx, managerWinget, managerDetectionTimeout, wingetSourceResetCommand()...)
-			merged = mergeCommandAttemptsWithFinalResult(merged, reset, "winget source reset")
-			if ctx.Err() != nil || !reset.OK {
-				return merged
+			sourceResetResult := runPackageActionAttempt(ctx, managerWinget, managerDetectionTimeout, wingetSourceResetCommand()...)
+			actionResult = mergeCommandAttemptsWithFinalResult(actionResult, sourceResetResult, "winget source reset")
+			if ctx.Err() != nil || !sourceResetResult.OK {
+				return actionResult
 			}
-			retry := runNormalizedPackageAction(ctx, manager, timeout, args...)
-			result = mergeCommandAttemptsWithFinalResult(merged, retry, "winget retry after source reset")
-			return retryTransientPackageAction(ctx, manager, timeout, result, args...)
+			retryLabel = "winget retry after source reset"
 		}
-		retry := runNormalizedPackageAction(ctx, manager, timeout, args...)
-		result = mergeCommandAttemptsWithFinalResult(merged, retry, "winget retry after source update")
+		retryResult := runPackageActionAttempt(ctx, packageManager, timeout, args...)
+		actionResult = mergeCommandAttemptsWithFinalResult(actionResult, retryResult, retryLabel)
 	}
-	return retryTransientPackageAction(ctx, manager, timeout, result, args...)
+	return retryPackageActionOnTransientFailure(ctx, packageManager, timeout, actionResult, args...)
 }
 
-func runNormalizedPackageAction(ctx context.Context, manager string, timeout time.Duration, args ...string) CommandResult {
-	return normalizePackageActionResult(manager, packageActionCommandRunner(ctx, timeout, args...))
+func runPackageActionAttempt(ctx context.Context, packageManager string, timeout time.Duration, args ...string) CommandResult {
+	return normalizePackageActionResult(packageManager, packageActionCommandRunner(ctx, timeout, args...))
 }
 
-func retryTransientPackageAction(ctx context.Context, manager string, timeout time.Duration, result CommandResult, args ...string) CommandResult {
+func retryPackageActionOnTransientFailure(ctx context.Context, packageManager string, timeout time.Duration, currentResult CommandResult, args ...string) CommandResult {
 	for attempt := 2; attempt <= packageActionMaxAttempts; attempt++ {
-		if result.OK || ctx.Err() != nil || !isTransientPackageManagerFailure(manager, result) {
-			return result
+		if currentResult.OK || ctx.Err() != nil || !isTransientPackageManagerFailure(packageManager, currentResult) {
+			return currentResult
 		}
-		appLog("%s command failed with transient code %d; retrying attempt %d/%d.", manager, result.Code, attempt, packageActionMaxAttempts)
+		appLog("%s command failed with transient code %d; retrying attempt %d/%d.", packageManager, currentResult.Code, attempt, packageActionMaxAttempts)
 		if !packageActionRetryWait(ctx) {
-			return result
+			return currentResult
 		}
-		retry := runNormalizedPackageAction(ctx, manager, timeout, args...)
-		result = mergeCommandAttemptsWithFinalResult(result, retry, fmt.Sprintf("%s retry %d", manager, attempt-1))
+		retryResult := runPackageActionAttempt(ctx, packageManager, timeout, args...)
+		currentResult = mergeCommandAttemptsWithFinalResult(currentResult, retryResult, fmt.Sprintf("%s retry %d", packageManager, attempt-1))
 	}
-	return result
+	return currentResult
 }
 
-func installManager(manager string) CommandResult {
-	return installManagerContext(context.Background(), manager)
+func installManager(packageManager string) CommandResult {
+	return installManagerContext(context.Background(), packageManager)
 }
 
-func installManagerContext(ctx context.Context, manager string) CommandResult {
-	appLog("Package manager install action started for %s.", manager)
+func installManagerContext(ctx context.Context, packageManager string) CommandResult {
+	appLog("Package manager install action started for %s.", packageManager)
 	invalidateManagerDetectionCache()
 	defer invalidateManagerDetectionCache()
-	if manager == managerChoco && !isAdmin() {
+	if packageManager == managerChoco && !isAdmin() {
 		result := runElevatedWorkerOperation(ctx, elevatedWorkerInvocation{
 			Operation: workerOperationManagerInstall,
-			Payload:   elevatedWorkerManagerInstallPayload{Manager: manager},
+			Payload:   elevatedWorkerManagerInstallPayload{Manager: packageManager},
 		})
 		if result.OK {
 			refreshProcessEnvironmentFromRegistry()
 		}
-		appLog("Package manager install action finished for %s with code %d.", manager, result.Code)
+		appLog("Package manager install action finished for %s with code %d.", packageManager, result.Code)
 		return result
 	}
 	var result CommandResult
-	switch manager {
+	switch packageManager {
 	case managerWinget:
 		// Manager bootstrap handoffs intentionally detach: these open trusted
 		// Windows UI surfaces or a browser page and do not represent a mutable
@@ -255,6 +254,6 @@ func installManagerContext(ctx context.Context, manager string) CommandResult {
 	if result.OK {
 		refreshProcessEnvironmentFromRegistry()
 	}
-	appLog("Package manager install action finished for %s with code %d.", manager, result.Code)
+	appLog("Package manager install action finished for %s with code %d.", packageManager, result.Code)
 	return result
 }

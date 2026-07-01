@@ -6,88 +6,95 @@ import (
 	"unicode/utf8"
 )
 
-func decodeCommandOutputBytes(data []byte) string {
-	if len(data) == 0 {
+const (
+	utf8MojibakeMarkerRunes   = "\u00c3\u00c2\u00e2"
+	mojibakeRepairScoreMargin = 2
+)
+
+func decodeCommandOutputBytes(outputBytes []byte) string {
+	if len(outputBytes) == 0 {
 		return ""
 	}
-	if utf8.Valid(data) {
-		return repairUTF8Mojibake(string(data))
+	if utf8.Valid(outputBytes) {
+		return repairCommandOutputMojibake(string(outputBytes))
 	}
-	return repairUTF8Mojibake(decodeWindows1252(data))
+	return repairCommandOutputMojibake(decodeWindows1252Bytes(outputBytes))
 }
 
-func repairUTF8Mojibake(value string) string {
-	if value == "" || !strings.ContainsAny(value, "ÃÂâ") {
-		return value
+func repairCommandOutputMojibake(commandOutputText string) string {
+	if commandOutputText == "" || !strings.ContainsAny(commandOutputText, utf8MojibakeMarkerRunes) {
+		return commandOutputText
 	}
-	var builder strings.Builder
-	var segment strings.Builder
-	changed := false
-	flushSegment := func() {
-		if segment.Len() == 0 {
+	var repairedOutput strings.Builder
+	var currentToken strings.Builder
+	repairedAnyToken := false
+	flushToken := func() {
+		if currentToken.Len() == 0 {
 			return
 		}
-		original := segment.String()
-		repaired, ok := repairUTF8MojibakeSegment(original)
+		tokenText := currentToken.String()
+		repairedToken, ok := repairMojibakeToken(tokenText)
 		if ok {
-			builder.WriteString(repaired)
-			changed = true
+			repairedOutput.WriteString(repairedToken)
+			repairedAnyToken = true
 		} else {
-			builder.WriteString(original)
+			repairedOutput.WriteString(tokenText)
 		}
-		segment.Reset()
+		currentToken.Reset()
 	}
-	for _, r := range value {
-		if unicode.IsSpace(r) {
-			flushSegment()
-			builder.WriteRune(r)
+	for _, character := range commandOutputText {
+		if unicode.IsSpace(character) {
+			flushToken()
+			repairedOutput.WriteRune(character)
 			continue
 		}
-		segment.WriteRune(r)
+		currentToken.WriteRune(character)
 	}
-	flushSegment()
-	if !changed {
-		return value
+	flushToken()
+	if !repairedAnyToken {
+		return commandOutputText
 	}
-	return builder.String()
+	return repairedOutput.String()
 }
 
-func repairUTF8MojibakeSegment(value string) (string, bool) {
-	if value == "" || !strings.ContainsAny(value, "ÃÂâ") {
+func repairMojibakeToken(tokenText string) (string, bool) {
+	if tokenText == "" || !strings.ContainsAny(tokenText, utf8MojibakeMarkerRunes) {
 		return "", false
 	}
-	encoded := make([]byte, 0, len(value))
-	for _, r := range value {
-		b, ok := encodeWindows1252Rune(r)
+	candidateUTF8Bytes := make([]byte, 0, len(tokenText))
+	for _, character := range tokenText {
+		encodedByte, ok := encodeRuneAsWindows1252Byte(character)
 		if !ok {
 			return "", false
 		}
-		encoded = append(encoded, b)
+		candidateUTF8Bytes = append(candidateUTF8Bytes, encodedByte)
 	}
-	if !utf8.Valid(encoded) {
+	if !utf8.Valid(candidateUTF8Bytes) {
 		return "", false
 	}
-	repaired := string(encoded)
-	if commandOutputTextScore(repaired) <= commandOutputTextScore(value)+2 {
+	repairedToken := string(candidateUTF8Bytes)
+	originalScore := scoreCommandOutputText(tokenText)
+	repairedScore := scoreCommandOutputText(repairedToken)
+	if repairedScore <= originalScore+mojibakeRepairScoreMargin {
 		return "", false
 	}
-	return repaired, true
+	return repairedToken, true
 }
 
-func decodeWindows1252(data []byte) string {
-	var builder strings.Builder
-	builder.Grow(len(data))
-	for _, b := range data {
-		builder.WriteRune(decodeWindows1252Byte(b))
+func decodeWindows1252Bytes(encodedBytes []byte) string {
+	var decodedText strings.Builder
+	decodedText.Grow(len(encodedBytes))
+	for _, encodedByte := range encodedBytes {
+		decodedText.WriteRune(decodeWindows1252Byte(encodedByte))
 	}
-	return builder.String()
+	return decodedText.String()
 }
 
-func decodeWindows1252Byte(b byte) rune {
-	if b < 0x80 || b >= 0xa0 {
-		return rune(b)
+func decodeWindows1252Byte(encodedByte byte) rune {
+	if encodedByte < 0x80 || encodedByte >= 0xa0 {
+		return rune(encodedByte)
 	}
-	switch b {
+	switch encodedByte {
 	case 0x80:
 		return '€'
 	case 0x82:
@@ -147,11 +154,11 @@ func decodeWindows1252Byte(b byte) rune {
 	}
 }
 
-func encodeWindows1252Rune(r rune) (byte, bool) {
-	if r < 0x80 || (r >= 0xa0 && r <= 0xff) {
-		return byte(r), true
+func encodeRuneAsWindows1252Byte(character rune) (byte, bool) {
+	if character < 0x80 || (character >= 0xa0 && character <= 0xff) {
+		return byte(character), true
 	}
-	switch r {
+	switch character {
 	case '€':
 		return 0x80, true
 	case '‚':
@@ -211,24 +218,24 @@ func encodeWindows1252Rune(r rune) (byte, bool) {
 	}
 }
 
-func commandOutputTextScore(value string) int {
+func scoreCommandOutputText(commandOutputText string) int {
 	score := 0
-	for _, r := range value {
+	for _, character := range commandOutputText {
 		switch {
-		case r == utf8.RuneError:
+		case character == utf8.RuneError:
 			score -= 8
-		case r == '\n' || r == '\r' || r == '\t':
+		case character == '\n' || character == '\r' || character == '\t':
 			score += 1
-		case unicode.IsControl(r):
+		case unicode.IsControl(character):
 			score -= 6
-		case unicode.IsLetter(r) || unicode.IsDigit(r):
+		case unicode.IsLetter(character) || unicode.IsDigit(character):
 			score += 3
-		case unicode.IsSpace(r) || unicode.IsPunct(r) || unicode.IsSymbol(r):
+		case unicode.IsSpace(character) || unicode.IsPunct(character) || unicode.IsSymbol(character):
 			score += 1
 		default:
 			score -= 1
 		}
-		switch r {
+		switch character {
 		case 'Ã', 'Â':
 			score -= 8
 		case '�':

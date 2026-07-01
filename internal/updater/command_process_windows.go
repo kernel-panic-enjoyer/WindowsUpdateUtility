@@ -11,60 +11,60 @@ import (
 )
 
 type commandProcessOwner struct {
-	job  windows.Handle
-	once sync.Once
+	jobHandle windows.Handle
+	closeOnce sync.Once
 }
 
 func newCommandProcessOwner(enabled bool) (*commandProcessOwner, error) {
 	if !enabled {
 		return nil, nil
 	}
-	job, err := windows.CreateJobObject(nil, nil)
+	jobHandle, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
 		return nil, err
 	}
-	owner := &commandProcessOwner{job: job}
-	limit := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{}
-	limit.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+	processOwner := &commandProcessOwner{jobHandle: jobHandle}
+	killOnCloseLimit := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{}
+	killOnCloseLimit.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
 	if _, err := windows.SetInformationJobObject(
-		job,
+		jobHandle,
 		windows.JobObjectExtendedLimitInformation,
-		uintptr(unsafe.Pointer(&limit)),
-		uint32(unsafe.Sizeof(limit)),
+		uintptr(unsafe.Pointer(&killOnCloseLimit)),
+		uint32(unsafe.Sizeof(killOnCloseLimit)),
 	); err != nil {
-		owner.Close()
+		processOwner.Close()
 		return nil, err
 	}
-	return owner, nil
+	return processOwner, nil
 }
 
-func (owner *commandProcessOwner) Assign(cmd *exec.Cmd) error {
-	if owner == nil || owner.job == 0 || cmd == nil || cmd.Process == nil {
+func (processOwner *commandProcessOwner) Assign(command *exec.Cmd) error {
+	if processOwner == nil || processOwner.jobHandle == 0 || command == nil || command.Process == nil {
 		return nil
 	}
-	handle, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(cmd.Process.Pid))
+	processHandle, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(command.Process.Pid))
 	if err != nil {
 		return err
 	}
-	defer windows.CloseHandle(handle)
-	return windows.AssignProcessToJobObject(owner.job, handle)
+	defer windows.CloseHandle(processHandle)
+	return windows.AssignProcessToJobObject(processOwner.jobHandle, processHandle)
 }
 
-func (owner *commandProcessOwner) Terminate() {
-	if owner == nil || owner.job == 0 {
+func (processOwner *commandProcessOwner) Terminate() {
+	if processOwner == nil || processOwner.jobHandle == 0 {
 		return
 	}
-	_ = windows.TerminateJobObject(owner.job, uint32(commandCancelledCode))
+	_ = windows.TerminateJobObject(processOwner.jobHandle, uint32(commandCancelledCode))
 }
 
-func (owner *commandProcessOwner) Close() {
-	if owner == nil {
+func (processOwner *commandProcessOwner) Close() {
+	if processOwner == nil {
 		return
 	}
-	owner.once.Do(func() {
-		if owner.job != 0 {
-			_ = windows.CloseHandle(owner.job)
-			owner.job = 0
+	processOwner.closeOnce.Do(func() {
+		if processOwner.jobHandle != 0 {
+			_ = windows.CloseHandle(processOwner.jobHandle)
+			processOwner.jobHandle = 0
 		}
 	})
 }

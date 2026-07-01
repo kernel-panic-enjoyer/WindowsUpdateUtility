@@ -13,18 +13,19 @@ const updateJobModeSelected = "selected"
 var errUpdateJobRunning = errors.New("an update job is already running")
 var errNoUpdateCandidates = errors.New("no updatable packages found")
 
-var errStoreScanRefreshTimeout = errors.New("timed out waiting for Microsoft Store scan to finish")
+var errUpdateJobStoreScanRefreshTimeout = errors.New("timed out waiting for Microsoft Store scan to finish")
 
-var refreshInventoryAfterUpdateJob = func(ctx context.Context, app *App, packages []Package) error {
+var refreshInventoryAfterUpdateJob = func(ctx context.Context, app *App, updatedPackages []Package) error {
 	app.refreshInventorySyncContext(ctx, "update job")
-	if updateJobTouchesStore(packages) {
-		if !app.waitForStoreScanIdle(ctx, 12*time.Minute) {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			appLog("Microsoft Store scan did not finish before update job refresh timeout.")
-			return errStoreScanRefreshTimeout
+	if !updateJobIncludesStorePackage(updatedPackages) {
+		return nil
+	}
+	if !app.waitForStoreScanIdle(ctx, 12*time.Minute) {
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
+		appLog("Microsoft Store scan did not finish before update job refresh timeout.")
+		return errUpdateJobStoreScanRefreshTimeout
 	}
 	return nil
 }
@@ -37,7 +38,7 @@ type UpdateOptions struct {
 }
 
 func (app *App) startUpdateJob(packageKeys []string) (UpdateJobStatus, error) {
-	return app.startUpdateJobWithOptions(packageKeys, UpdateOptions{})
+	return app.startBulkUpdateJob(packageKeys, UpdateOptions{})
 }
 
 func (app *App) startUpdateJobWithOptions(packageKeys []string, options UpdateOptions) (UpdateJobStatus, error) {
@@ -52,41 +53,41 @@ func updateJobNotice(status UpdateJobStatus) string {
 	if status.CancelRequested {
 		return "Update cancelled. Refreshing package status..."
 	}
-	if notice := updateResultsFailureNotice(status.Results); notice != "" {
-		return notice
+	if failureNotice := updateResultsFailureNotice(status.Results); failureNotice != "" {
+		return failureNotice
 	}
 	return "Update completed. Refreshing package status..."
 }
 
-func updateJobTouchesStore(packages []Package) bool {
-	for _, pkg := range packages {
-		if pkg.Manager == managerStore {
+func updateJobIncludesStorePackage(updatedPackages []Package) bool {
+	for _, updatedPackage := range updatedPackages {
+		if updatedPackage.Manager == managerStore {
 			return true
 		}
 	}
 	return false
 }
 
-func updateRefreshNotice(err error) string {
-	if err == nil {
+func updateRefreshNotice(refreshErr error) string {
+	if refreshErr == nil {
 		return ""
 	}
-	if errors.Is(err, errStoreScanRefreshTimeout) {
+	if errors.Is(refreshErr, errUpdateJobStoreScanRefreshTimeout) {
 		return "Update accepted, but Microsoft Store status is still refreshing. See Session Log for diagnostics."
 	}
-	return fmt.Sprintf("Update refresh did not complete: %s", err)
+	return fmt.Sprintf("Update refresh did not complete: %s", refreshErr)
 }
 
 func (app *App) cancelUpdateJob() UpdateJobStatus {
-	status := app.latestOperationJobStatus(jobTypeUpdateAll, jobTypeUpdate)
-	if status.JobID == "" {
+	latestStatus := app.latestOperationJobStatus(jobTypeUpdateAll, jobTypeUpdate)
+	if latestStatus.JobID == "" {
 		return UpdateJobStatus{}
 	}
-	cancelled, ok := app.cancelOperationJob(status.JobID)
+	cancelledStatus, ok := app.cancelOperationJob(latestStatus.JobID)
 	if !ok {
 		return UpdateJobStatus{}
 	}
-	return cancelled
+	return cancelledStatus
 }
 
 func (app *App) updateJobStatus() UpdateJobStatus {

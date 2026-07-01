@@ -2,30 +2,33 @@ package updater
 
 import "strings"
 
-func normalizePackageActionResult(manager string, result CommandResult) CommandResult {
-	if result.OK {
-		return result
+const (
+	packageActionRestartInitiatedCode = 1641
+	packageActionRestartRequiredCode  = 3010
+)
+
+func normalizePackageActionResult(packageManager string, commandResult CommandResult) CommandResult {
+	if commandResult.OK {
+		return commandResult
 	}
-	if isPackageActionSuccessCode(manager, result.Code) || isPackageActionSemanticSuccess(result) {
-		result.OK = true
-		note := packageActionSuccessCodeNote(result.Code)
-		if note != "" && !strings.Contains(result.Stdout+result.Stderr, note) {
-			if strings.TrimSpace(result.Stdout) != "" {
-				result.Stdout = strings.TrimRight(result.Stdout, "\r\n") + "\n" + note
+
+	if isPackageActionRestartSuccessCode(packageManager, commandResult.Code) || hasPackageActionSuccessOutput(commandResult) {
+		commandResult.OK = true
+		restartNote := packageActionRestartNote(commandResult.Code)
+		if restartNote != "" && !strings.Contains(commandResult.Stdout+commandResult.Stderr, restartNote) {
+			if strings.TrimSpace(commandResult.Stdout) != "" {
+				commandResult.Stdout = strings.TrimRight(commandResult.Stdout, "\r\n") + "\n" + restartNote
 			} else {
-				result.Stdout = note
+				commandResult.Stdout = restartNote
 			}
 		}
 	}
-	return result
+	return commandResult
 }
 
-func isPackageActionSemanticSuccess(result CommandResult) bool {
-	if result.OK {
-		return true
-	}
-	output := normalizedCommandOutput(result)
-	if outputContainsAny(output, []string{
+func hasPackageActionSuccessOutput(commandResult CommandResult) bool {
+	normalizedOutput := normalizedCommandOutput(commandResult)
+	if outputContainsAny(normalizedOutput, []string{
 		"failed",
 		"failure",
 		"error",
@@ -38,7 +41,7 @@ func isPackageActionSemanticSuccess(result CommandResult) bool {
 	}) {
 		return false
 	}
-	return outputContainsAny(output, []string{
+	return outputContainsAny(normalizedOutput, []string{
 		"already up to date",
 		"already installed",
 		"no available update",
@@ -56,20 +59,20 @@ func isPackageActionSemanticSuccess(result CommandResult) bool {
 	})
 }
 
-func isPackageActionSuccessCode(manager string, code int) bool {
-	switch code {
-	case 1641, 3010:
-		return manager == managerWinget || manager == managerChoco || manager == managerStore
+func isPackageActionRestartSuccessCode(packageManager string, exitCode int) bool {
+	switch exitCode {
+	case packageActionRestartInitiatedCode, packageActionRestartRequiredCode:
+		return packageManager == managerWinget || packageManager == managerChoco || packageManager == managerStore
 	default:
 		return false
 	}
 }
 
-func packageActionSuccessCodeNote(code int) string {
-	switch code {
-	case 1641:
+func packageActionRestartNote(exitCode int) string {
+	switch exitCode {
+	case packageActionRestartInitiatedCode:
 		return "Command completed successfully and initiated a restart."
-	case 3010:
+	case packageActionRestartRequiredCode:
 		return "Command completed successfully; restart required."
 	default:
 		return ""

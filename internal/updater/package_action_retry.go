@@ -3,14 +3,14 @@ package updater
 import "strings"
 
 func shouldTryAlternatePackageTarget(result CommandResult) bool {
-	if result.OK || result.Code == commandCancelledCode || result.Code == 124 {
+	if !isRetryablePackageActionFailure(result) {
 		return false
 	}
-	output := normalizedCommandOutput(result)
-	if strings.Contains(output, "requires explicit user confirmation") {
+	normalizedOutput := normalizedCommandOutput(result)
+	if strings.Contains(normalizedOutput, "requires explicit user confirmation") {
 		return false
 	}
-	return outputContainsAny(output, []string{
+	return outputContainsAny(normalizedOutput, []string{
 		"no applicable upgrade",
 		"no available upgrade",
 		"kein anwendbares upgrade",
@@ -34,47 +34,48 @@ func shouldRetryWingetForceUpgrade(result CommandResult) bool {
 	if result.OK {
 		return false
 	}
-	return outputContainsAny(normalizedCommandOutput(result), []string{
+	normalizedOutput := normalizedCommandOutput(result)
+	return outputContainsAny(normalizedOutput, []string{
 		"no applicable upgrade",
 		"kein anwendbares upgrade",
 	})
 }
 
 func shouldRetryWingetIncludeUnknown(result CommandResult) bool {
-	if result.OK || result.Code == commandCancelledCode || result.Code == 124 {
+	if !isRetryablePackageActionFailure(result) {
 		return false
 	}
-	output := normalizedCommandOutput(result)
-	if outputContainsAny(output, []string{"--include-unknown", "include unknown", "include-unknown"}) {
+	normalizedOutput := normalizedCommandOutput(result)
+	if outputContainsAny(normalizedOutput, []string{"--include-unknown", "include unknown", "include-unknown"}) {
 		return true
 	}
-	if (strings.Contains(output, "unknown") || strings.Contains(output, "unbekannt")) &&
-		(strings.Contains(output, "version") || strings.Contains(output, "installed package")) {
+	if (strings.Contains(normalizedOutput, "unknown") || strings.Contains(normalizedOutput, "unbekannt")) &&
+		(strings.Contains(normalizedOutput, "version") || strings.Contains(normalizedOutput, "installed package")) {
 		return true
 	}
 	return false
 }
 
 func shouldRetryWingetIncludePinned(result CommandResult) bool {
-	if result.OK || result.Code == commandCancelledCode || result.Code == 124 {
+	if !isRetryablePackageActionFailure(result) {
 		return false
 	}
-	output := normalizedCommandOutput(result)
-	if outputContainsAny(output, []string{"--include-pinned", "include-pinned", "include pinned"}) {
+	normalizedOutput := normalizedCommandOutput(result)
+	if outputContainsAny(normalizedOutput, []string{"--include-pinned", "include-pinned", "include pinned"}) {
 		return true
 	}
-	return outputContainsAny(output, []string{"pinning", "pinned"})
+	return outputContainsAny(normalizedOutput, []string{"pinning", "pinned"})
 }
 
 func shouldRetryStoreUpdateWithoutApply(result CommandResult) bool {
-	if result.OK || result.Code == commandCancelledCode || result.Code == 124 {
+	if !isRetryablePackageActionFailure(result) {
 		return false
 	}
-	output := normalizedCommandOutput(result)
-	if !strings.Contains(output, "apply") {
+	normalizedOutput := normalizedCommandOutput(result)
+	if !strings.Contains(normalizedOutput, "apply") {
 		return false
 	}
-	return outputContainsAny(output, []string{
+	return outputContainsAny(normalizedOutput, []string{
 		"unrecognized option",
 		"unknown option",
 		"unknown argument",
@@ -88,4 +89,8 @@ func shouldRetryStoreUpdateWithoutApply(result CommandResult) bool {
 		"unbekannte option",
 		"unbekanntes argument",
 	})
+}
+
+func isRetryablePackageActionFailure(result CommandResult) bool {
+	return !result.OK && result.Code != commandCancelledCode && result.Code != commandTimeoutCode
 }

@@ -238,19 +238,19 @@ func ReconcileStoreUpdate(input StoreReconciliationInput) StoreUpdateAssessment 
 		assessment.Reason = "scan generation context is incomplete"
 		return assessment
 	}
-	scanComplete := input.Scan.CompleteFor(input.Identity)
+	scanIsComplete := input.Scan.CompleteFor(input.Identity)
 
-	required := requiredProviderSet(input.RequiredProviders)
-	requiredSeen := map[string]bool{}
-	requiredBlocked := ""
-	blockedProvider := ""
-	var blockedObservation StoreProviderObservation
+	requiredProviders := requiredProviderSet(input.RequiredProviders)
+	seenRequiredProviders := map[string]bool{}
+	blockedRequiredProvider := ""
+	firstBlockingProvider := ""
+	var firstBlockingObservation StoreProviderObservation
 
-	var positives []StoreProviderObservation
-	var positivesWithoutTarget []StoreProviderObservation
-	var negatives []StoreProviderObservation
-	var inapplicable []StoreProviderObservation
-	var pending []StoreProviderObservation
+	var exactUpdateOffers []StoreProviderObservation
+	var offersWithoutExactTarget []StoreProviderObservation
+	var authoritativeNegatives []StoreProviderObservation
+	var noApplicableInstaller []StoreProviderObservation
+	var pendingUpdates []StoreProviderObservation
 
 	for _, observation := range input.Observations {
 		if !observation.Matches(input.Identity, input.Scan) {
@@ -264,14 +264,15 @@ func ReconcileStoreUpdate(input StoreReconciliationInput) StoreUpdateAssessment 
 			Health:   observation.Health,
 			Kind:     observation.Kind,
 		})
-		if observationBlocksAssessment(observation) && blockedProvider == "" {
-			blockedProvider = providerKey
-			blockedObservation = observation
+		blocksAssessment := observationBlocksAssessment(observation)
+		if blocksAssessment && firstBlockingProvider == "" {
+			firstBlockingProvider = providerKey
+			firstBlockingObservation = observation
 		}
-		if required[providerKey] {
-			requiredSeen[providerKey] = true
-			if observationBlocksAssessment(observation) && requiredBlocked == "" {
-				requiredBlocked = providerKey
+		if requiredProviders[providerKey] {
+			seenRequiredProviders[providerKey] = true
+			if blocksAssessment && blockedRequiredProvider == "" {
+				blockedRequiredProvider = providerKey
 			}
 		}
 
@@ -281,16 +282,16 @@ func ReconcileStoreUpdate(input StoreReconciliationInput) StoreUpdateAssessment 
 		switch observation.Kind {
 		case StoreObservationPositiveUpdateOffer:
 			if observation.Target != nil && observation.Target.ExactFor(input.Identity) {
-				positives = append(positives, observation)
+				exactUpdateOffers = append(exactUpdateOffers, observation)
 			} else {
-				positivesWithoutTarget = append(positivesWithoutTarget, observation)
+				offersWithoutExactTarget = append(offersWithoutExactTarget, observation)
 			}
 		case StoreObservationAuthoritativeNegative:
-			negatives = append(negatives, observation)
+			authoritativeNegatives = append(authoritativeNegatives, observation)
 		case StoreObservationNewerCatalogNoApplicableInstaller:
-			inapplicable = append(inapplicable, observation)
+			noApplicableInstaller = append(noApplicableInstaller, observation)
 		case StoreObservationPendingUpdate:
-			pending = append(pending, observation)
+			pendingUpdates = append(pendingUpdates, observation)
 		}
 	}
 
@@ -299,61 +300,61 @@ func ReconcileStoreUpdate(input StoreReconciliationInput) StoreUpdateAssessment 
 		return assessment
 	}
 
-	if len(positives) > 0 && (len(inapplicable) > 0 || !negativeEvidenceSupersededByExactPositive(positives, negatives)) {
-		return storeAssessmentDecision(assessment, StoreUpdateConflict, positives[0], "healthy providers disagree")
+	if len(exactUpdateOffers) > 0 && (len(noApplicableInstaller) > 0 || !negativeEvidenceCanYieldToExactPositive(exactUpdateOffers, authoritativeNegatives)) {
+		return storeAssessmentDecision(assessment, StoreUpdateConflict, exactUpdateOffers[0], "healthy providers disagree")
 	}
-	if len(positives) > 0 {
-		consensus, err := reconcilePositiveStoreTargets(input.Identity, positives)
+	if len(exactUpdateOffers) > 0 {
+		consensus, err := reconcileExactStoreUpdateOffers(input.Identity, exactUpdateOffers)
 		if err != nil {
-			return storeConflictAssessmentDecision(assessment, positives, err.Error())
+			return storeExactOfferConflictAssessment(assessment, exactUpdateOffers, err.Error())
 		}
 		decision := storeAssessmentDecision(assessment, StoreUpdateAvailable, consensus.Observation, "fresh exact positive update evidence")
 		decision.Target = consensus.Target
 		decision.AvailableVersion = consensus.AvailableVersion
 		return decision
 	}
-	if len(positivesWithoutTarget) > 0 {
-		return storeAssessmentDecision(assessment, StoreUpdateUnknown, positivesWithoutTarget[0], "positive update evidence has no exact verified target")
+	if len(offersWithoutExactTarget) > 0 {
+		return storeAssessmentDecision(assessment, StoreUpdateUnknown, offersWithoutExactTarget[0], "positive update evidence has no exact verified target")
 	}
-	for provider := range required {
-		if !requiredSeen[provider] {
+	for provider := range requiredProviders {
+		if !seenRequiredProviders[provider] {
 			assessment.Reason = "required provider did not return evidence: " + provider
 			return assessment
 		}
 	}
-	if requiredBlocked != "" {
-		assessment.Reason = "required provider incomplete or failed: " + requiredBlocked
+	if blockedRequiredProvider != "" {
+		assessment.Reason = "required provider incomplete or failed: " + blockedRequiredProvider
 		return assessment
 	}
-	if blockedProvider != "" {
-		return storeAssessmentDecision(assessment, StoreUpdateUnknown, blockedObservation, "provider incomplete or failed: "+blockedProvider)
+	if firstBlockingProvider != "" {
+		return storeAssessmentDecision(assessment, StoreUpdateUnknown, firstBlockingObservation, "provider incomplete or failed: "+firstBlockingProvider)
 	}
-	if len(pending) > 0 {
-		return storeAssessmentDecision(assessment, StoreUpdatePending, pending[0], "update is pending verification")
+	if len(pendingUpdates) > 0 {
+		return storeAssessmentDecision(assessment, StoreUpdatePending, pendingUpdates[0], "update is pending verification")
 	}
-	if len(inapplicable) > 0 {
-		return storeAssessmentDecision(assessment, StoreUpdateInapplicable, inapplicable[0], "newer catalog version has no applicable installer")
+	if len(noApplicableInstaller) > 0 {
+		return storeAssessmentDecision(assessment, StoreUpdateInapplicable, noApplicableInstaller[0], "newer catalog version has no applicable installer")
 	}
-	if !scanComplete {
+	if !scanIsComplete {
 		assessment.Reason = "scan generation is incomplete"
 		return assessment
 	}
-	if allRequiredProvidersNegative(required, negatives) {
-		return storeAssessmentDecision(assessment, StoreUpdateCurrent, negatives[0], "all required providers returned authoritative negatives")
+	if allRequiredProvidersReturnedNegatives(requiredProviders, authoritativeNegatives) {
+		return storeAssessmentDecision(assessment, StoreUpdateCurrent, authoritativeNegatives[0], "all required providers returned authoritative negatives")
 	}
 
 	assessment.Reason = "evidence is not authoritative"
 	return assessment
 }
 
-func negativeEvidenceSupersededByExactPositive(positives, negatives []StoreProviderObservation) bool {
-	if len(negatives) == 0 {
+func negativeEvidenceCanYieldToExactPositive(exactUpdateOffers, authoritativeNegatives []StoreProviderObservation) bool {
+	if len(authoritativeNegatives) == 0 {
 		return true
 	}
-	if !hasExactStoreCatalogPositive(positives) {
+	if !hasExactCatalogPositiveOffer(exactUpdateOffers) {
 		return false
 	}
-	for _, negative := range negatives {
+	for _, negative := range authoritativeNegatives {
 		if !knownStoreFalseNegativeProvider(negative.Provider.Key()) {
 			return false
 		}
@@ -361,8 +362,8 @@ func negativeEvidenceSupersededByExactPositive(positives, negatives []StoreProvi
 	return true
 }
 
-func knownStoreFalseNegativeProvider(provider string) bool {
-	switch provider {
+func knownStoreFalseNegativeProvider(providerKey string) bool {
+	switch providerKey {
 	case storeCLIUpdatesProviderID, storeCLIExactProviderID, wingetMSStoreExactProviderID:
 		return true
 	default:
@@ -370,16 +371,16 @@ func knownStoreFalseNegativeProvider(provider string) bool {
 	}
 }
 
-func hasExactStoreCatalogPositive(positives []StoreProviderObservation) bool {
-	for _, positive := range positives {
-		if positive.Target == nil || !positive.Target.ExactFor(positive.Identity) {
+func hasExactCatalogPositiveOffer(exactUpdateOffers []StoreProviderObservation) bool {
+	for _, offer := range exactUpdateOffers {
+		if offer.Target == nil || !offer.Target.ExactFor(offer.Identity) {
 			continue
 		}
-		switch positive.Provider.Key() {
+		switch offer.Provider.Key() {
 		case storeCLIExactProviderID, wingetMSStoreExactProviderID, storeWinRTDiscoveryProviderID:
 			return true
 		}
-		switch positive.Target.Provider.Key() {
+		switch offer.Target.Provider.Key() {
 		case storeCLIExactProviderID, wingetMSStoreExactProviderID, storeWinRTDiscoveryProviderID:
 			return true
 		}
@@ -387,115 +388,116 @@ func hasExactStoreCatalogPositive(positives []StoreProviderObservation) bool {
 	return false
 }
 
-type positiveStoreTargetConsensus struct {
+type exactStoreUpdateOfferConsensus struct {
 	Target           *ExactStoreUpdateTarget
 	AvailableVersion string
 	Observation      StoreProviderObservation
 }
 
-type positiveStoreTargetDescriptor struct {
-	Observation     StoreProviderObservation
-	ProviderKey     string
-	ProviderBackend string
-	ProductID       string
-	UpdateID        string
-	OfferedVersion  string
-	VerificationBy  string
-	VerifiedAt      time.Time
+type exactStoreUpdateOfferDescriptor struct {
+	Observation      StoreProviderObservation
+	ProviderKey      string
+	ProviderBackend  string
+	ProductID        string
+	UpdateID         string
+	AvailableVersion string
+	VerifiedBy       string
+	VerifiedAt       time.Time
 }
 
-func reconcilePositiveStoreTargets(identity StoreInstalledIdentity, positives []StoreProviderObservation) (positiveStoreTargetConsensus, error) {
-	descriptors := make([]positiveStoreTargetDescriptor, 0, len(positives))
-	for _, positive := range positives {
-		if positive.Target == nil || !positive.Target.ExactFor(identity) {
+func reconcileExactStoreUpdateOffers(identity StoreInstalledIdentity, exactUpdateOffers []StoreProviderObservation) (exactStoreUpdateOfferConsensus, error) {
+	offers := make([]exactStoreUpdateOfferDescriptor, 0, len(exactUpdateOffers))
+	for _, offer := range exactUpdateOffers {
+		if offer.Target == nil || !offer.Target.ExactFor(identity) {
 			continue
 		}
-		descriptors = append(descriptors, positiveStoreTargetDescriptor{
-			Observation:     positive,
-			ProviderKey:     storeProviderKey(positive.Target.Provider),
-			ProviderBackend: strings.TrimSpace(positive.Target.Provider.Backend),
-			ProductID:       strings.TrimSpace(positive.Target.ProductID),
-			UpdateID:        strings.TrimSpace(positive.Target.UpdateID),
-			OfferedVersion:  strings.TrimSpace(positive.AvailableVersion),
-			VerificationBy:  strings.TrimSpace(positive.Target.VerifiedBy),
-			VerifiedAt:      positive.Target.VerifiedAt,
+		offers = append(offers, exactStoreUpdateOfferDescriptor{
+			Observation:      offer,
+			ProviderKey:      storeProviderKey(offer.Target.Provider),
+			ProviderBackend:  strings.TrimSpace(offer.Target.Provider.Backend),
+			ProductID:        strings.TrimSpace(offer.Target.ProductID),
+			UpdateID:         strings.TrimSpace(offer.Target.UpdateID),
+			AvailableVersion: strings.TrimSpace(offer.AvailableVersion),
+			VerifiedBy:       strings.TrimSpace(offer.Target.VerifiedBy),
+			VerifiedAt:       offer.Target.VerifiedAt,
 		})
 	}
-	if len(descriptors) == 0 {
-		return positiveStoreTargetConsensus{}, fmt.Errorf("positive update evidence has no exact verified target")
+	if len(offers) == 0 {
+		return exactStoreUpdateOfferConsensus{}, fmt.Errorf("positive update evidence has no exact verified target")
 	}
-	sort.SliceStable(descriptors, func(i, j int) bool {
-		return positiveStoreTargetSortKey(descriptors[i]) < positiveStoreTargetSortKey(descriptors[j])
+	sort.SliceStable(offers, func(i, j int) bool {
+		return exactStoreUpdateOfferSortKey(offers[i]) < exactStoreUpdateOfferSortKey(offers[j])
 	})
 	productIDs := map[string]string{}
 	updateIDs := map[string]string{}
 	knownVersions := map[string]string{}
-	for _, descriptor := range descriptors {
-		if descriptor.ProductID != "" {
-			productIDs[strings.ToLower(descriptor.ProductID)] = descriptor.ProductID
+	for _, offer := range offers {
+		if offer.ProductID != "" {
+			productIDs[strings.ToLower(offer.ProductID)] = offer.ProductID
 		}
-		if descriptor.UpdateID != "" {
-			updateIDs[strings.ToLower(descriptor.UpdateID)] = descriptor.UpdateID
+		if offer.UpdateID != "" {
+			updateIDs[strings.ToLower(offer.UpdateID)] = offer.UpdateID
 		}
-		if descriptor.OfferedVersion != "" {
-			knownVersions[strings.ToLower(descriptor.OfferedVersion)] = descriptor.OfferedVersion
+		if offer.AvailableVersion != "" {
+			knownVersions[strings.ToLower(offer.AvailableVersion)] = offer.AvailableVersion
 		}
 	}
 	if len(productIDs) > 1 {
-		return positiveStoreTargetConsensus{}, storeTargetConflictError("product_id", descriptors)
+		return exactStoreUpdateOfferConsensus{}, storeUpdateOfferConflictError("product_id", offers)
 	}
 	if hasConflictingNonPFNUpdateIDs(identity.PackageFamilyName, updateIDs) {
-		return positiveStoreTargetConsensus{}, storeTargetConflictError("update_id", descriptors)
+		return exactStoreUpdateOfferConsensus{}, storeUpdateOfferConflictError("update_id", offers)
 	}
 	if len(knownVersions) > 1 {
-		return positiveStoreTargetConsensus{}, storeTargetConflictError("offered_version", descriptors)
+		return exactStoreUpdateOfferConsensus{}, storeUpdateOfferConflictError("offered_version", offers)
 	}
-	canonical := descriptors[0]
-	target := *canonical.Observation.Target
+	canonicalOffer := offers[0]
+	target := *canonicalOffer.Observation.Target
 	target.ProductID = firstValueBySortedKey(productIDs)
 	target.UpdateID = preferredUpdateID(identity.PackageFamilyName, updateIDs)
-	target.Provider = canonical.Observation.Target.Provider
-	target.VerifiedBy = canonical.VerificationBy
-	target.VerifiedAt = canonical.VerifiedAt
-	return positiveStoreTargetConsensus{
+	target.Provider = canonicalOffer.Observation.Target.Provider
+	target.VerifiedBy = canonicalOffer.VerifiedBy
+	target.VerifiedAt = canonicalOffer.VerifiedAt
+	return exactStoreUpdateOfferConsensus{
 		Target:           &target,
 		AvailableVersion: firstValueBySortedKey(knownVersions),
-		Observation:      canonical.Observation,
+		Observation:      canonicalOffer.Observation,
 	}, nil
 }
 
-func positiveStoreTargetSortKey(descriptor positiveStoreTargetDescriptor) string {
+func exactStoreUpdateOfferSortKey(offer exactStoreUpdateOfferDescriptor) string {
 	return strings.ToLower(strings.Join([]string{
-		descriptor.ProviderKey,
-		descriptor.ProviderBackend,
-		descriptor.ProductID,
-		descriptor.UpdateID,
-		descriptor.OfferedVersion,
+		offer.ProviderKey,
+		offer.ProviderBackend,
+		offer.ProductID,
+		offer.UpdateID,
+		offer.AvailableVersion,
 	}, "|"))
 }
 
-func hasConflictingNonPFNUpdateIDs(pfn string, updateIDs map[string]string) bool {
+func hasConflictingNonPFNUpdateIDs(packageFamilyName string, updateIDs map[string]string) bool {
 	if len(updateIDs) <= 1 {
 		return false
 	}
-	pfnKey := strings.ToLower(strings.TrimSpace(pfn))
-	if pfnKey == "" {
+	packageFamilyKey := strings.ToLower(strings.TrimSpace(packageFamilyName))
+	if packageFamilyKey == "" {
 		return true
 	}
-	nonPFN := 0
+	nonPFNUpdateIDCount := 0
 	for key := range updateIDs {
-		if key != pfnKey {
-			nonPFN++
+		if key != packageFamilyKey {
+			nonPFNUpdateIDCount++
 		}
 	}
-	return nonPFN > 1 || nonPFN == len(updateIDs)
+	return nonPFNUpdateIDCount > 1 || nonPFNUpdateIDCount == len(updateIDs)
 }
 
-func preferredUpdateID(pfn string, updateIDs map[string]string) string {
+func preferredUpdateID(packageFamilyName string, updateIDs map[string]string) string {
 	if len(updateIDs) == 0 {
 		return ""
 	}
-	if value, ok := updateIDs[strings.ToLower(strings.TrimSpace(pfn))]; ok {
+	packageFamilyKey := strings.ToLower(strings.TrimSpace(packageFamilyName))
+	if value, ok := updateIDs[packageFamilyKey]; ok {
 		return value
 	}
 	return firstValueBySortedKey(updateIDs)
@@ -513,29 +515,29 @@ func firstValueBySortedKey(values map[string]string) string {
 	return values[keys[0]]
 }
 
-func storeTargetConflictError(field string, descriptors []positiveStoreTargetDescriptor) error {
-	parts := make([]string, 0, len(descriptors))
-	for _, descriptor := range descriptors {
+func storeUpdateOfferConflictError(field string, offers []exactStoreUpdateOfferDescriptor) error {
+	parts := make([]string, 0, len(offers))
+	for _, offer := range offers {
 		value := ""
 		switch field {
 		case "product_id":
-			value = descriptor.ProductID
+			value = offer.ProductID
 		case "update_id":
-			value = descriptor.UpdateID
+			value = offer.UpdateID
 		case "offered_version":
-			value = descriptor.OfferedVersion
+			value = offer.AvailableVersion
 		}
 		if value == "" {
 			continue
 		}
-		parts = append(parts, storeProviderKey(descriptor.Observation.Provider)+"="+sanitizeProviderDiagnostic(value))
+		parts = append(parts, storeProviderKey(offer.Observation.Provider)+"="+sanitizeProviderDiagnostic(value))
 	}
 	sort.Strings(parts)
 	return fmt.Errorf("healthy providers returned conflicting %s values: %s", field, strings.Join(parts, ", "))
 }
 
-func storeConflictAssessmentDecision(assessment StoreUpdateAssessment, positives []StoreProviderObservation, reason string) StoreUpdateAssessment {
-	observation := positives[0]
+func storeExactOfferConflictAssessment(assessment StoreUpdateAssessment, exactUpdateOffers []StoreProviderObservation, reason string) StoreUpdateAssessment {
+	observation := exactUpdateOffers[0]
 	assessment.State = StoreUpdateConflict
 	assessment.Reason = reason
 	assessment.InstalledVersion = observation.InstalledVersion
@@ -577,7 +579,7 @@ func observationBlocksAssessment(observation StoreProviderObservation) bool {
 	}
 }
 
-func allRequiredProvidersNegative(required map[string]bool, negatives []StoreProviderObservation) bool {
+func allRequiredProvidersReturnedNegatives(required map[string]bool, negatives []StoreProviderObservation) bool {
 	if len(required) == 0 {
 		return false
 	}

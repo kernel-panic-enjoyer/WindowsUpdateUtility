@@ -5,10 +5,11 @@ import (
 	"strings"
 )
 
-var wingetTruncatedIDMarkers = []string{"\u2026", "\u00e2\u20ac\u00a6", "..."}
+// Includes the normal ellipsis and the mojibake form winget can emit through lossy console decoding.
+var wingetIDTruncationMarkers = []string{"\u2026", "\u00e2\u20ac\u00a6", "..."}
 
-func wingetTruncationMarker(value string) string {
-	for _, marker := range wingetTruncatedIDMarkers {
+func wingetIDTruncationMarker(value string) string {
+	for _, marker := range wingetIDTruncationMarkers {
 		if strings.Contains(value, marker) {
 			return marker
 		}
@@ -17,14 +18,16 @@ func wingetTruncationMarker(value string) string {
 }
 
 func isTruncatedID(id string) bool {
-	return wingetTruncationMarker(id) != ""
+	return wingetIDTruncationMarker(id) != ""
 }
 
 func wingetTruncatedMSIXPackage(pkg Package) (Package, bool) {
-	if !isTruncatedID(pkg.ID) || !strings.HasPrefix(strings.ToLower(strings.TrimSpace(pkg.ID)), "msix\\") || strings.TrimSpace(pkg.Name) == "" {
+	trimmedID := strings.TrimSpace(pkg.ID)
+	trimmedName := strings.TrimSpace(pkg.Name)
+	if !isTruncatedID(trimmedID) || !strings.HasPrefix(strings.ToLower(trimmedID), "msix\\") || trimmedName == "" {
 		return Package{}, false
 	}
-	pkg.ID = strings.TrimSpace(pkg.Name)
+	pkg.ID = trimmedName
 	pkg.Manager = managerStore
 	pkg.Source = sourceMSStore
 	pkg.ActionBackend = backendWingetMSStoreFallback
@@ -32,65 +35,64 @@ func wingetTruncatedMSIXPackage(pkg Package) (Package, bool) {
 }
 
 func wingetIDMatches(fullID, tableID string) bool {
-	full := strings.ToLower(fullID)
-	table := strings.ToLower(tableID)
-	if full == table {
+	fullIDLower := strings.ToLower(fullID)
+	tableIDLower := strings.ToLower(tableID)
+	if fullIDLower == tableIDLower {
 		return true
 	}
-	if marker := wingetTruncationMarker(table); marker != "" {
-		return strings.HasPrefix(full, strings.Split(table, marker)[0])
+	if marker := wingetIDTruncationMarker(tableIDLower); marker != "" {
+		tableIDPrefix := strings.Split(tableIDLower, marker)[0]
+		return strings.HasPrefix(fullIDLower, tableIDPrefix)
 	}
 	return false
 }
 
-func mergeWingetExportWithTable(exported, table []Package) []Package {
-	used := map[int]bool{}
-	var merged []Package
-	for _, pkg := range exported {
-		match := -1
-		for i, tablePkg := range table {
-			if used[i] || !wingetIDMatches(pkg.ID, tablePkg.ID) {
+func mergeWingetExportWithTable(exportedPackages, tablePackages []Package) []Package {
+	matchedTableRows := make(map[int]bool, len(tablePackages))
+	exportedIDsByLowercase := make(map[string]bool, len(exportedPackages))
+	mergedPackages := make([]Package, 0, len(exportedPackages)+len(tablePackages))
+	for _, exportedPkg := range exportedPackages {
+		exportedIDsByLowercase[strings.ToLower(exportedPkg.ID)] = true
+		matchedTableIndex := -1
+		for i, tablePkg := range tablePackages {
+			if matchedTableRows[i] || !wingetIDMatches(exportedPkg.ID, tablePkg.ID) {
 				continue
 			}
-			if pkg.Version != "" && tablePkg.Version != "" && pkg.Version != tablePkg.Version {
+			if exportedPkg.Version != "" && tablePkg.Version != "" && exportedPkg.Version != tablePkg.Version {
 				continue
 			}
-			match = i
+			matchedTableIndex = i
 			break
 		}
-		if match >= 0 {
-			used[match] = true
-			tablePkg := table[match]
-			pkg.Name = tablePkg.Name
-			pkg.AvailableVersion = tablePkg.AvailableVersion
+		if matchedTableIndex >= 0 {
+			matchedTableRows[matchedTableIndex] = true
+			tablePkg := tablePackages[matchedTableIndex]
+			exportedPkg.Name = tablePkg.Name
+			exportedPkg.AvailableVersion = tablePkg.AvailableVersion
 			if tablePkg.Source != "" {
-				pkg.Source = tablePkg.Source
-				pkg.Manager = wingetSourceManager(tablePkg.Source)
+				exportedPkg.Source = tablePkg.Source
+				exportedPkg.Manager = wingetSourceManager(tablePkg.Source)
 			}
 		}
-		merged = append(merged, pkg)
+		mergedPackages = append(mergedPackages, exportedPkg)
 	}
-	exportedIDs := map[string]bool{}
-	for _, pkg := range exported {
-		exportedIDs[strings.ToLower(pkg.ID)] = true
-	}
-	for i, pkg := range table {
-		if used[i] || exportedIDs[strings.ToLower(pkg.ID)] {
+	for i, tablePkg := range tablePackages {
+		if matchedTableRows[i] || exportedIDsByLowercase[strings.ToLower(tablePkg.ID)] {
 			continue
 		}
-		if fallback, ok := wingetTruncatedMSIXPackage(pkg); ok {
-			merged = append(merged, fallback)
+		if fallbackPkg, ok := wingetTruncatedMSIXPackage(tablePkg); ok {
+			mergedPackages = append(mergedPackages, fallbackPkg)
 			continue
 		}
-		if isTruncatedID(pkg.ID) {
+		if isTruncatedID(tablePkg.ID) {
 			continue
 		}
-		if pkg.Source == sourceWinget || pkg.Source == sourceMSStore {
-			merged = append(merged, pkg)
+		if tablePkg.Source == sourceWinget || tablePkg.Source == sourceMSStore {
+			mergedPackages = append(mergedPackages, tablePkg)
 		}
 	}
-	sort.Slice(merged, func(i, j int) bool {
-		return strings.ToLower(merged[i].Name) < strings.ToLower(merged[j].Name)
+	sort.Slice(mergedPackages, func(i, j int) bool {
+		return strings.ToLower(mergedPackages[i].Name) < strings.ToLower(mergedPackages[j].Name)
 	})
-	return merged
+	return mergedPackages
 }

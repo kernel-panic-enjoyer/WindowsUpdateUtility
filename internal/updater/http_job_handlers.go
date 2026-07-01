@@ -13,16 +13,16 @@ type jobsAPIResponse struct {
 	Revision int64                `json:"revision,omitempty"`
 }
 
-func parseJobID(r *http.Request) string {
-	if id := r.URL.Query().Get("job_id"); id != "" {
-		return id
+func jobIDFromRequest(r *http.Request) string {
+	if jobID := r.URL.Query().Get("job_id"); jobID != "" {
+		return jobID
 	}
 	if requestIsJSON(r) {
-		var payload struct {
+		var requestPayload struct {
 			JobID string `json:"job_id"`
 		}
-		if err := decodeJSONRequest(r, &payload); err == nil {
-			return payload.JobID
+		if err := decodeJSONRequest(r, &requestPayload); err == nil {
+			return requestPayload.JobID
 		}
 		return ""
 	}
@@ -34,10 +34,10 @@ func (app *App) handleJobStatusAPI(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodGet) {
 		return
 	}
-	id := parseJobID(r)
-	status, ok := app.operationJobStatus(id)
+	jobID := jobIDFromRequest(r)
+	status, ok := app.operationJobStatus(jobID)
 	if !ok {
-		writeAPIError(w, http.StatusNotFound, jobNotFoundError(id))
+		writeAPIError(w, http.StatusNotFound, jobNotFoundError(jobID))
 		return
 	}
 	writeJSON(w, http.StatusOK, status)
@@ -47,34 +47,34 @@ func (app *App) handleJobsAPI(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodGet) {
 		return
 	}
-	jobs := app.operationJobsSnapshot()
-	writeJSON(w, http.StatusOK, jobsAPIResponse{Jobs: jobs, Revision: maxJobRevision(jobs)})
+	jobStatuses := app.operationJobsSnapshot()
+	writeJSON(w, http.StatusOK, jobsAPIResponse{Jobs: jobStatuses, Revision: latestJobRevision(jobStatuses)})
 }
 
 func (app *App) handleJobLogAPI(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodGet) {
 		return
 	}
-	id := parseJobID(r)
-	if _, ok := app.operationJobStatus(id); !ok {
-		writeAPIError(w, http.StatusNotFound, jobNotFoundError(id))
+	jobID := jobIDFromRequest(r)
+	if _, ok := app.operationJobStatus(jobID); !ok {
+		writeAPIError(w, http.StatusNotFound, jobNotFoundError(jobID))
 		return
 	}
 	since, ok := parseLogSince(w, r)
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, logsAPIResponseFromQuery(sessionLogs.JobQuery(id, since)))
+	writeJSON(w, http.StatusOK, logsAPIResponseFromQuery(sessionLogs.JobQuery(jobID, since)))
 }
 
 func (app *App) handleJobCancelAPI(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
-	id := parseJobID(r)
-	status, ok := app.cancelOperationJob(id)
+	jobID := jobIDFromRequest(r)
+	status, ok := app.cancelOperationJob(jobID)
 	if !ok {
-		writeAPIError(w, http.StatusNotFound, jobNotFoundError(id))
+		writeAPIError(w, http.StatusNotFound, jobNotFoundError(jobID))
 		return
 	}
 	writeJSON(w, http.StatusOK, status)
@@ -103,58 +103,59 @@ func (app *App) handleEventsAPI(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "streaming is not supported")
 		return
 	}
-	since := int64(0)
+	lastSentLogID := int64(0)
 	if raw := r.URL.Query().Get("since"); raw != "" {
 		parsed, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil {
 			writeAPIError(w, http.StatusBadRequest, "since must be an integer")
 			return
 		}
-		since = parsed
+		lastSentLogID = parsed
 	}
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	send := func(event string, payload any) bool {
-		data, err := json.Marshal(payload)
+	sendEvent := func(event string, payload any) bool {
+		encodedPayload, err := json.Marshal(payload)
 		if err != nil {
 			return true
 		}
-		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data); err != nil {
+		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, encodedPayload); err != nil {
 			return false
 		}
 		flusher.Flush()
 		return true
 	}
 
-	initialJobs := app.operationJobsSnapshot()
-	lastJobRevision := maxJobRevision(initialJobs)
-	send("jobs", jobsAPIResponse{Jobs: initialJobs, Revision: lastJobRevision})
-	initialQuery := sessionLogs.Query(since)
-	initialLogs := initialQuery.Entries
-	if !send("logs", logsAPIResponseFromQuery(initialQuery)) {
+	initialJobStatuses := app.operationJobsSnapshot()
+	lastJobRevision := latestJobRevision(initialJobStatuses)
+	sendEvent("jobs", jobsAPIResponse{Jobs: initialJobStatuses, Revision: lastJobRevision})
+	initialLogQuery := sessionLogs.Query(lastSentLogID)
+	initialLogEntries := initialLogQuery.Entries
+	if !sendEvent("logs", logsAPIResponseFromQuery(initialLogQuery)) {
 		return
 	}
-	for _, entry := range initialLogs {
-		if entry.ID > since {
-			since = entry.ID
+	for _, entry := range initialLogEntries {
+		if entry.ID > lastSentLogID {
+			lastSentLogID = entry.ID
 		}
 	}
 
-	heartbeatDue := time.Now().Add(10 * time.Second)
+	heartbeatInterval := 10 * time.Second
+	nextHeartbeatAt := time.Now().Add(heartbeatInterval)
 	for {
-		jobs := app.operationJobsSnapshot()
-		active := false
-		for _, job := range jobs {
+		jobStatuses := app.operationJobsSnapshot()
+		hasActiveJobs := false
+		for _, job := range jobStatuses {
 			if !operationJobComplete(job) {
-				active = true
+				hasActiveJobs = true
 				break
 			}
 		}
 		delay := 5 * time.Second
-		if active {
+		if hasActiveJobs {
 			delay = 1 * time.Second
 		}
 		timer := time.NewTimer(delay)
@@ -163,46 +164,39 @@ func (app *App) handleEventsAPI(w http.ResponseWriter, r *http.Request) {
 			timer.Stop()
 			return
 		case <-timer.C:
-			jobs = app.operationJobsSnapshot()
-			active = false
-			for _, job := range jobs {
-				if !operationJobComplete(job) {
-					active = true
-					break
-				}
-			}
-			query := sessionLogs.Query(since)
-			entries := query.Entries
-			latestID := query.LatestID
-			revision := maxJobRevision(jobs)
-			if revision != lastJobRevision {
-				if !send("jobs", jobsAPIResponse{Jobs: jobs, Revision: revision}) {
+			jobStatuses = app.operationJobsSnapshot()
+			logQuery := sessionLogs.Query(lastSentLogID)
+			logEntries := logQuery.Entries
+			latestLogID := logQuery.LatestID
+			jobRevision := latestJobRevision(jobStatuses)
+			if jobRevision != lastJobRevision {
+				if !sendEvent("jobs", jobsAPIResponse{Jobs: jobStatuses, Revision: jobRevision}) {
 					return
 				}
-				lastJobRevision = revision
+				lastJobRevision = jobRevision
 			}
-			if len(entries) == 0 {
-				if time.Now().After(heartbeatDue) {
-					if !send("heartbeat", map[string]any{"latest_id": latestID}) {
+			if len(logEntries) == 0 {
+				if time.Now().After(nextHeartbeatAt) {
+					if !sendEvent("heartbeat", map[string]any{"latest_id": latestLogID}) {
 						return
 					}
-					heartbeatDue = time.Now().Add(10 * time.Second)
+					nextHeartbeatAt = time.Now().Add(heartbeatInterval)
 				}
 				continue
 			}
-			if !send("logs", logsAPIResponseFromQuery(query)) {
+			if !sendEvent("logs", logsAPIResponseFromQuery(logQuery)) {
 				return
 			}
-			for _, entry := range entries {
-				if entry.ID > since {
-					since = entry.ID
+			for _, entry := range logEntries {
+				if entry.ID > lastSentLogID {
+					lastSentLogID = entry.ID
 				}
 			}
 		}
 	}
 }
 
-func maxJobRevision(jobs []OperationJobStatus) int64 {
+func latestJobRevision(jobs []OperationJobStatus) int64 {
 	var revision int64
 	for _, job := range jobs {
 		if job.Revision > revision {

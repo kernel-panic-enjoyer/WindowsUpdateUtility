@@ -13,74 +13,74 @@ import (
 // becoming executable.
 const storeAssessmentFreshnessWindow = 2 * time.Hour
 
-type storeAssessmentFreshnessStatus struct {
+type storePublishedAssessmentFreshness struct {
 	Fresh  bool
 	Reason string
 }
 
-func evaluatePublishedStoreAssessmentFreshness(snapshot StoreScanSnapshot, assessment StorePublishedAssessment, currentInstalledVersion string, now time.Time) storeAssessmentFreshnessStatus {
+func evaluatePublishedStoreAssessmentFreshness(snapshot StoreScanSnapshot, assessment StorePublishedAssessment, currentInstalledVersion string, now time.Time) storePublishedAssessmentFreshness {
 	now = now.UTC()
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
 	if !snapshot.Published {
-		return staleStoreAssessmentStatus("snapshot was not published")
+		return stalePublishedStoreAssessmentFreshness("snapshot was not published")
 	}
 	if snapshot.RecoveredFromFallback {
-		return staleStoreAssessmentStatus("snapshot was recovered after a newer snapshot could not be decoded")
+		return stalePublishedStoreAssessmentFreshness("snapshot was recovered after a newer snapshot could not be decoded")
 	}
 	if assessment.Stale {
-		return staleStoreAssessmentStatus("assessment was retained from an earlier scan")
+		return stalePublishedStoreAssessmentFreshness("assessment was retained from an earlier scan")
 	}
-	if staleReason := storeEvidenceTimeStale("snapshot", snapshot.Scan.CompletedAt, now); staleReason != "" {
-		return staleStoreAssessmentStatus(staleReason)
+	if staleReason := staleStoreEvidenceTimeReason("snapshot", snapshot.Scan.CompletedAt, now); staleReason != "" {
+		return stalePublishedStoreAssessmentFreshness(staleReason)
 	}
-	if staleReason := storeEvidenceTimeStale("assessment", assessment.ObservedAt, now); staleReason != "" {
-		return staleStoreAssessmentStatus(staleReason)
+	if staleReason := staleStoreEvidenceTimeReason("assessment", assessment.ObservedAt, now); staleReason != "" {
+		return stalePublishedStoreAssessmentFreshness(staleReason)
 	}
 	currentInstalledVersion = strings.TrimSpace(currentInstalledVersion)
-	assessedInstalledVersion := strings.TrimSpace(assessment.InstalledVersion)
+	installedVersionWhenAssessed := strings.TrimSpace(assessment.InstalledVersion)
 	if !storeAssessmentVersionKnown(currentInstalledVersion) {
-		return staleStoreAssessmentStatus("current installed version is unavailable")
+		return stalePublishedStoreAssessmentFreshness("current installed version is unavailable")
 	}
-	if !storeAssessmentVersionKnown(assessedInstalledVersion) {
-		return staleStoreAssessmentStatus("assessed installed version is unavailable")
+	if !storeAssessmentVersionKnown(installedVersionWhenAssessed) {
+		return stalePublishedStoreAssessmentFreshness("assessed installed version is unavailable")
 	}
-	if !strings.EqualFold(currentInstalledVersion, assessedInstalledVersion) {
-		return staleStoreAssessmentStatus("installed version no longer matches the assessed version")
+	if !strings.EqualFold(currentInstalledVersion, installedVersionWhenAssessed) {
+		return stalePublishedStoreAssessmentFreshness("installed version no longer matches the assessed version")
 	}
-	return storeAssessmentFreshnessStatus{Fresh: true}
+	return storePublishedAssessmentFreshness{Fresh: true}
 }
 
-func storeAssessmentVersionKnown(value string) bool {
-	value = strings.TrimSpace(value)
-	return value != "" && !strings.EqualFold(value, "unknown")
+func storeAssessmentVersionKnown(version string) bool {
+	version = strings.TrimSpace(version)
+	return version != "" && !strings.EqualFold(version, "unknown")
 }
 
-func storeEvidenceTimeStale(label string, value time.Time, now time.Time) string {
-	if value.IsZero() {
-		return fmt.Sprintf("%s time is unavailable", label)
+func staleStoreEvidenceTimeReason(evidenceLabel string, evidenceTime time.Time, now time.Time) string {
+	if evidenceTime.IsZero() {
+		return fmt.Sprintf("%s time is unavailable", evidenceLabel)
 	}
-	age := now.Sub(value.UTC())
-	if age < 0 {
-		age = 0
+	evidenceAge := now.Sub(evidenceTime.UTC())
+	if evidenceAge < 0 {
+		evidenceAge = 0
 	}
-	if age > storeAssessmentFreshnessWindow {
-		return fmt.Sprintf("%s evidence is older than %s", label, storeAssessmentFreshnessWindow)
+	if evidenceAge > storeAssessmentFreshnessWindow {
+		return fmt.Sprintf("%s evidence is older than %s", evidenceLabel, storeAssessmentFreshnessWindow)
 	}
 	return ""
 }
 
-func staleStoreAssessmentStatus(reason string) storeAssessmentFreshnessStatus {
-	return storeAssessmentFreshnessStatus{Reason: sanitizeProviderDiagnostic(reason)}
+func stalePublishedStoreAssessmentFreshness(reason string) storePublishedAssessmentFreshness {
+	return storePublishedAssessmentFreshness{Reason: sanitizeProviderDiagnostic(reason)}
 }
 
 func staleStoreAssessmentProjection(assessment StorePublishedAssessment, reason string) StorePublishedAssessment {
 	assessment.Stale = true
 	assessment.ExactActionTargetAvailable = false
 	if reason != "" {
-		assessment.Reason = firstNonEmpty(assessment.Reason, "stale Store update evidence")
-		assessment.Reason = sanitizeProviderDiagnostic(assessment.Reason + ": " + reason)
+		existingReason := firstNonEmpty(assessment.Reason, "stale Store update evidence")
+		assessment.Reason = sanitizeProviderDiagnostic(existingReason + ": " + reason)
 	}
 	return assessment
 }

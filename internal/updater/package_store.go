@@ -6,78 +6,78 @@ import (
 )
 
 func parseStoreSearch(output string) []Package {
-	return parseStorePackageTable(output)
+	return parseStorePackageRows(output)
 }
 
-func parseStorePackageTable(output string) []Package {
+func parseStorePackageRows(output string) []Package {
 	lines := strings.Split(output, "\n")
-	headerSeen := false
-	headerBoxed := false
-	var header []string
-	var pendingBoxRow []string
-	var packages []Package
-	flushPendingBoxRow := func() {
-		if len(pendingBoxRow) == 0 {
+	tableHeaderFound := false
+	pipeDelimitedTable := false
+	var headerColumns []string
+	var pendingPipeRow []string
+	var parsedPackages []Package
+	flushPendingPipeRow := func() {
+		if len(pendingPipeRow) == 0 {
 			return
 		}
-		if pkg, ok := storePackageFromColumns(header, pendingBoxRow); ok {
-			packages = append(packages, pkg)
+		if pkg, ok := storePackageFromTableRow(headerColumns, pendingPipeRow); ok {
+			parsedPackages = append(parsedPackages, pkg)
 		}
-		pendingBoxRow = nil
+		pendingPipeRow = nil
 	}
 	for _, raw := range lines {
 		line := strings.TrimSpace(normalizeStoreTableDelimiters(raw))
 		if line == "" || isStoreOutputNoiseLine(line) {
 			continue
 		}
-		if !headerSeen {
-			if isStoreTableHeader(line) {
-				headerSeen = true
-				header = splitStoreHeaderColumns(line)
-				headerBoxed = strings.Contains(line, "|")
+		if !tableHeaderFound {
+			if isStorePackageTableHeader(line) {
+				tableHeaderFound = true
+				headerColumns = splitStoreHeaderColumns(line)
+				pipeDelimitedTable = strings.Contains(line, "|")
 			}
 			continue
 		}
 		if isStoreDividerLine(line) {
 			continue
 		}
-		if headerBoxed && !strings.Contains(line, "|") {
-			flushPendingBoxRow()
+		if pipeDelimitedTable && !strings.Contains(line, "|") {
+			flushPendingPipeRow()
 			continue
 		}
-		if strings.Contains(line, "|") && len(header) > 0 {
-			cols := normalizeStoreColumnCount(splitStoreBoxColumns(line), len(header))
-			if len(cols) < 2 || storeColumnsEmpty(cols) {
+		if strings.Contains(line, "|") && len(headerColumns) > 0 {
+			rowColumns := fitStoreColumnsToHeader(splitStorePipeColumns(line), len(headerColumns))
+			if len(rowColumns) < 2 || storeColumnsAllEmpty(rowColumns) {
 				continue
 			}
-			if isStoreBoxContinuationRow(header, cols, pendingBoxRow) {
-				pendingBoxRow = appendStoreBoxContinuation(pendingBoxRow, cols)
+			if isStorePipeContinuationRow(headerColumns, rowColumns, pendingPipeRow) {
+				pendingPipeRow = mergeStorePipeContinuationRow(pendingPipeRow, rowColumns)
 				continue
 			}
-			flushPendingBoxRow()
-			pendingBoxRow = cols
+			flushPendingPipeRow()
+			pendingPipeRow = rowColumns
 			continue
 		}
-		flushPendingBoxRow()
-		cols := splitStoreColumns(line)
-		cols = normalizeStoreColumnCount(cols, len(header))
-		if pkg, ok := storePackageFromColumns(header, cols); ok {
-			packages = append(packages, pkg)
+		flushPendingPipeRow()
+		rowColumns := splitStoreColumns(line)
+		rowColumns = fitStoreColumnsToHeader(rowColumns, len(headerColumns))
+		if pkg, ok := storePackageFromTableRow(headerColumns, rowColumns); ok {
+			parsedPackages = append(parsedPackages, pkg)
 		}
 	}
-	flushPendingBoxRow()
-	return packages
+	flushPendingPipeRow()
+	return parsedPackages
 }
 
-func isStoreTableHeader(line string) bool {
-	cols := splitStoreColumns(line)
-	if len(cols) < 2 {
+func isStorePackageTableHeader(line string) bool {
+	columns := splitStoreColumns(line)
+	if len(columns) < 2 {
 		return false
 	}
 	hasName := false
 	hasKnownColumn := false
-	for _, col := range cols {
-		normalized := strings.ToLower(strings.TrimSpace(col))
+	for _, column := range columns {
+		normalized := strings.ToLower(strings.TrimSpace(column))
 		switch normalized {
 		case "name", "app", "application":
 			hasName = true
@@ -95,7 +95,7 @@ func storeUpdatesCommand() []string {
 func splitStoreColumns(line string) []string {
 	line = normalizeStoreTableDelimiters(line)
 	if strings.Contains(line, "|") {
-		return nonEmptyStoreColumns(splitStoreBoxColumns(line))
+		return trimNonEmptyStoreColumns(splitStorePipeColumns(line))
 	}
 	return splitPackageTableColumns(line)
 }
@@ -103,44 +103,44 @@ func splitStoreColumns(line string) []string {
 func splitStoreHeaderColumns(line string) []string {
 	line = normalizeStoreTableDelimiters(line)
 	if strings.Contains(line, "|") {
-		return splitStoreBoxColumns(line)
+		return splitStorePipeColumns(line)
 	}
 	return splitPackageTableColumns(line)
 }
 
-func splitStoreBoxColumns(line string) []string {
+func splitStorePipeColumns(line string) []string {
 	line = strings.TrimSpace(normalizeStoreTableDelimiters(line))
 	line = strings.TrimPrefix(line, "|")
 	line = strings.TrimSuffix(line, "|")
 	parts := strings.Split(line, "|")
-	cols := make([]string, 0, len(parts))
+	columns := make([]string, 0, len(parts))
 	for _, part := range parts {
-		cols = append(cols, strings.TrimSpace(part))
+		columns = append(columns, strings.TrimSpace(part))
 	}
-	return cols
+	return columns
 }
 
-func nonEmptyStoreColumns(cols []string) []string {
-	filtered := make([]string, 0, len(cols))
-	for _, col := range cols {
-		col = strings.TrimSpace(col)
-		if col != "" {
-			filtered = append(filtered, col)
+func trimNonEmptyStoreColumns(columns []string) []string {
+	filtered := make([]string, 0, len(columns))
+	for _, column := range columns {
+		column = strings.TrimSpace(column)
+		if column != "" {
+			filtered = append(filtered, column)
 		}
 	}
 	return filtered
 }
 
-func normalizeStoreColumnCount(cols []string, count int) []string {
-	if count <= 0 {
-		return cols
+func fitStoreColumnsToHeader(columns []string, headerColumnCount int) []string {
+	if headerColumnCount <= 0 {
+		return columns
 	}
-	normalized := make([]string, count)
-	for i := 0; i < count && i < len(cols); i++ {
-		normalized[i] = strings.TrimSpace(cols[i])
+	normalized := make([]string, headerColumnCount)
+	for i := 0; i < headerColumnCount && i < len(columns); i++ {
+		normalized[i] = strings.TrimSpace(columns[i])
 	}
-	if len(cols) > count {
-		normalized[count-1] = strings.TrimSpace(strings.Join(append([]string{normalized[count-1]}, cols[count:]...), " "))
+	if len(columns) > headerColumnCount {
+		normalized[headerColumnCount-1] = strings.TrimSpace(strings.Join(append([]string{normalized[headerColumnCount-1]}, columns[headerColumnCount:]...), " "))
 	}
 	return normalized
 }
@@ -201,10 +201,6 @@ func isStoreOutputNoiseLine(line string) bool {
 	return isStoreDividerLine(trimmed)
 }
 
-func isStoreSearchNoiseLine(line string) bool {
-	return isStoreOutputNoiseLine(line)
-}
-
 func isStoreDividerLine(line string) bool {
 	line = strings.TrimSpace(normalizeStoreTableDelimiters(line))
 	if line == "" {
@@ -233,56 +229,56 @@ func looksLikeVersion(value string) bool {
 	return true
 }
 
-func looksLikePackageID(value string) bool {
-	value = strings.TrimSpace(value)
-	if value == "" {
+func looksLikeStoreTableID(candidate string) bool {
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
 		return false
 	}
-	if strings.Contains(value, ".") || strings.Contains(value, "_") {
+	if strings.Contains(candidate, ".") || strings.Contains(candidate, "_") {
 		return true
 	}
-	return isSafePackageID(value) && strings.ToUpper(value) == value && len(value) >= 8
+	return isSafePackageID(candidate) && strings.ToUpper(candidate) == candidate && len(candidate) >= 8
 }
 
-func storePackageFromColumns(header, cols []string) (Package, bool) {
-	if len(cols) < 2 {
+func storePackageFromTableRow(headerColumns, rowColumns []string) (Package, bool) {
+	if len(rowColumns) < 2 {
 		return Package{}, false
 	}
-	name := storeColumnValue(header, cols, "name", "app", "application")
-	if name == "" && len(cols) > 0 {
-		name = strings.TrimSpace(cols[0])
+	packageName := storeTableColumnValue(headerColumns, rowColumns, "name", "app", "application")
+	if packageName == "" && len(rowColumns) > 0 {
+		packageName = strings.TrimSpace(rowColumns[0])
 	}
-	if name == "" || strings.HasPrefix(name, "[") || isStoreOutputNoiseLine(name) {
+	if packageName == "" || strings.HasPrefix(packageName, "[") || isStoreOutputNoiseLine(packageName) {
 		return Package{}, false
 	}
-	id := storeColumnValue(header, cols, "id", "product id", "package id")
-	if id == "" && len(cols) > 1 && looksLikePackageID(cols[1]) {
-		id = strings.TrimSpace(cols[1])
+	packageID := storeTableColumnValue(headerColumns, rowColumns, "id", "product id", "package id")
+	if packageID == "" && len(rowColumns) > 1 && looksLikeStoreTableID(rowColumns[1]) {
+		packageID = strings.TrimSpace(rowColumns[1])
 	}
-	if id == "" {
-		id = name
+	if packageID == "" {
+		packageID = packageName
 	}
-	version := storeColumnValue(header, cols, "current")
-	available := storeColumnValue(header, cols, "available")
-	if version == "" {
-		version = storeColumnValue(header, cols, "version")
+	installedVersion := storeTableColumnValue(headerColumns, rowColumns, "current")
+	availableVersion := storeTableColumnValue(headerColumns, rowColumns, "available")
+	if installedVersion == "" {
+		installedVersion = storeTableColumnValue(headerColumns, rowColumns, "version")
 	}
-	if version == "" {
-		for i := 1; i < len(cols); i++ {
-			if looksLikeVersion(cols[i]) {
-				if version == "" {
-					version = cols[i]
-				} else if available == "" {
-					available = cols[i]
+	if installedVersion == "" {
+		for i := 1; i < len(rowColumns); i++ {
+			if looksLikeVersion(rowColumns[i]) {
+				if installedVersion == "" {
+					installedVersion = rowColumns[i]
+				} else if availableVersion == "" {
+					availableVersion = rowColumns[i]
 				}
 			}
 		}
 	}
 	return Package{
-		ID:               strings.TrimSpace(id),
-		Name:             strings.TrimSpace(name),
-		Version:          strings.TrimSpace(version),
-		AvailableVersion: strings.TrimSpace(available),
+		ID:               strings.TrimSpace(packageID),
+		Name:             strings.TrimSpace(packageName),
+		Version:          strings.TrimSpace(installedVersion),
+		AvailableVersion: strings.TrimSpace(availableVersion),
 		Manager:          managerStore,
 		Source:           sourceStoreCLI,
 		UpdateSupported:  true,
@@ -290,17 +286,17 @@ func storePackageFromColumns(header, cols []string) (Package, bool) {
 	}, true
 }
 
-func storeColumnValue(header, cols []string, names ...string) string {
-	index := storeColumnIndex(header, names...)
-	if index < 0 || index >= len(cols) {
+func storeTableColumnValue(headerColumns, rowColumns []string, names ...string) string {
+	index := storeTableColumnIndex(headerColumns, names...)
+	if index < 0 || index >= len(rowColumns) {
 		return ""
 	}
-	return strings.TrimSpace(cols[index])
+	return strings.TrimSpace(rowColumns[index])
 }
 
-func storeColumnIndex(header []string, names ...string) int {
-	for i, col := range header {
-		normalized := strings.ToLower(strings.TrimSpace(col))
+func storeTableColumnIndex(headerColumns []string, names ...string) int {
+	for i, column := range headerColumns {
+		normalized := strings.ToLower(strings.TrimSpace(column))
 		for _, name := range names {
 			if normalized == name {
 				return i
@@ -310,49 +306,49 @@ func storeColumnIndex(header []string, names ...string) int {
 	return -1
 }
 
-func storeColumnsEmpty(cols []string) bool {
-	for _, col := range cols {
-		if strings.TrimSpace(col) != "" {
+func storeColumnsAllEmpty(columns []string) bool {
+	for _, column := range columns {
+		if strings.TrimSpace(column) != "" {
 			return false
 		}
 	}
 	return true
 }
 
-func isStoreBoxContinuationRow(header, cols, pending []string) bool {
-	if len(pending) == 0 {
+func isStorePipeContinuationRow(headerColumns, rowColumns, pendingRow []string) bool {
+	if len(pendingRow) == 0 {
 		return false
 	}
-	if index := storeColumnIndex(header, "current", "available", "version"); index >= 0 && index < len(cols) {
-		if looksLikeVersion(cols[index]) {
+	if index := storeTableColumnIndex(headerColumns, "current", "available", "version"); index >= 0 && index < len(rowColumns) {
+		if looksLikeVersion(rowColumns[index]) {
 			return false
 		}
 		return true
 	}
-	if index := storeColumnIndex(header, "id", "product id", "package id"); index >= 0 && index < len(cols) {
-		return strings.TrimSpace(cols[index]) == ""
+	if index := storeTableColumnIndex(headerColumns, "id", "product id", "package id"); index >= 0 && index < len(rowColumns) {
+		return strings.TrimSpace(rowColumns[index]) == ""
 	}
 	return false
 }
 
-func appendStoreBoxContinuation(row, continuation []string) []string {
-	if len(row) < len(continuation) {
-		expanded := make([]string, len(continuation))
-		copy(expanded, row)
-		row = expanded
+func mergeStorePipeContinuationRow(baseRow, continuationRow []string) []string {
+	if len(baseRow) < len(continuationRow) {
+		expanded := make([]string, len(continuationRow))
+		copy(expanded, baseRow)
+		baseRow = expanded
 	}
-	for i, value := range continuation {
+	for i, value := range continuationRow {
 		value = strings.TrimSpace(value)
 		if value == "" {
 			continue
 		}
-		if row[i] == "" {
-			row[i] = value
+		if baseRow[i] == "" {
+			baseRow[i] = value
 		} else {
-			row[i] += " " + value
+			baseRow[i] += " " + value
 		}
 	}
-	return row
+	return baseRow
 }
 
 func storeSearch(query string) ([]Package, CommandResult) {

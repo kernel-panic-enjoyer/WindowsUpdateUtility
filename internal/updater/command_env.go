@@ -8,131 +8,145 @@ import (
 	"syscall"
 )
 
-const createNoWindow = 0x08000000
+const (
+	createNoWindowFlag           = 0x08000000
+	systemEnvironmentRegistryKey = `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment`
+	currentUserEnvironmentRegKey = `HKCU\Environment`
+)
 
 func hiddenSysProcAttr() *syscall.SysProcAttr {
-	return &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
+	return &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindowFlag}
 }
 
 func launchEnv() []string {
-	env := os.Environ()
-	path := launchPath(os.Getenv("PATH"))
-	env = upsertEnv(env, "PATH", path)
-	env = upsertEnv(env, "PYTHONUTF8", "1")
-	env = upsertEnv(env, "PYTHONIOENCODING", "utf-8")
-	env = upsertEnv(env, "LANG", "C.UTF-8")
-	env = upsertEnv(env, "LC_ALL", "C.UTF-8")
-	return env
+	commandEnv := os.Environ()
+	commandPath := launchPath(os.Getenv("PATH"))
+	for _, setting := range []struct {
+		key   string
+		value string
+	}{
+		{"PATH", commandPath},
+		{"PYTHONUTF8", "1"},
+		{"PYTHONIOENCODING", "utf-8"},
+		{"LANG", "C.UTF-8"},
+		{"LC_ALL", "C.UTF-8"},
+	} {
+		commandEnv = setCommandEnvValue(commandEnv, setting.key, setting.value)
+	}
+	return commandEnv
 }
 
-func launchPath(path string) string {
-	return appendExistingPathEntries(path, launchPathAdditions()...)
+func launchPath(pathValue string) string {
+	return prependExistingPathEntries(pathValue, launchPathAdditions()...)
 }
 
 func launchPathAdditions() []string {
-	additions := []string{}
-	if local := os.Getenv("LOCALAPPDATA"); local != "" {
-		additions = append(additions,
-			filepath.Join(local, "Microsoft", "WindowsApps"),
-			filepath.Join(local, "Microsoft", "WinGet", "Links"),
+	pathAdditions := []string{}
+	if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
+		pathAdditions = append(pathAdditions,
+			filepath.Join(localAppData, "Microsoft", "WindowsApps"),
+			filepath.Join(localAppData, "Microsoft", "WinGet", "Links"),
 		)
 	}
-	if chocoInstall := os.Getenv("ChocolateyInstall"); chocoInstall != "" {
-		additions = append(additions, filepath.Join(chocoInstall, "bin"))
+	if chocolateyInstall := os.Getenv("ChocolateyInstall"); chocolateyInstall != "" {
+		pathAdditions = append(pathAdditions, filepath.Join(chocolateyInstall, "bin"))
 	}
 	if programData := os.Getenv("ProgramData"); programData != "" {
-		additions = append(additions, filepath.Join(programData, "chocolatey", "bin"))
+		pathAdditions = append(pathAdditions, filepath.Join(programData, "chocolatey", "bin"))
 	}
-	return additions
+	return pathAdditions
 }
 
-func appendExistingPathEntries(path string, additions ...string) string {
-	for _, addition := range additions {
-		if _, err := os.Stat(addition); err == nil {
-			path = mergePathLists(addition, path)
+func prependExistingPathEntries(pathValue string, candidateEntries ...string) string {
+	for _, candidateEntry := range candidateEntries {
+		if _, err := os.Stat(candidateEntry); err == nil {
+			pathValue = mergePathLists(candidateEntry, pathValue)
 		}
 	}
-	return path
+	return pathValue
 }
 
-func upsertEnv(env []string, key, value string) []string {
+func setCommandEnvValue(commandEnv []string, key, value string) []string {
 	prefix := strings.ToUpper(key) + "="
+	replacement := key + "=" + value
+	filtered := commandEnv[:0]
 	replaced := false
-	for index, item := range env {
+
+	for _, item := range commandEnv {
+		if item == "" {
+			continue
+		}
 		if strings.HasPrefix(strings.ToUpper(item), prefix) {
 			if !replaced {
-				env[index] = key + "=" + value
+				filtered = append(filtered, replacement)
 				replaced = true
-			} else {
-				env[index] = ""
 			}
+			continue
 		}
+		filtered = append(filtered, item)
 	}
 	if !replaced {
-		env = append(env, key+"="+value)
-	}
-	filtered := env[:0]
-	for _, item := range env {
-		if item != "" {
-			filtered = append(filtered, item)
-		}
+		filtered = append(filtered, replacement)
 	}
 	return filtered
 }
 
-func resolveExecutable(name string) string {
-	if override := os.Getenv("UPDATER_" + strings.ToUpper(name) + "_PATH"); override != "" {
-		return override
+func resolveExecutable(executableName string) string {
+	if overridePath := os.Getenv("UPDATER_" + strings.ToUpper(executableName) + "_PATH"); overridePath != "" {
+		return overridePath
 	}
-	if found, err := exec.LookPath(name); err == nil {
-		return found
+	if resolvedPath, err := exec.LookPath(executableName); err == nil {
+		return resolvedPath
 	}
-	if strings.EqualFold(name, "choco") {
-		var candidates []string
-		if chocoInstall := os.Getenv("ChocolateyInstall"); chocoInstall != "" {
-			candidates = append(candidates, filepath.Join(chocoInstall, "bin", "choco.exe"))
+	if strings.EqualFold(executableName, "choco") {
+		var candidatePaths []string
+		if chocolateyInstall := os.Getenv("ChocolateyInstall"); chocolateyInstall != "" {
+			candidatePaths = append(candidatePaths, filepath.Join(chocolateyInstall, "bin", "choco.exe"))
 		}
 		if programData := os.Getenv("ProgramData"); programData != "" {
-			candidates = append(candidates, filepath.Join(programData, "chocolatey", "bin", "choco.exe"))
+			candidatePaths = append(candidatePaths, filepath.Join(programData, "chocolatey", "bin", "choco.exe"))
 		}
-		if candidate := firstExistingPath(candidates); candidate != "" {
-			return candidate
+		if existingPath := firstExistingPath(candidatePaths); existingPath != "" {
+			return existingPath
 		}
 	}
-	if strings.EqualFold(name, "winget") || strings.EqualFold(name, "store") {
-		exeName := name
-		if !strings.HasSuffix(strings.ToLower(exeName), ".exe") {
-			exeName += ".exe"
+	if strings.EqualFold(executableName, "winget") || strings.EqualFold(executableName, "store") {
+		executableFileName := executableName
+		if !strings.HasSuffix(strings.ToLower(executableFileName), ".exe") {
+			executableFileName += ".exe"
 		}
-		var candidates []string
-		if root := os.Getenv("SystemRoot"); root != "" {
-			candidates = append(candidates, filepath.Join(root, "System32", exeName), filepath.Join(root, "Sysnative", exeName))
-		}
-		for _, env := range []string{"LOCALAPPDATA", "USERPROFILE"} {
-			value := os.Getenv(env)
-			if value == "" {
-				continue
-			}
-			base := value
-			if env == "USERPROFILE" {
-				base = filepath.Join(value, "AppData", "Local")
-			}
-			candidates = append(candidates,
-				filepath.Join(base, "Microsoft", "WindowsApps", exeName),
-				filepath.Join(base, "Microsoft", "WinGet", "Links", exeName),
+		var candidatePaths []string
+		if systemRoot := os.Getenv("SystemRoot"); systemRoot != "" {
+			candidatePaths = append(candidatePaths,
+				filepath.Join(systemRoot, "System32", executableFileName),
+				filepath.Join(systemRoot, "Sysnative", executableFileName),
 			)
 		}
-		if candidate := firstExistingPath(candidates); candidate != "" {
-			return candidate
+		for _, envVarName := range []string{"LOCALAPPDATA", "USERPROFILE"} {
+			envValue := os.Getenv(envVarName)
+			if envValue == "" {
+				continue
+			}
+			localAppData := envValue
+			if envVarName == "USERPROFILE" {
+				localAppData = filepath.Join(envValue, "AppData", "Local")
+			}
+			candidatePaths = append(candidatePaths,
+				filepath.Join(localAppData, "Microsoft", "WindowsApps", executableFileName),
+				filepath.Join(localAppData, "Microsoft", "WinGet", "Links", executableFileName),
+			)
+		}
+		if existingPath := firstExistingPath(candidatePaths); existingPath != "" {
+			return existingPath
 		}
 	}
-	return name
+	return executableName
 }
 
-func firstExistingPath(paths []string) string {
-	for _, path := range paths {
-		if _, err := os.Stat(path); err == nil {
-			return path
+func firstExistingPath(candidatePaths []string) string {
+	for _, candidatePath := range candidatePaths {
+		if _, err := os.Stat(candidatePath); err == nil {
+			return candidatePath
 		}
 	}
 	return ""
@@ -140,36 +154,36 @@ func firstExistingPath(paths []string) string {
 
 func refreshProcessEnvironmentFromRegistry() {
 	appLog("Refreshing process environment from registry.")
-	if value := registryEnvironmentValue(`HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment`, "ChocolateyInstall"); value != "" {
-		_ = os.Setenv("ChocolateyInstall", expandWindowsEnvRefs(value))
+	if chocolateyInstall := queryRegistryEnvironmentValue(systemEnvironmentRegistryKey, "ChocolateyInstall"); chocolateyInstall != "" {
+		_ = os.Setenv("ChocolateyInstall", expandWindowsEnvRefs(chocolateyInstall))
 	}
-	paths := []string{os.Getenv("PATH")}
-	for _, key := range []string{
-		`HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment`,
-		`HKCU\Environment`,
+	pathValues := []string{os.Getenv("PATH")}
+	for _, registryKey := range []string{
+		systemEnvironmentRegistryKey,
+		currentUserEnvironmentRegKey,
 	} {
-		if value := registryEnvironmentValue(key, "Path"); value != "" {
-			paths = append(paths, expandWindowsEnvRefs(value))
+		if pathValue := queryRegistryEnvironmentValue(registryKey, "Path"); pathValue != "" {
+			pathValues = append(pathValues, expandWindowsEnvRefs(pathValue))
 		}
 	}
-	refreshed := launchPath(mergePathLists(paths...))
-	if refreshed != "" {
-		_ = os.Setenv("PATH", refreshed)
+	refreshedPath := launchPath(mergePathLists(pathValues...))
+	if refreshedPath != "" {
+		_ = os.Setenv("PATH", refreshedPath)
 	}
 }
 
-func registryEnvironmentValue(key, value string) string {
-	result := runCommand(managerDetectionTimeout, "reg.exe", "query", key, "/v", value)
+func queryRegistryEnvironmentValue(registryKey, valueName string) string {
+	result := runCommand(managerDetectionTimeout, "reg.exe", "query", registryKey, "/v", valueName)
 	if !result.OK {
 		return ""
 	}
-	return parseRegistryQueryValue(result.Stdout, value)
+	return parseRegistryQueryValue(result.Stdout, valueName)
 }
 
-func parseRegistryQueryValue(output, value string) string {
-	for _, raw := range strings.Split(output, "\n") {
-		fields := strings.Fields(strings.TrimSpace(raw))
-		if len(fields) < 3 || !strings.EqualFold(fields[0], value) || !strings.HasPrefix(strings.ToUpper(fields[1]), "REG_") {
+func parseRegistryQueryValue(output, valueName string) string {
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 3 || !strings.EqualFold(fields[0], valueName) || !strings.HasPrefix(strings.ToUpper(fields[1]), "REG_") {
 			continue
 		}
 		return strings.Join(fields[2:], " ")
@@ -177,64 +191,64 @@ func parseRegistryQueryValue(output, value string) string {
 	return ""
 }
 
-func expandWindowsEnvRefs(value string) string {
+func expandWindowsEnvRefs(input string) string {
 	var expanded strings.Builder
-	for i := 0; i < len(value); {
-		if value[i] != '%' {
-			expanded.WriteByte(value[i])
-			i++
+	for index := 0; index < len(input); {
+		if input[index] != '%' {
+			expanded.WriteByte(input[index])
+			index++
 			continue
 		}
-		end := strings.IndexByte(value[i+1:], '%')
-		if end < 0 {
-			expanded.WriteByte(value[i])
-			i++
+		closingOffset := strings.IndexByte(input[index+1:], '%')
+		if closingOffset < 0 {
+			expanded.WriteByte(input[index])
+			index++
 			continue
 		}
-		end += i + 1
-		name := value[i+1 : end]
-		if name == "" {
+		closingIndex := index + 1 + closingOffset
+		variableName := input[index+1 : closingIndex]
+		if variableName == "" {
 			expanded.WriteString("%%")
-			i = end + 1
+			index = closingIndex + 1
 			continue
 		}
-		if replacement := os.Getenv(name); replacement != "" {
+		if replacement := os.Getenv(variableName); replacement != "" {
 			expanded.WriteString(replacement)
 		} else {
-			expanded.WriteString(value[i : end+1])
+			expanded.WriteString(input[index : closingIndex+1])
 		}
-		i = end + 1
+		index = closingIndex + 1
 	}
 	return expanded.String()
 }
 
-func mergePathLists(paths ...string) string {
-	var merged []string
-	seen := map[string]bool{}
-	for _, path := range paths {
-		for _, entry := range filepath.SplitList(path) {
-			entry = strings.Trim(strings.TrimSpace(entry), `"`)
-			if entry == "" {
+func mergePathLists(pathLists ...string) string {
+	var mergedEntries []string
+	seenEntries := map[string]bool{}
+	for _, pathList := range pathLists {
+		for _, pathEntry := range filepath.SplitList(pathList) {
+			pathEntry = strings.Trim(strings.TrimSpace(pathEntry), `"`)
+			if pathEntry == "" {
 				continue
 			}
-			key := strings.ToLower(strings.TrimRight(entry, `\/`))
-			if seen[key] {
+			normalizedEntry := strings.ToLower(strings.TrimRight(pathEntry, `\/`))
+			if seenEntries[normalizedEntry] {
 				continue
 			}
-			seen[key] = true
-			merged = append(merged, entry)
+			seenEntries[normalizedEntry] = true
+			mergedEntries = append(mergedEntries, pathEntry)
 		}
 	}
-	return strings.Join(merged, string(os.PathListSeparator))
+	return strings.Join(mergedEntries, string(os.PathListSeparator))
 }
 
-func managerCommand(manager string, args ...string) []string {
-	resolved := resolveExecutable(manager)
-	if resolved != manager {
-		return append([]string{resolved}, args...)
+func managerCommand(managerName string, args ...string) []string {
+	executablePath := resolveExecutable(managerName)
+	if executablePath != managerName {
+		return append([]string{executablePath}, args...)
 	}
-	if manager == "winget" || manager == "store" {
-		return append([]string{"cmd.exe", "/d", "/c", manager}, args...)
+	if managerName == "winget" || managerName == "store" {
+		return append([]string{"cmd.exe", "/d", "/c", managerName}, args...)
 	}
-	return append([]string{manager}, args...)
+	return append([]string{managerName}, args...)
 }

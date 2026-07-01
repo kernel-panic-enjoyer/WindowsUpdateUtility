@@ -2,34 +2,35 @@ package updater
 
 import "strings"
 
-func requireExplicitPinnedUpdate(result CommandResult) CommandResult {
-	return appendCommandStderr(result, "Winget reported that this package is pinned. Updating it requires explicit user confirmation.")
+func requireExplicitPinnedUpdate(commandResult CommandResult) CommandResult {
+	return appendCommandStderr(commandResult, "Winget reported that this package is pinned. Updating it requires explicit user confirmation.")
 }
 
-func requireExplicitUnknownVersionUpdate(result CommandResult) CommandResult {
-	return appendCommandStderr(result, "Winget reported an unknown installed version. Updating this package requires explicit user confirmation.")
+func requireExplicitUnknownVersionUpdate(commandResult CommandResult) CommandResult {
+	return appendCommandStderr(commandResult, "Winget reported an unknown installed version. Updating this package requires explicit user confirmation.")
 }
 
-func requireExplicitWingetRepair(result CommandResult) CommandResult {
-	return appendCommandStderr(result, "Winget reported no applicable upgrade even after forced upgrade and forced install retries. Use an explicit repair action if you want to reinstall this package manually.")
+func requireExplicitWingetRepair(commandResult CommandResult) CommandResult {
+	return appendCommandStderr(commandResult, "Winget reported no applicable upgrade even after forced upgrade and forced install retries. Use an explicit repair action if you want to reinstall this package manually.")
 }
 
-func appendCommandStderr(result CommandResult, message string) CommandResult {
-	if strings.TrimSpace(result.Stderr) != "" {
-		result.Stderr = strings.TrimRight(result.Stderr, "\r\n") + "\n" + message
+func appendCommandStderr(commandResult CommandResult, appendedMessage string) CommandResult {
+	stderr := strings.TrimRight(commandResult.Stderr, "\r\n")
+	if strings.TrimSpace(stderr) != "" {
+		commandResult.Stderr = stderr + "\n" + appendedMessage
 	} else {
-		result.Stderr = message
+		commandResult.Stderr = appendedMessage
 	}
-	return result
+	return commandResult
 }
 
-func normalizedCommandOutput(result CommandResult) string {
-	return strings.ToLower(result.Stdout + "\n" + result.Stderr)
+func normalizedCommandOutput(commandResult CommandResult) string {
+	return strings.ToLower(commandResult.Stdout + "\n" + commandResult.Stderr)
 }
 
-func outputContainsAny(output string, markers []string) bool {
-	for _, marker := range markers {
-		if strings.Contains(output, marker) {
+func outputContainsAny(output string, substrings []string) bool {
+	for _, substring := range substrings {
+		if strings.Contains(output, substring) {
 			return true
 		}
 	}

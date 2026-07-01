@@ -10,9 +10,17 @@ type PageData struct {
 	AssetVersion string
 }
 
-var pageTemplate = template.Must(template.New("page").Funcs(template.FuncMap{
-	"logTabs": func() []LogCategorySpec { return logCategorySpecs },
-}).Parse(`<!doctype html>
+func sessionLogTabsForTemplate() []LogCategorySpec {
+	return logCategorySpecs
+}
+
+var pageTemplate = template.Must(template.New("page").
+	Funcs(template.FuncMap{
+		"sessionLogTabs": sessionLogTabsForTemplate,
+	}).
+	Parse(pageTemplateHTML))
+
+const pageTemplateHTML = `<!doctype html>
 <html lang="en" data-theme="{{.Theme}}">
 <head>
   <meta charset="utf-8">
@@ -123,7 +131,7 @@ var pageTemplate = template.Must(template.New("page").Funcs(template.FuncMap{
     <section id="search-results-panel" class="panel table-panel hidden">
       <div class="section-heading"><div><span class="panel-kicker">Installable packages</span><h2>Search Results</h2></div></div>
       <div id="search-provenance" class="search-provenance hidden"></div>
-      <div class="table-wrap"><table><thead><tr><th>Name</th><th>Source</th><th>Manager / Backend</th><th>Exact ID</th><th>Match</th><th>Version</th><th>Action</th></tr></thead><tbody id="search-results-body"></tbody></table></div>
+      <div class="table-wrap"><table><thead><tr><th>Name</th><th>Source</th><th>Exact ID</th><th>Match</th><th>Version</th><th>Action</th></tr></thead><tbody id="search-results-body"></tbody></table></div>
       <div class="table-footer"><div class="table-pager"><button id="search-prev" class="ghost" type="button" disabled>Previous</button><span id="search-page-status" class="muted">Page 1</span><button id="search-next" class="ghost" type="button" disabled>Next</button></div></div>
     </section>
 
@@ -133,7 +141,7 @@ var pageTemplate = template.Must(template.New("page").Funcs(template.FuncMap{
       <div class="section-heading"><div><span class="panel-kicker">Confirm bulk update</span><h2>Update Preflight</h2></div><div class="button-row"><button id="confirm-update-job" type="button"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg></span><span>Confirm Update</span></button><button id="cancel-update-preflight" class="ghost" type="button">Cancel</button></div></div>
       <div id="update-preflight-summary" class="summary-line"></div>
       <div id="update-preflight-overrides" class="summary-line muted"></div>
-      <div class="table-wrap"><table><thead><tr><th>Package</th><th>Source</th><th>Installed</th><th>Target</th><th>Manager / Backend / Notes</th></tr></thead><tbody id="update-preflight-body"></tbody></table></div>
+      <div class="table-wrap"><table><thead><tr><th>Package</th><th>Source</th><th>Installed</th><th>Target</th><th>Backend / Notes</th></tr></thead><tbody id="update-preflight-body"></tbody></table></div>
       <div id="update-preflight-excluded" class="preflight-excluded"></div>
     </section>
 
@@ -162,7 +170,7 @@ var pageTemplate = template.Must(template.New("page").Funcs(template.FuncMap{
     <section id="session-log-panel" class="panel log-panel">
       <div class="section-heading"><div><span class="panel-kicker">Command output</span><h2>Session Log</h2></div><div class="button-row"><label class="sr-only" for="log-search">Search active log</label><input id="log-search" class="table-search" type="search" placeholder="Search active log" autocomplete="off"><label class="check-control"><input id="log-autoscroll" type="checkbox" checked> Auto Scroll</label><button id="copy-log-view" class="ghost" type="button"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></span><span>Copy Log</span></button><button id="export-log-view" class="ghost" type="button"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></span><span>Export Logs</span></button><button id="clear-log-view" class="ghost" type="button">Clear View</button></div></div>
       <div class="log-tabs" role="tablist" aria-label="Session log categories" aria-orientation="horizontal">
-        {{range $index, $tab := logTabs}}<button id="log-tab-{{$tab.Category}}" class="log-tab{{if eq $index 0}} active{{end}}" type="button" role="tab" aria-selected="{{if eq $index 0}}true{{else}}false{{end}}" aria-controls="session-log" tabindex="{{if eq $index 0}}0{{else}}-1{{end}}" data-log-category="{{$tab.Category}}">{{$tab.Label}}</button>{{end}}
+        {{range $tabIndex, $logTab := sessionLogTabs}}<button id="log-tab-{{$logTab.Category}}" class="log-tab{{if eq $tabIndex 0}} active{{end}}" type="button" role="tab" aria-selected="{{if eq $tabIndex 0}}true{{else}}false{{end}}" aria-controls="session-log" tabindex="{{if eq $tabIndex 0}}0{{else}}-1{{end}}" data-log-category="{{$logTab.Category}}">{{$logTab.Label}}</button>{{end}}
       </div>
       <pre id="session-log" class="session-log" role="tabpanel" tabindex="0" aria-labelledby="log-tab-all"></pre>
     </section>
@@ -172,4 +180,4 @@ var pageTemplate = template.Must(template.New("page").Funcs(template.FuncMap{
   </footer>
   <script src="/assets/ui.js?v={{.AssetVersion}}" defer></script>
 </body>
-</html>`))
+</html>`

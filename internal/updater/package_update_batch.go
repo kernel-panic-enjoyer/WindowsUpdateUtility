@@ -2,38 +2,33 @@ package updater
 
 import "context"
 
-type elevatedPackageUpdateBatchRunnerFunc func(context.Context, []Package, func(int, Package)) ([]UpdateResult, CommandResult)
+type elevatedPackageUpdateBatchRunnerFunc func(ctx context.Context, packages []Package, reportProgress func(int, Package)) ([]UpdateResult, CommandResult)
 
 var elevatedPackageUpdateBatchRunner elevatedPackageUpdateBatchRunnerFunc = runElevatedPackageUpdateBatch
 var elevatedPackageUpdateBatchEligible = defaultElevatedPackageUpdateBatchEligible
 
-func defaultElevatedPackageUpdateBatchEligible(pkg Package) bool {
+func defaultElevatedPackageUpdateBatchEligible(candidate Package) bool {
 	if isAdmin() {
 		return false
 	}
-	switch pkg.Manager {
-	case managerChoco:
-		return true
-	default:
-		return false
-	}
+	return candidate.Manager == managerChoco
 }
 
-func planElevatedPackageUpdateBatch(packages []Package, eligible func(Package) bool) ([]Package, []Package) {
-	if eligible == nil {
-		eligible = defaultElevatedPackageUpdateBatchEligible
+func planElevatedPackageUpdateBatch(packages []Package, isBatchEligible func(Package) bool) ([]Package, []Package) {
+	if isBatchEligible == nil {
+		isBatchEligible = defaultElevatedPackageUpdateBatchEligible
 	}
-	batch := make([]Package, 0, len(packages))
-	remaining := make([]Package, 0, len(packages))
-	for _, pkg := range packages {
-		if eligible(pkg) {
-			batch = append(batch, pkg)
-			continue
+	batchPackages := make([]Package, 0, len(packages))
+	remainingPackages := make([]Package, 0, len(packages))
+	for _, candidate := range packages {
+		if isBatchEligible(candidate) {
+			batchPackages = append(batchPackages, candidate)
+		} else {
+			remainingPackages = append(remainingPackages, candidate)
 		}
-		remaining = append(remaining, pkg)
 	}
-	if len(batch) < 2 {
+	if len(batchPackages) < 2 {
 		return nil, append([]Package(nil), packages...)
 	}
-	return batch, remaining
+	return batchPackages, remainingPackages
 }

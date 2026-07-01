@@ -7,25 +7,25 @@ import (
 	"strings"
 )
 
-func runPackageUpdateCandidates(ctx context.Context, candidates []string, label string, run func(string) CommandResult) CommandResult {
-	candidates = uniqueUpdateTargets(candidates)
-	if len(candidates) == 0 {
+func runPackageUpdateCandidates(ctx context.Context, rawCandidates []string, attemptLabel string, runTargetUpdate func(string) CommandResult) CommandResult {
+	targets := uniqueUpdateTargets(rawCandidates)
+	if len(targets) == 0 {
 		return validationCommandResult("update", errors.New("package id contains unsupported characters"))
 	}
-	var merged CommandResult
-	for index, target := range candidates {
-		result := run(target)
-		if index == 0 {
-			merged = result
+	var mergedResult CommandResult
+	for attemptIndex, target := range targets {
+		attemptResult := runTargetUpdate(target)
+		if attemptIndex == 0 {
+			mergedResult = attemptResult
 		} else {
-			merged = mergeCommandAttemptsWithFinalResult(merged, result, fmt.Sprintf("%s %q", label, target))
+			mergedResult = mergeCommandAttemptsWithFinalResult(mergedResult, attemptResult, fmt.Sprintf("%s %q", attemptLabel, target))
 		}
-		if result.OK || ctx.Err() != nil || !shouldTryAlternatePackageTarget(result) {
-			return merged
+		if attemptResult.OK || ctx.Err() != nil || !shouldTryAlternatePackageTarget(attemptResult) {
+			return mergedResult
 		}
 		appLog("Update target %q was not accepted; trying alternate target.", target)
 	}
-	return merged
+	return mergedResult
 }
 
 func wingetUpdateTargetCandidates(pkg Package) []string {
@@ -36,68 +36,75 @@ func wingetUpdateTargetCandidates(pkg Package) []string {
 }
 
 func wingetNameFallbackTarget(pkg Package) string {
-	name := strings.TrimSpace(pkg.Name)
-	if name == "" || len(name) > 160 || containsBlockedPackageActionChar(name) || isOptionLikePackageTarget(name) {
+	displayName := strings.TrimSpace(pkg.Name)
+	if displayName == "" || len(displayName) > 160 || containsBlockedPackageActionChar(displayName) || isOptionLikePackageTarget(displayName) {
 		return ""
 	}
-	for _, existing := range []string{pkg.ID, pkg.Match} {
-		if strings.EqualFold(strings.TrimSpace(existing), name) {
+	for _, primaryTarget := range []string{pkg.ID, pkg.Match} {
+		if strings.EqualFold(strings.TrimSpace(primaryTarget), displayName) {
 			return ""
 		}
 	}
-	return name
+	return displayName
 }
 
 func chocoUpdateTargetCandidates(pkg Package) []string {
-	id := strings.TrimSpace(pkg.ID)
-	if id == "" {
+	packageID := strings.TrimSpace(pkg.ID)
+	if packageID == "" {
 		return nil
 	}
-	values := []string{id}
-	lower := strings.ToLower(id)
-	for _, suffix := range []string{".install", ".portable"} {
-		if strings.HasSuffix(lower, suffix) && len(id) > len(suffix) {
-			values = append(values, id[:len(id)-len(suffix)])
+	candidateIDs := []string{packageID}
+	lowerPackageID := strings.ToLower(packageID)
+	variantSuffixes := [...]string{".install", ".portable"}
+	hasVariantSuffix := false
+	for _, variantSuffix := range variantSuffixes {
+		if strings.HasSuffix(lowerPackageID, variantSuffix) {
+			hasVariantSuffix = true
+			if len(packageID) > len(variantSuffix) {
+				candidateIDs = append(candidateIDs, packageID[:len(packageID)-len(variantSuffix)])
+			}
 		}
 	}
-	if !strings.HasSuffix(lower, ".install") && !strings.HasSuffix(lower, ".portable") && isSafePackageID(id) {
-		values = append(values, id+".install", id+".portable")
+	if !hasVariantSuffix && isSafePackageID(packageID) {
+		for _, variantSuffix := range variantSuffixes {
+			candidateIDs = append(candidateIDs, packageID+variantSuffix)
+		}
 	}
-	return uniquePackageIDTargets(values)
+	return uniquePackageIDTargets(candidateIDs)
 }
 
 func uniqueUpdateTargets(values []string) []string {
-	seen := map[string]bool{}
-	var targets []string
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" || len(value) > 240 || containsBlockedPackageActionChar(value) || isOptionLikePackageTarget(value) {
+	seenTargets := map[string]bool{}
+	var uniqueTargets []string
+	for _, candidate := range values {
+		target := strings.TrimSpace(candidate)
+		if target == "" || len(target) > 240 || containsBlockedPackageActionChar(target) || isOptionLikePackageTarget(target) {
 			continue
 		}
-		normalized := strings.ToLower(value)
-		if seen[normalized] {
+		normalizedTarget := strings.ToLower(target)
+		if seenTargets[normalizedTarget] {
 			continue
 		}
-		seen[normalized] = true
-		targets = append(targets, value)
+		seenTargets[normalizedTarget] = true
+		uniqueTargets = append(uniqueTargets, target)
 	}
-	return targets
+	return uniqueTargets
 }
 
 func uniquePackageIDTargets(values []string) []string {
-	seen := map[string]bool{}
-	var targets []string
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" || isOptionLikePackageTarget(value) || !isSafePackageID(value) {
+	seenTargets := map[string]bool{}
+	var uniqueTargets []string
+	for _, candidate := range values {
+		target := strings.TrimSpace(candidate)
+		if target == "" || isOptionLikePackageTarget(target) || !isSafePackageID(target) {
 			continue
 		}
-		normalized := strings.ToLower(value)
-		if seen[normalized] {
+		normalizedTarget := strings.ToLower(target)
+		if seenTargets[normalizedTarget] {
 			continue
 		}
-		seen[normalized] = true
-		targets = append(targets, value)
+		seenTargets[normalizedTarget] = true
+		uniqueTargets = append(uniqueTargets, target)
 	}
-	return targets
+	return uniqueTargets
 }

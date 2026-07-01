@@ -137,63 +137,63 @@ func (executor StoreExactUpdateExecutor) ExecuteWithCallbacks(ctx context.Contex
 		pollEvery = storeExactUpdatePollInterval
 	}
 
-	pre, preResult := executor.Inventory.Snapshot(ctx, request.Identity)
-	if err := validateStorePreActionSnapshot(request, pre, preResult); err != nil {
+	preActionSnapshot, preActionResult := executor.Inventory.Snapshot(ctx, request.Identity)
+	if err := validateStorePreActionSnapshot(request, preActionSnapshot, preActionResult); err != nil {
 		result := validationCommandResult("store exact update", err)
-		return appendStoreExecutionDiagnostic(result, "pre-action", pre, preResult)
+		return appendStoreExecutionDiagnostic(result, "pre-action", preActionSnapshot, preActionResult)
 	}
 	verifyCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	subscription := executor.subscribePackageEvents(verifyCtx, request.Identity)
-	if subscription.cleanup != nil {
-		defer subscription.cleanup()
+	eventSubscription := executor.subscribePackageEvents(verifyCtx, request.Identity)
+	if eventSubscription.cleanup != nil {
+		defer eventSubscription.cleanup()
 	}
 	if callbacks.Starting != nil {
 		callbacks.Starting(request)
 	}
-	actionStartedAt := time.Now().UTC()
-	action := executor.Runner.RunStoreUpdate(ctx, request)
-	action = appendStoreExecutionDiagnostic(action, "pre-action", pre, preResult)
+	updateStartedAt := time.Now().UTC()
+	updateResult := executor.Runner.RunStoreUpdate(ctx, request)
+	updateResult = appendStoreExecutionDiagnostic(updateResult, "pre-action", preActionSnapshot, preActionResult)
 	if ctx.Err() != nil {
-		action.OK = false
-		action.Code = commandCancelledCode
-		action.Stderr = appendDiagnosticLine(action.Stderr, "Store update cancelled.")
-		return action
+		updateResult.OK = false
+		updateResult.Code = commandCancelledCode
+		updateResult.Stderr = appendDiagnosticLine(updateResult.Stderr, "Store update cancelled.")
+		return updateResult
 	}
-	if action.Code == commandCancelledCode {
-		return action
+	if updateResult.Code == commandCancelledCode {
+		return updateResult
 	}
-	if !action.OK {
-		return action
+	if !updateResult.OK {
+		return updateResult
 	}
 	if callbacks.Accepted != nil {
-		callbacks.Accepted(request, action)
+		callbacks.Accepted(request, updateResult)
 	}
-	action.Stdout = appendDiagnosticLine(action.Stdout, "Store update request accepted; verifying exact package state.")
+	updateResult.Stdout = appendDiagnosticLine(updateResult.Stdout, "Store update request accepted; verifying exact package state.")
 
 	if callbacks.Verifying != nil {
 		callbacks.Verifying(request)
 	}
-	verification := executor.verifyAcceptedActionWithEvents(verifyCtx, request, pre, pollEvery, actionStartedAt, subscription)
-	merged := mergeCommandAttemptsWithFinalResult(action, verification.Result, "Store post-action verification")
-	merged = appendStoreExecutionDiagnostic(merged, "post-action", verification.Post, verification.PostResult)
-	if verification.Verified {
-		merged.OK = true
-		merged.Code = 0
-		merged.Stdout = appendDiagnosticLine(merged.Stdout, verification.Message)
-		merged.Stderr = strings.TrimSpace(merged.Stderr)
-		return merged
+	verificationResult := executor.verifyAcceptedActionWithEvents(verifyCtx, request, preActionSnapshot, pollEvery, updateStartedAt, eventSubscription)
+	mergedResult := mergeCommandAttemptsWithFinalResult(updateResult, verificationResult.Result, "Store post-action verification")
+	mergedResult = appendStoreExecutionDiagnostic(mergedResult, "post-action", verificationResult.Post, verificationResult.PostResult)
+	if verificationResult.Verified {
+		mergedResult.OK = true
+		mergedResult.Code = 0
+		mergedResult.Stdout = appendDiagnosticLine(mergedResult.Stdout, verificationResult.Message)
+		mergedResult.Stderr = strings.TrimSpace(mergedResult.Stderr)
+		return mergedResult
 	}
 	if verifyCtx.Err() != nil && errors.Is(verifyCtx.Err(), context.Canceled) {
-		merged.OK = false
-		merged.Code = commandCancelledCode
-		merged.Stderr = appendDiagnosticLine(merged.Stderr, "Store update verification cancelled.")
-		return merged
+		mergedResult.OK = false
+		mergedResult.Code = commandCancelledCode
+		mergedResult.Stderr = appendDiagnosticLine(mergedResult.Stderr, "Store update verification cancelled.")
+		return mergedResult
 	}
-	merged.OK = false
-	merged.Code = storeUpdateAcceptedNotVerifiedCode
-	merged.Stderr = appendDiagnosticLine(merged.Stderr, firstNonEmpty(verification.Message, "Store update request was accepted but final state could not be verified."))
-	return merged
+	mergedResult.OK = false
+	mergedResult.Code = storeUpdateAcceptedNotVerifiedCode
+	mergedResult.Stderr = appendDiagnosticLine(mergedResult.Stderr, firstNonEmpty(verificationResult.Message, "Store update request was accepted but final state could not be verified."))
+	return mergedResult
 }
 
 type storeExactVerificationResult struct {
@@ -215,53 +215,53 @@ func (executor StoreExactUpdateExecutor) subscribePackageEvents(ctx context.Cont
 	return storePackageEventSubscription{events: events, cleanup: cleanup, err: eventErr}
 }
 
-func (executor StoreExactUpdateExecutor) verifyAcceptedAction(ctx context.Context, request StoreExactUpdateRequest, pre StoreExactPackageSnapshot, pollEvery time.Duration) storeExactVerificationResult {
+func (executor StoreExactUpdateExecutor) verifyAcceptedAction(ctx context.Context, request StoreExactUpdateRequest, preActionSnapshot StoreExactPackageSnapshot, pollEvery time.Duration) storeExactVerificationResult {
 	subscription := executor.subscribePackageEvents(ctx, request.Identity)
 	if subscription.cleanup != nil {
 		defer subscription.cleanup()
 	}
-	return executor.verifyAcceptedActionWithEvents(ctx, request, pre, pollEvery, time.Now().UTC(), subscription)
+	return executor.verifyAcceptedActionWithEvents(ctx, request, preActionSnapshot, pollEvery, time.Now().UTC(), subscription)
 }
 
-func (executor StoreExactUpdateExecutor) verifyAcceptedActionWithEvents(ctx context.Context, request StoreExactUpdateRequest, pre StoreExactPackageSnapshot, pollEvery time.Duration, actionStartedAt time.Time, subscription storePackageEventSubscription) storeExactVerificationResult {
-	result := CommandResult{OK: true, Command: "store exact post-action verification"}
+func (executor StoreExactUpdateExecutor) verifyAcceptedActionWithEvents(ctx context.Context, request StoreExactUpdateRequest, preActionSnapshot StoreExactPackageSnapshot, pollEvery time.Duration, actionStartedAt time.Time, subscription storePackageEventSubscription) storeExactVerificationResult {
+	verificationResult := CommandResult{OK: true, Command: "store exact post-action verification"}
 	if subscription.err != nil {
-		result = mergeCommandAttemptsWithFinalResult(result, CommandResult{Command: "PackageCatalog event subscription", Code: 1, Stderr: sanitizeProviderDiagnostic(subscription.err.Error())}, "PackageCatalog events unavailable")
+		verificationResult = mergeCommandAttemptsWithFinalResult(verificationResult, CommandResult{Command: "PackageCatalog event subscription", Code: 1, Stderr: sanitizeProviderDiagnostic(subscription.err.Error())}, "PackageCatalog events unavailable")
 	}
 	ticker := time.NewTicker(pollEvery)
 	defer ticker.Stop()
-	events := subscription.events
-	seenEvents := map[string]bool{}
+	eventCh := subscription.events
+	seenEventKeys := map[string]bool{}
 	for {
-		post, postResult := executor.Inventory.Snapshot(ctx, request.Identity)
-		if verified, message := storeSnapshotVerifiesUpdate(request, pre, post); verified {
-			return storeExactVerificationResult{Verified: true, Message: message, Result: result, Post: post, PostResult: postResult}
+		postActionSnapshot, postActionResult := executor.Inventory.Snapshot(ctx, request.Identity)
+		if verified, message := storeSnapshotVerifiesUpdate(request, preActionSnapshot, postActionSnapshot); verified {
+			return storeExactVerificationResult{Verified: true, Message: message, Result: verificationResult, Post: postActionSnapshot, PostResult: postActionResult}
 		}
-		catalog, catalogResult := executor.Catalog.QueryExact(ctx, request)
-		result = mergeCommandAttemptsWithFinalResult(result, catalogResult, "targeted Store catalog query")
-		if storeCatalogVerifiesUpdate(request, pre, catalog, post) {
-			return storeExactVerificationResult{Verified: true, Message: "Store update verified because the exact offer disappeared after a fresh targeted catalog query.", Result: result, Post: post, PostResult: postResult}
+		catalogEvidence, catalogCommandResult := executor.Catalog.QueryExact(ctx, request)
+		verificationResult = mergeCommandAttemptsWithFinalResult(verificationResult, catalogCommandResult, "targeted Store catalog query")
+		if storeCatalogVerifiesUpdate(request, preActionSnapshot, catalogEvidence, postActionSnapshot) {
+			return storeExactVerificationResult{Verified: true, Message: "Store update verified because the exact offer disappeared after a fresh targeted catalog query.", Result: verificationResult, Post: postActionSnapshot, PostResult: postActionResult}
 		}
 		select {
 		case <-ctx.Done():
-			return storeExactVerificationResult{Message: ctx.Err().Error(), Result: result, Post: post, PostResult: postResult}
-		case event, ok := <-events:
+			return storeExactVerificationResult{Message: ctx.Err().Error(), Result: verificationResult, Post: postActionSnapshot, PostResult: postActionResult}
+		case event, ok := <-eventCh:
 			if !ok {
-				events = nil
-				result.Stdout = appendDiagnosticLine(result.Stdout, "PackageCatalog event channel closed; continuing with polling.")
+				eventCh = nil
+				verificationResult.Stdout = appendDiagnosticLine(verificationResult.Stdout, "PackageCatalog event channel closed; continuing with polling.")
 				continue
 			}
 			if reason := validateStorePackageChangeEvent(request, actionStartedAt, event); reason != "" {
-				result.Stdout = appendDiagnosticLine(result.Stdout, "Ignored Store package event: "+reason+".")
+				verificationResult.Stdout = appendDiagnosticLine(verificationResult.Stdout, "Ignored Store package event: "+reason+".")
 				continue
 			}
-			key := storePackageEventKey(event)
-			if seenEvents[key] {
-				result.Stdout = appendDiagnosticLine(result.Stdout, "Ignored duplicate Store package event.")
+			eventKey := storePackageEventKey(event)
+			if seenEventKeys[eventKey] {
+				verificationResult.Stdout = appendDiagnosticLine(verificationResult.Stdout, "Ignored duplicate Store package event.")
 				continue
 			}
-			seenEvents[key] = true
-			result.Stdout = appendDiagnosticLine(result.Stdout, "PackageCatalog event received for exact Store package; refreshing inventory and catalog.")
+			seenEventKeys[eventKey] = true
+			verificationResult.Stdout = appendDiagnosticLine(verificationResult.Stdout, "PackageCatalog event received for exact Store package; refreshing inventory and catalog.")
 		case <-ticker.C:
 		}
 	}
@@ -274,25 +274,25 @@ func exactStoreUpdateRequestFromPackage(ctx context.Context, pkg Package) (Store
 	if policy := packageUpdatePolicy(pkg, UpdateOptions{AllowUnknownVersion: pkg.AllowUnknownVersionUpdate, AllowPinned: pkg.AllowPinnedUpdate}); !policy.CanUpdateNow {
 		return StoreExactUpdateRequest{}, errors.New(firstNonEmpty(policy.CannotUpdateReason, "Store package is not actionable"))
 	}
-	pfn := storeInstalledPackageFamilyName(pkg)
-	if pfn == "" {
+	packageFamilyName := storeInstalledPackageFamilyName(pkg)
+	if packageFamilyName == "" {
 		return StoreExactUpdateRequest{}, errors.New("Store update requires an exact package family name")
 	}
 	userSID, err := storeScanCurrentUserSID()
 	if err != nil {
 		return StoreExactUpdateRequest{}, fmt.Errorf("Store update user could not be identified: %w", err)
 	}
-	identity := StoreInstalledIdentity{UserSID: userSID, PackageFamilyName: pfn}
+	identity := StoreInstalledIdentity{UserSID: userSID, PackageFamilyName: packageFamilyName}
 	productID := strings.TrimSpace(pkg.StoreProductID)
 	updateID := strings.TrimSpace(pkg.StoreUpdateID)
 	if productID != "" && !looksLikeStoreProductID(productID) {
 		return StoreExactUpdateRequest{}, errors.New("Store update Product ID is not a valid Microsoft Store Product ID")
 	}
-	target := firstNonEmpty(productID, updateID)
-	if !pkg.ExactActionTargetAvailable || target == "" {
+	exactActionTarget := firstNonEmpty(productID, updateID)
+	if !pkg.ExactActionTargetAvailable || exactActionTarget == "" {
 		return StoreExactUpdateRequest{}, errors.New("Store update requires an exact verified Product ID or provider target")
 	}
-	provider, err := exactStoreUpdateExecutionProvider(productID, updateID)
+	executionProvider, err := exactStoreUpdateExecutionProvider(productID, updateID)
 	if err != nil {
 		return StoreExactUpdateRequest{}, err
 	}
@@ -300,8 +300,8 @@ func exactStoreUpdateRequestFromPackage(ctx context.Context, pkg Package) (Store
 		Identity:                identity,
 		ProductID:               productID,
 		UpdateID:                updateID,
-		Target:                  target,
-		Provider:                provider,
+		Target:                  exactActionTarget,
+		Provider:                executionProvider,
 		ScanID:                  strings.TrimSpace(pkg.ScanID),
 		ObservedAt:              strings.TrimSpace(pkg.ObservedAt),
 		InstalledVersion:        firstNonEmpty(pkg.InstalledVersion, pkg.Version),
@@ -367,29 +367,33 @@ func verifyPublishedStoreUpdateAssessment(ctx context.Context, request StoreExac
 	return errors.New("no published Store assessment matches the selected package identity")
 }
 
-func storeSnapshotVerifiesUpdate(request StoreExactUpdateRequest, pre, post StoreExactPackageSnapshot) (bool, string) {
-	if !post.Identity.Equal(request.Identity) || !post.Exists || !post.Healthy {
+func storeSnapshotVerifiesUpdate(request StoreExactUpdateRequest, preActionSnapshot, postActionSnapshot StoreExactPackageSnapshot) (bool, string) {
+	if !postActionSnapshot.Identity.Equal(request.Identity) || !postActionSnapshot.Exists || !postActionSnapshot.Healthy {
 		return false, ""
 	}
-	baselineVersion := strings.TrimSpace(request.InstalledVersion)
-	if pre.Exists {
-		baselineVersion = strings.TrimSpace(pre.Version)
-	}
+	baselineVersion := storeUpdateVerificationBaselineVersion(request, preActionSnapshot)
 	if !storeAssessmentVersionKnown(baselineVersion) {
 		return false, ""
 	}
-	versionComparison, ok := compareStorePackageVersions(post.Version, baselineVersion)
+	versionComparison, ok := compareStorePackageVersions(postActionSnapshot.Version, baselineVersion)
 	if !ok || versionComparison <= 0 {
 		return false, ""
 	}
 	if storeAssessmentVersionKnown(request.OfferedVersion) {
-		offeredComparison, ok := compareStorePackageVersions(post.Version, request.OfferedVersion)
+		offeredComparison, ok := compareStorePackageVersions(postActionSnapshot.Version, request.OfferedVersion)
 		if !ok || offeredComparison < 0 {
 			return false, ""
 		}
 		return true, "Store update verified because the installed package version increased to the offered version or newer."
 	}
 	return true, "Store update verified because the installed package version increased."
+}
+
+func storeUpdateVerificationBaselineVersion(request StoreExactUpdateRequest, preActionSnapshot StoreExactPackageSnapshot) string {
+	if preActionSnapshot.Exists {
+		return strings.TrimSpace(preActionSnapshot.Version)
+	}
+	return strings.TrimSpace(request.InstalledVersion)
 }
 
 func validateStorePackageChangeEvent(request StoreExactUpdateRequest, actionStartedAt time.Time, event StorePackageChangeEvent) string {
@@ -405,12 +409,12 @@ func validateStorePackageChangeEvent(request StoreExactUpdateRequest, actionStar
 	if !event.Healthy {
 		return "package is not healthy"
 	}
-	classification := strings.TrimSpace(event.Classification)
-	if classification == storePackageClassFramework || classification == storePackageClassResource {
+	packageClassification := strings.TrimSpace(event.Classification)
+	if packageClassification == storePackageClassFramework || packageClassification == storePackageClassResource {
 		return "framework or resource package event"
 	}
-	identityName := storeIdentityNameFromPFN(request.Identity.PackageFamilyName)
-	if strings.TrimSpace(event.PackageFullName) == "" || identityName == "" || !strings.HasPrefix(strings.TrimSpace(event.PackageFullName), identityName+"_") {
+	expectedPackageName := storePackageNameFromFamilyName(request.Identity.PackageFamilyName)
+	if strings.TrimSpace(event.PackageFullName) == "" || expectedPackageName == "" || !strings.HasPrefix(strings.TrimSpace(event.PackageFullName), expectedPackageName+"_") {
 		return "package full name mismatch"
 	}
 	if _, ok := compareStorePackageVersions(event.Version, event.Version); !ok {
@@ -419,13 +423,13 @@ func validateStorePackageChangeEvent(request StoreExactUpdateRequest, actionStar
 	return ""
 }
 
-func storeIdentityNameFromPFN(pfn string) string {
-	pfn = strings.TrimSpace(pfn)
-	index := strings.LastIndex(pfn, "_")
+func storePackageNameFromFamilyName(packageFamilyName string) string {
+	packageFamilyName = strings.TrimSpace(packageFamilyName)
+	index := strings.LastIndex(packageFamilyName, "_")
 	if index <= 0 {
 		return ""
 	}
-	return pfn[:index]
+	return packageFamilyName[:index]
 }
 
 func storePackageEventKey(event StorePackageChangeEvent) string {
@@ -438,23 +442,23 @@ func storePackageEventKey(event StorePackageChangeEvent) string {
 	}, "\x00"))
 }
 
-func validateStorePreActionSnapshot(request StoreExactUpdateRequest, pre StoreExactPackageSnapshot, preResult CommandResult) error {
-	if !preResult.OK {
+func validateStorePreActionSnapshot(request StoreExactUpdateRequest, preActionSnapshot StoreExactPackageSnapshot, preActionResult CommandResult) error {
+	if !preActionResult.OK {
 		return errors.New("Store update requires a successful fresh package enumeration before execution")
 	}
-	if !pre.Identity.Equal(request.Identity) {
+	if !preActionSnapshot.Identity.Equal(request.Identity) {
 		return errors.New("Store update pre-action package enumeration returned the wrong identity")
 	}
-	if !pre.Exists {
+	if !preActionSnapshot.Exists {
 		return errors.New("Store update requires the exact package family to still be installed")
 	}
-	if !pre.Healthy {
+	if !preActionSnapshot.Healthy {
 		return errors.New("Store update requires the exact package family to be healthy before execution")
 	}
-	if !storeAssessmentVersionKnown(pre.Version) {
+	if !storeAssessmentVersionKnown(preActionSnapshot.Version) {
 		return errors.New("Store update requires a known current installed version before execution")
 	}
-	if !strings.EqualFold(strings.TrimSpace(pre.Version), strings.TrimSpace(request.InstalledVersion)) {
+	if !strings.EqualFold(strings.TrimSpace(preActionSnapshot.Version), strings.TrimSpace(request.InstalledVersion)) {
 		return errors.New("Store update assessment no longer matches the installed package version")
 	}
 	return nil
@@ -498,7 +502,7 @@ func parseStorePackageVersion(value string) ([]int, bool) {
 		return nil, false
 	}
 	segments := strings.Split(value, ".")
-	parts := make([]int, 0, len(segments))
+	versionParts := make([]int, 0, len(segments))
 	for _, segment := range segments {
 		if segment == "" {
 			return nil, false
@@ -512,70 +516,67 @@ func parseStorePackageVersion(value string) ([]int, bool) {
 		if err != nil {
 			return nil, false
 		}
-		parts = append(parts, part)
+		versionParts = append(versionParts, part)
 	}
-	return parts, true
+	return versionParts, true
 }
 
-func storeCatalogVerifiesUpdate(request StoreExactUpdateRequest, pre StoreExactPackageSnapshot, catalog StoreExactCatalogResult, post StoreExactPackageSnapshot) bool {
-	if !catalog.Authoritative || catalog.OfferAvailable || !catalog.InstalledHealthy || !post.Exists || !post.Healthy {
+func storeCatalogVerifiesUpdate(request StoreExactUpdateRequest, preActionSnapshot StoreExactPackageSnapshot, catalogEvidence StoreExactCatalogResult, postActionSnapshot StoreExactPackageSnapshot) bool {
+	if !catalogEvidence.Authoritative || catalogEvidence.OfferAvailable || !catalogEvidence.InstalledHealthy || !postActionSnapshot.Exists || !postActionSnapshot.Healthy {
 		return false
 	}
-	baselineVersion := strings.TrimSpace(request.InstalledVersion)
-	if pre.Exists {
-		baselineVersion = strings.TrimSpace(pre.Version)
-	}
+	baselineVersion := storeUpdateVerificationBaselineVersion(request, preActionSnapshot)
 	if storeAssessmentVersionKnown(baselineVersion) {
-		comparison, ok := compareStorePackageVersions(post.Version, baselineVersion)
+		comparison, ok := compareStorePackageVersions(postActionSnapshot.Version, baselineVersion)
 		if !ok || comparison < 0 {
 			return false
 		}
 	}
 	if storeAssessmentVersionKnown(request.OfferedVersion) {
-		comparison, ok := compareStorePackageVersions(post.Version, request.OfferedVersion)
+		comparison, ok := compareStorePackageVersions(postActionSnapshot.Version, request.OfferedVersion)
 		return ok && comparison >= 0
 	}
 	return true
 }
 
-func appendStoreExecutionDiagnostic(result CommandResult, label string, snapshot StoreExactPackageSnapshot, snapshotResult CommandResult) CommandResult {
-	if snapshotResult.Command != "" {
+func appendStoreExecutionDiagnostic(result CommandResult, phaseLabel string, snapshot StoreExactPackageSnapshot, inventoryResult CommandResult) CommandResult {
+	if inventoryResult.Command != "" {
 		if result.Command == "" {
-			result.Command = label + " inventory: " + snapshotResult.Command
+			result.Command = phaseLabel + " inventory: " + inventoryResult.Command
 		} else {
-			result.Command += "\n" + label + " inventory: " + snapshotResult.Command
+			result.Command += "\n" + phaseLabel + " inventory: " + inventoryResult.Command
 		}
-		result.Stdout = appendDiagnosticLine(result.Stdout, snapshotResult.Stdout)
-		result.Stderr = appendDiagnosticLine(result.Stderr, snapshotResult.Stderr)
+		result.Stdout = appendDiagnosticLine(result.Stdout, inventoryResult.Stdout)
+		result.Stderr = appendDiagnosticLine(result.Stderr, inventoryResult.Stderr)
 	}
 	if snapshot.Exists {
-		result.Stdout = appendDiagnosticLine(result.Stdout, fmt.Sprintf("%s exact Store package: PFN=%s version=%s full_name=%s healthy=%t", label, snapshot.Identity.PackageFamilyName, snapshot.Version, snapshot.PackageFullName, snapshot.Healthy))
+		result.Stdout = appendDiagnosticLine(result.Stdout, fmt.Sprintf("%s exact Store package: PFN=%s version=%s full_name=%s healthy=%t", phaseLabel, snapshot.Identity.PackageFamilyName, snapshot.Version, snapshot.PackageFullName, snapshot.Healthy))
 	} else {
-		result.Stdout = appendDiagnosticLine(result.Stdout, fmt.Sprintf("%s exact Store package not found: PFN=%s", label, snapshot.Identity.PackageFamilyName))
+		result.Stdout = appendDiagnosticLine(result.Stdout, fmt.Sprintf("%s exact Store package not found: PFN=%s", phaseLabel, snapshot.Identity.PackageFamilyName))
 	}
 	if snapshot.Diagnostics != "" {
-		result.Stdout = appendDiagnosticLine(result.Stdout, label+" diagnostics: "+sanitizeProviderDiagnostic(snapshot.Diagnostics))
+		result.Stdout = appendDiagnosticLine(result.Stdout, phaseLabel+" diagnostics: "+sanitizeProviderDiagnostic(snapshot.Diagnostics))
 	}
 	return result
 }
 
-func appendDiagnosticLine(existing, line string) string {
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return existing
+func appendDiagnosticLine(existingText, newLine string) string {
+	newLine = strings.TrimSpace(newLine)
+	if newLine == "" {
+		return existingText
 	}
-	existing = strings.TrimRight(existing, "\r\n")
-	if existing == "" {
-		return line
+	existingText = strings.TrimRight(existingText, "\r\n")
+	if existingText == "" {
+		return newLine
 	}
-	return existing + "\n" + line
+	return existingText + "\n" + newLine
 }
 
 type storeCLIExactUpdateRunner struct{}
 
 func (storeCLIExactUpdateRunner) RunStoreUpdate(ctx context.Context, request StoreExactUpdateRequest) CommandResult {
-	candidates := exactStoreUpdateRequestTargets(request)
-	return runPackageUpdateCandidates(ctx, candidates, "store exact target", func(target string) CommandResult {
+	exactTargets := exactStoreUpdateRequestTargets(request)
+	return runPackageUpdateCandidates(ctx, exactTargets, "store exact target", func(target string) CommandResult {
 		return runStoreUpdateCommandWithApplyFallback(ctx, target)
 	})
 }
@@ -613,34 +614,34 @@ type storeProductIDFirstExactCatalogQueryProvider struct {
 }
 
 func (provider storeProductIDFirstExactCatalogQueryProvider) QueryExact(ctx context.Context, request StoreExactUpdateRequest) (StoreExactCatalogResult, CommandResult) {
-	storeProvider := provider.Store
-	if storeProvider == nil {
-		storeProvider = storeCLIExactCatalogQueryProvider{}
+	storeCLIProvider := provider.Store
+	if storeCLIProvider == nil {
+		storeCLIProvider = storeCLIExactCatalogQueryProvider{}
 	}
 	productID := strings.TrimSpace(request.ProductID)
 	if productID != "" && !looksLikeStoreProductID(productID) {
 		return StoreExactCatalogResult{}, validationCommandResult("Store exact catalog query", errors.New("Store update Product ID is not a valid Microsoft Store Product ID"))
 	}
 	if productID == "" || !packageActionManagerAvailable(managerWinget) {
-		return storeProvider.QueryExact(ctx, request)
+		return storeCLIProvider.QueryExact(ctx, request)
 	}
 	wingetProvider := provider.Winget
 	if wingetProvider == nil {
 		wingetProvider = wingetMSStoreExactCatalogQueryProvider{}
 	}
-	wingetCatalog, wingetResult := wingetProvider.QueryExact(ctx, request)
-	if wingetCatalog.Authoritative || ctx.Err() != nil || !packageActionManagerAvailable(managerStore) {
-		return wingetCatalog, wingetResult
+	wingetEvidence, wingetCommandResult := wingetProvider.QueryExact(ctx, request)
+	if wingetEvidence.Authoritative || ctx.Err() != nil || !packageActionManagerAvailable(managerStore) {
+		return wingetEvidence, wingetCommandResult
 	}
-	storeCatalog, storeResult := storeProvider.QueryExact(ctx, request)
-	merged := mergeCommandAttemptsWithFinalResult(wingetResult, storeResult, "Store CLI exact catalog fallback")
-	if storeCatalog.Authoritative {
-		return storeCatalog, merged
+	storeEvidence, storeCommandResult := storeCLIProvider.QueryExact(ctx, request)
+	mergedResult := mergeCommandAttemptsWithFinalResult(wingetCommandResult, storeCommandResult, "Store CLI exact catalog fallback")
+	if storeEvidence.Authoritative {
+		return storeEvidence, mergedResult
 	}
-	if storeCatalog.Diagnostics != "" {
-		wingetCatalog.Diagnostics = firstNonEmpty(wingetCatalog.Diagnostics, storeCatalog.Diagnostics)
+	if storeEvidence.Diagnostics != "" {
+		wingetEvidence.Diagnostics = firstNonEmpty(wingetEvidence.Diagnostics, storeEvidence.Diagnostics)
 	}
-	return wingetCatalog, merged
+	return wingetEvidence, mergedResult
 }
 
 type storePackagedSnapshotProvider struct {
@@ -653,26 +654,26 @@ func (provider storePackagedSnapshotProvider) Snapshot(ctx context.Context, iden
 		inventoryProvider = storePackagedAppInventoryProvider()
 	}
 	scan := newStorePackagedAppScan(identity.UserSID)
-	inventory, result := inventoryProvider.Inventory(ctx, scan)
-	snapshot := StoreExactPackageSnapshot{Identity: identity, ObservedAt: time.Now().UTC()}
-	if !result.OK {
-		snapshot.Diagnostics = firstNonEmpty(result.Stderr, result.Stdout)
-		return snapshot, result
+	inventory, inventoryResult := inventoryProvider.Inventory(ctx, scan)
+	packageSnapshot := StoreExactPackageSnapshot{Identity: identity, ObservedAt: time.Now().UTC()}
+	if !inventoryResult.OK {
+		packageSnapshot.Diagnostics = firstNonEmpty(inventoryResult.Stderr, inventoryResult.Stdout)
+		return packageSnapshot, inventoryResult
 	}
-	for _, family := range inventory.Families {
-		if !family.Identity.Equal(identity) {
+	for _, appFamily := range inventory.Families {
+		if !appFamily.Identity.Equal(identity) {
 			continue
 		}
-		snapshot.Exists = true
-		snapshot.PackageFullName = family.Primary.PackageFullName
-		snapshot.Version = family.Primary.Version.String()
-		snapshot.Healthy = family.Primary.Status.OK
-		if !snapshot.Healthy {
-			snapshot.Diagnostics = family.Primary.Status.Raw
+		packageSnapshot.Exists = true
+		packageSnapshot.PackageFullName = appFamily.Primary.PackageFullName
+		packageSnapshot.Version = appFamily.Primary.Version.String()
+		packageSnapshot.Healthy = appFamily.Primary.Status.OK
+		if !packageSnapshot.Healthy {
+			packageSnapshot.Diagnostics = appFamily.Primary.Status.Raw
 		}
-		return snapshot, result
+		return packageSnapshot, inventoryResult
 	}
-	return snapshot, result
+	return packageSnapshot, inventoryResult
 }
 
 type unsupportedStoreExactCatalogProvider struct{}

@@ -27,32 +27,32 @@ type StoreAutomationDecision struct {
 	BlockingError       error
 }
 
-func setAutoUpdate(global *bool, packageKeys []string, packageEnabled *bool) (State, CommandResult) {
+func setAutoUpdate(globalEnabled *bool, packageKeys []string, packageAutoUpdateEnabled *bool) (State, CommandResult) {
 	appLog("Auto-update settings update started.")
 	store, err := defaultStateStore()
 	if err != nil {
 		return defaultState(), validationCommandResult("auto-update settings", err)
 	}
-	return setAutoUpdateWithStore(context.Background(), store, global, packageKeys, packageEnabled)
+	return setAutoUpdateWithStore(context.Background(), store, globalEnabled, packageKeys, packageAutoUpdateEnabled)
 }
 
-func setAutoUpdateWithStore(ctx context.Context, store StateStore, global *bool, packageKeys []string, packageEnabled *bool) (State, CommandResult) {
+func setAutoUpdateWithStore(ctx context.Context, store StateStore, globalEnabled *bool, packageKeys []string, packageAutoUpdateEnabled *bool) (State, CommandResult) {
 	state, err := store.Update(ctx, func(state *State) error {
 		if state.AutoUpdatePackages == nil {
 			state.AutoUpdatePackages = map[string]bool{}
 		}
-		if global != nil {
-			state.AutoUpdateGlobal = *global
+		if globalEnabled != nil {
+			state.AutoUpdateGlobal = *globalEnabled
 		}
-		if packageEnabled != nil {
-			for _, key := range packageKeys {
-				if _, _, err := splitPackageKey(key); err == nil {
-					normalized := normalizeAutoUpdatePackageKey(key)
-					if normalized == "" {
-						appLog("Auto-update package key ignored because it is not an exact canonical target: %s.", key)
+		if packageAutoUpdateEnabled != nil {
+			for _, rawPackageKey := range packageKeys {
+				if _, _, err := splitPackageKey(rawPackageKey); err == nil {
+					normalizedKey := normalizeAutoUpdatePackageKey(rawPackageKey)
+					if normalizedKey == "" {
+						appLog("Auto-update package key ignored because it is not an exact canonical target: %s.", rawPackageKey)
 						continue
 					}
-					state.AutoUpdatePackages[normalized] = *packageEnabled
+					state.AutoUpdatePackages[normalizedKey] = *packageAutoUpdateEnabled
 				}
 			}
 		}
@@ -96,7 +96,7 @@ func runAutoUpdate() []UpdateResult {
 }
 
 func runAutoUpdateWithStore(ctx context.Context, store StateStore) []UpdateResult {
-	taskStartedAt := storeScanNow()
+	scheduledRunStartedAt := storeScanNow()
 	state, err := store.Load(ctx)
 	if err != nil {
 		appLog("Scheduled auto-update could not load state: %s.", err)
@@ -106,13 +106,13 @@ func runAutoUpdateWithStore(ctx context.Context, store StateStore) []UpdateResul
 		appLog("Scheduled auto-update skipped because global auto-update is disabled.")
 		return nil
 	}
-	var selected []string
-	for key, enabled := range state.AutoUpdatePackages {
+	var optedInPackageKeys []string
+	for packageKey, enabled := range state.AutoUpdatePackages {
 		if enabled {
-			selected = append(selected, key)
+			optedInPackageKeys = append(optedInPackageKeys, packageKey)
 		}
 	}
-	if len(selected) == 0 {
+	if len(optedInPackageKeys) == 0 {
 		appLog("Scheduled auto-update skipped because no packages are opted in.")
 		if _, err := store.Update(ctx, func(state *State) error {
 			state.LastAutoUpdateAt = utcNow()
@@ -137,84 +137,85 @@ func runAutoUpdateWithStore(ctx context.Context, store StateStore) []UpdateResul
 	// Store scan inline to discover currently-available Store updates before
 	// deciding what to update (matching the pre-progressive-loading behavior).
 	storeScanCtx, cancelStoreScan := context.WithTimeout(ctx, scheduledStoreScanDeadline)
-	storeProjection := applyStoreTransactionalScanPipelineResult(storeScanCtx, state, inventory, taskStartedAt)
+	storeScanProjection := applyStoreTransactionalScanPipelineResult(storeScanCtx, state, inventory, scheduledRunStartedAt)
 	storeScanErr := storeScanCtx.Err()
 	cancelStoreScan()
-	inventory = storeProjection.Inventory
-	summary := scheduledAutoUpdateSummaryFromProjection(storeProjection)
-	if storeScanErr != nil && storeProjection.Error == nil {
-		storeProjection.Error = storeScanErr
-		summary.StoreScan.Error = sanitizeProviderDiagnostic(storeScanErr.Error())
+	inventory = storeScanProjection.Inventory
+	runSummary := scheduledAutoUpdateSummaryFromProjection(storeScanProjection)
+	if storeScanErr != nil && storeScanProjection.Error == nil {
+		storeScanProjection.Error = storeScanErr
+		runSummary.StoreScan.Error = sanitizeProviderDiagnostic(storeScanErr.Error())
 	}
-	storeDecision := storeAutomationDecision(storeProjection)
-	selectedSet := map[string]bool{}
-	selectedStoreKeys := map[string]string{}
-	for _, key := range selected {
-		normalized := normalizeAutoUpdatePackageKey(key)
-		if normalized != "" {
-			selectedSet[normalized] = true
-			if manager, _, err := splitPackageKey(normalized); err == nil && manager == managerStore {
-				selectedStoreKeys[normalized] = key
+	storeScanDecision := evaluateStoreAutomationDecision(storeScanProjection)
+	optedInPackageKeySet := map[string]bool{}
+	optedInStorePreferenceKeys := map[string]string{}
+	for _, storedPackageKey := range optedInPackageKeys {
+		normalizedKey := normalizeAutoUpdatePackageKey(storedPackageKey)
+		if normalizedKey != "" {
+			optedInPackageKeySet[normalizedKey] = true
+			if manager, _, err := splitPackageKey(normalizedKey); err == nil && manager == managerStore {
+				optedInStorePreferenceKeys[normalizedKey] = storedPackageKey
 			}
 		}
 	}
 	var results []UpdateResult
-	stopReason := ""
-	seen := map[string]bool{}
-	seenSelected := map[string]bool{}
+	runStopReason := ""
+	processedInventoryKeys := map[string]bool{}
+	matchedPreferenceKeys := map[string]bool{}
 	for _, pkg := range inventory.Packages {
-		key := normalizedJobPackageKey(pkg)
-		if key == "" || seen[key] || !selectedSet[normalizeAutoUpdatePackageKey(key)] {
+		inventoryKey := normalizedJobPackageKey(pkg)
+		normalizedInventoryKey := normalizeAutoUpdatePackageKey(inventoryKey)
+		if inventoryKey == "" || processedInventoryKeys[inventoryKey] || !optedInPackageKeySet[normalizedInventoryKey] {
 			continue
 		}
-		seen[key] = true
-		seenSelected[normalizeAutoUpdatePackageKey(key)] = true
-		if pkg.Manager == managerStore && !storeDecision.AutomationUsable {
-			reason := scheduledStoreAutoUpdateSkipReason(storeProjection, storeDecision)
-			appLog("Scheduled auto-update skipped %s because %s.", key, reason)
-			summary.addSkippedPackage(pkg, key, reason)
+		processedInventoryKeys[inventoryKey] = true
+		matchedPreferenceKeys[normalizedInventoryKey] = true
+		if pkg.Manager == managerStore && !storeScanDecision.AutomationUsable {
+			reason := scheduledStoreAutoUpdateSkipReason(storeScanProjection, storeScanDecision)
+			appLog("Scheduled auto-update skipped %s because %s.", inventoryKey, reason)
+			runSummary.addSkippedPackage(pkg, inventoryKey, reason)
 			continue
 		}
 		if !packageAllowedInBulkUpdate(pkg, UpdateOptions{}) {
-			appLog("Scheduled auto-update skipped %s because it requires explicit user confirmation or does not support updates.", key)
+			appLog("Scheduled auto-update skipped %s because it requires explicit user confirmation or does not support updates.", inventoryKey)
 			if pkg.Manager == managerStore {
-				summary.addSkippedPackage(pkg, key, "Store package is not currently actionable; it needs a fresh available assessment, exact target, and supported executor")
+				runSummary.addSkippedPackage(pkg, inventoryKey, "Store package is not currently actionable; it needs a fresh available assessment, exact target, and supported executor")
 			}
 			continue
 		}
-		pkg.Key = key
+		pkg.Key = inventoryKey
 		actionCtx, cancelAction := context.WithTimeout(ctx, scheduledPackageActionDeadline)
-		result := updatePackageWithMetadataContext(actionCtx, pkg)
+		actionResult := updatePackageWithMetadataContext(actionCtx, pkg)
 		actionErr := actionCtx.Err()
 		cancelAction()
-		results = append(results, UpdateResult{Key: key, Result: result})
-		if actionErr != nil || result.Code == commandCancelledCode || result.Code == 124 {
-			stopReason = firstNonEmpty(actionErrString(actionErr), packageActionStopReason(result), "package action stopped")
+		results = append(results, UpdateResult{Key: inventoryKey, Result: actionResult})
+		if actionErr != nil || actionResult.Code == commandCancelledCode || actionResult.Code == 124 {
+			runStopReason = firstNonEmpty(errorMessage(actionErr), packageActionStopReason(actionResult), "package action stopped")
 			break
 		}
 	}
-	for normalized, original := range selectedStoreKeys {
-		if seenSelected[normalized] {
+	for normalizedPreferenceKey, storedPreferenceKey := range optedInStorePreferenceKeys {
+		if matchedPreferenceKeys[normalizedPreferenceKey] {
 			continue
 		}
-		summary.SkippedPackages = append(summary.SkippedPackages, ScheduledAutoUpdateSkippedPackage{
-			Key:     original,
+		runSummary.SkippedPackages = append(runSummary.SkippedPackages, ScheduledAutoUpdateSkippedPackage{
+			Key:     storedPreferenceKey,
 			Manager: managerStore,
 			Reason:  "No installed Store package matched this auto-update preference in the effective inventory",
 		})
 	}
-	if stopReason != "" {
-		return persistScheduledAutoUpdateCancellation(ctx, store, results, &summary, stopReason)
+	if runStopReason != "" {
+		return persistScheduledAutoUpdateCancellation(ctx, store, results, &runSummary, runStopReason)
 	}
 	if err := ctx.Err(); err != nil {
-		return persistScheduledAutoUpdateCancellation(ctx, store, results, &summary, err.Error())
+		return persistScheduledAutoUpdateCancellation(ctx, store, results, &runSummary, err.Error())
 	}
 	persistCtx, cancelPersist := context.WithTimeout(ctx, scheduledPersistenceDeadline)
 	defer cancelPersist()
 	if _, err := store.Update(persistCtx, func(state *State) error {
 		state.LastAutoUpdateAt = utcNow()
 		state.LastAutoUpdateResults = summarizeUpdateResults(results, state.LastAutoUpdateAt)
-		state.LastAutoUpdateSummary = &summary
+		state.LastAutoUpdateSummary = &runSummary
 		return nil
 	}); err != nil {
 		appLog("Could not save scheduled auto-update results: %s.", err)
@@ -224,18 +225,18 @@ func runAutoUpdateWithStore(ctx context.Context, store StateStore) []UpdateResul
 }
 
 func configuredScheduledAutoUpdateDeadline() time.Duration {
-	raw := strings.TrimSpace(os.Getenv(scheduledAutoUpdateDeadlineEnv))
-	if raw == "" {
+	rawMinutes := strings.TrimSpace(os.Getenv(scheduledAutoUpdateDeadlineEnv))
+	if rawMinutes == "" {
 		return defaultScheduledAutoUpdateDeadline
 	}
-	minutes, err := strconv.Atoi(raw)
-	if err != nil || minutes <= 0 {
+	deadlineMinutes, err := strconv.Atoi(rawMinutes)
+	if err != nil || deadlineMinutes <= 0 {
 		return defaultScheduledAutoUpdateDeadline
 	}
-	return time.Duration(minutes) * time.Minute
+	return time.Duration(deadlineMinutes) * time.Minute
 }
 
-func storeAutomationDecision(projection StoreInventoryProjectionResult) StoreAutomationDecision {
+func evaluateStoreAutomationDecision(projection StoreInventoryProjectionResult) StoreAutomationDecision {
 	decision := StoreAutomationDecision{
 		CommitSucceeded: projection.Published && projection.ScanID != "",
 	}
@@ -262,44 +263,44 @@ func scheduledStoreAutoUpdateSkipReason(projection StoreInventoryProjectionResul
 	return scheduledStoreAutoUpdateFreshnessSkipReason(projection)
 }
 
-func persistScheduledAutoUpdateCancellation(ctx context.Context, store StateStore, results []UpdateResult, summary *ScheduledAutoUpdateSummary, reason string) []UpdateResult {
-	if summary == nil {
-		empty := ScheduledAutoUpdateSummary{}
-		summary = &empty
+func persistScheduledAutoUpdateCancellation(ctx context.Context, store StateStore, partialResults []UpdateResult, runSummary *ScheduledAutoUpdateSummary, stopReason string) []UpdateResult {
+	if runSummary == nil {
+		emptySummary := ScheduledAutoUpdateSummary{}
+		runSummary = &emptySummary
 	}
-	summary.SkippedPackages = append(summary.SkippedPackages, ScheduledAutoUpdateSkippedPackage{
+	runSummary.SkippedPackages = append(runSummary.SkippedPackages, ScheduledAutoUpdateSkippedPackage{
 		Key:    "*",
-		Reason: "Scheduled auto-update cancelled: " + sanitizeProviderDiagnostic(firstNonEmpty(reason, ctxErrString(ctx), context.Canceled.Error())),
+		Reason: "Scheduled auto-update cancelled: " + sanitizeProviderDiagnostic(firstNonEmpty(stopReason, contextErrorMessage(ctx), context.Canceled.Error())),
 	})
 	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledPersistenceDeadline)
 	defer cancel()
 	if _, err := store.Update(persistCtx, func(state *State) error {
 		state.LastAutoUpdateAt = utcNow()
-		state.LastAutoUpdateResults = summarizeUpdateResults(results, state.LastAutoUpdateAt)
-		state.LastAutoUpdateSummary = summary
+		state.LastAutoUpdateResults = summarizeUpdateResults(partialResults, state.LastAutoUpdateAt)
+		state.LastAutoUpdateSummary = runSummary
 		return nil
 	}); err != nil {
 		appLog("Could not save scheduled auto-update cancellation result: %s.", err)
 	}
-	return results
+	return partialResults
 }
 
-func ctxErrString(ctx context.Context) string {
+func contextErrorMessage(ctx context.Context) string {
 	if ctx == nil || ctx.Err() == nil {
 		return ""
 	}
 	return ctx.Err().Error()
 }
 
-func actionErrString(err error) string {
+func errorMessage(err error) string {
 	if err == nil {
 		return ""
 	}
 	return err.Error()
 }
 
-func packageActionStopReason(result CommandResult) string {
-	switch result.Code {
+func packageActionStopReason(commandResult CommandResult) string {
+	switch commandResult.Code {
 	case commandCancelledCode:
 		return "package action cancelled"
 	case 124:
@@ -310,7 +311,7 @@ func packageActionStopReason(result CommandResult) string {
 }
 
 func scheduledAutoUpdateSummaryFromProjection(projection StoreInventoryProjectionResult) ScheduledAutoUpdateSummary {
-	summary := ScheduledAutoUpdateSummary{
+	runSummary := ScheduledAutoUpdateSummary{
 		StoreScan: ScheduledAutoUpdateStoreScanSummary{
 			ScanID:           projection.ScanID,
 			UsedGenerationID: projection.UsedGenerationID,
@@ -322,9 +323,9 @@ func scheduledAutoUpdateSummaryFromProjection(projection StoreInventoryProjectio
 		},
 	}
 	if projection.Error != nil {
-		summary.StoreScan.Error = sanitizeProviderDiagnostic(projection.Error.Error())
+		runSummary.StoreScan.Error = sanitizeProviderDiagnostic(projection.Error.Error())
 	}
-	return summary
+	return runSummary
 }
 
 func scheduledStoreAutoUpdateFreshnessSkipReason(projection StoreInventoryProjectionResult) string {

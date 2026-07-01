@@ -8,16 +8,16 @@ import (
 	"time"
 )
 
-func formBool(r *http.Request, name string) (bool, bool) {
-	if !r.Form.Has(name) {
+func formBool(request *http.Request, fieldName string) (bool, bool) {
+	if !request.Form.Has(fieldName) {
 		return false, false
 	}
-	value := strings.ToLower(strings.TrimSpace(r.Form.Get(name)))
-	return value == "true" || value == "1" || value == "on" || value == "yes", true
+	normalizedValue := strings.ToLower(strings.TrimSpace(request.Form.Get(fieldName)))
+	return normalizedValue == "true" || normalizedValue == "1" || normalizedValue == "on" || normalizedValue == "yes", true
 }
 
-func validatePackageKey(key string) error {
-	manager, id, err := splitPackageKey(key)
+func validatePackageKey(packageKey string) error {
+	manager, id, err := splitPackageKey(packageKey)
 	if err != nil {
 		return err
 	}
@@ -30,28 +30,22 @@ func (app *App) serveAPI(w http.ResponseWriter, r *http.Request) {
 		if !requireMethod(w, r, http.MethodGet) {
 			return
 		}
-		data, err := buildStoreDiagnosticsExport(r.Context(), loadState())
+		diagnosticsJSON, err := buildStoreDiagnosticsExport(r.Context(), loadState())
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Content-Disposition", `attachment; filename="`+storeDiagnosticsExportFilename(time.Now())+`"`)
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(data)
+		writeAttachmentResponse(w, "application/json", storeDiagnosticsExportFilename(time.Now()), diagnosticsJSON)
 	case "/api/logs/export":
 		if !requireMethod(w, r, http.MethodGet) {
 			return
 		}
-		data, err := buildLogArchiveFromSnapshot(sessionLogs.ExportSnapshot())
+		logArchive, err := buildLogArchiveFromSnapshot(sessionLogs.ExportSnapshot())
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		w.Header().Set("Content-Type", "application/zip")
-		w.Header().Set("Content-Disposition", `attachment; filename="`+logExportFilename(time.Now())+`"`)
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(data)
+		writeAttachmentResponse(w, "application/zip", logExportFilename(time.Now()), logArchive)
 	case "/api/status":
 		if !requireMethod(w, r, http.MethodGet) {
 			return
@@ -103,12 +97,12 @@ func (app *App) serveAPI(w http.ResponseWriter, r *http.Request) {
 		if !requireMethod(w, r, http.MethodGet) {
 			return
 		}
-		lookup, err := searchPackages(r.URL.Query().Get("q"))
+		searchResults, err := searchPackages(r.URL.Query().Get("q"))
 		if err != nil {
 			writeAPIError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, lookup)
+		writeJSON(w, http.StatusOK, searchResults)
 	case "/api/install":
 		app.handleInstallAPI(w, r)
 	case "/api/managers/install":
@@ -136,27 +130,34 @@ func (app *App) serveAPI(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func writeAttachmentResponse(w http.ResponseWriter, contentType, filename string, body []byte) {
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+}
+
 func parseLogSince(w http.ResponseWriter, r *http.Request) (int64, bool) {
-	var since int64
-	if raw := r.URL.Query().Get("since"); raw != "" {
-		parsed, err := strconv.ParseInt(raw, 10, 64)
+	var sinceID int64
+	if sinceParam := r.URL.Query().Get("since"); sinceParam != "" {
+		parsedSinceID, err := strconv.ParseInt(sinceParam, 10, 64)
 		if err != nil {
 			writeAPIError(w, http.StatusBadRequest, "since must be an integer")
 			return 0, false
 		}
-		since = parsed
+		sinceID = parsedSinceID
 	}
-	return since, true
+	return sinceID, true
 }
 
-func logsAPIResponseFromQuery(query LogQueryResult) logsAPIResponse {
+func logsAPIResponseFromQuery(result LogQueryResult) logsAPIResponse {
 	return logsAPIResponse{
-		Entries:      query.Entries,
-		OldestID:     query.OldestID,
-		LatestID:     query.LatestID,
-		DroppedCount: query.DroppedCount,
-		DroppedBytes: query.DroppedBytes,
-		GapDetected:  query.GapDetected,
+		Entries:      result.Entries,
+		OldestID:     result.OldestID,
+		LatestID:     result.LatestID,
+		DroppedCount: result.DroppedCount,
+		DroppedBytes: result.DroppedBytes,
+		GapDetected:  result.GapDetected,
 	}
 }
 
@@ -219,16 +220,16 @@ func (app *App) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (app *App) render(w http.ResponseWriter, r *http.Request, data PageData) {
-	state := loadState()
-	data.Admin = isAdmin()
-	data.StateDir, _ = stateDir()
-	data.Theme = state.Theme
-	data.IconVersion = appIconVersion()
-	data.AssetVersion = frontendAssetVersion()
+func (app *App) render(w http.ResponseWriter, r *http.Request, pageData PageData) {
+	savedState := loadState()
+	pageData.Admin = isAdmin()
+	pageData.StateDir, _ = stateDir()
+	pageData.Theme = savedState.Theme
+	pageData.IconVersion = appIconVersion()
+	pageData.AssetVersion = frontendAssetVersion()
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := pageTemplate.Execute(w, data); err != nil {
+	if err := pageTemplate.Execute(w, pageData); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
@@ -237,9 +238,9 @@ func (app *App) serveFrontendAsset(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodGet) {
 		return
 	}
-	version := frontendAssetVersion()
+	assetVersion := frontendAssetVersion()
 	w.Header().Set("Cache-Control", "no-cache, max-age=0, must-revalidate")
-	w.Header().Set("ETag", `"`+version+`"`)
+	w.Header().Set("ETag", `"`+assetVersion+`"`)
 	switch r.URL.Path {
 	case "/assets/ui.css":
 		w.Header().Set("Content-Type", "text/css; charset=utf-8")

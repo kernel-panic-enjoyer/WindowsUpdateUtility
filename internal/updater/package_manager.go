@@ -108,27 +108,23 @@ type UpdateResultSummary struct {
 }
 
 func (summary *UpdateResultSummary) UnmarshalJSON(data []byte) error {
-	var probe struct {
+	var legacyResultProbe struct {
 		Result *CommandResult `json:"result"`
 	}
-	if err := json.Unmarshal(data, &probe); err == nil && probe.Result != nil {
-		var legacy UpdateResult
-		if err := json.Unmarshal(data, &legacy); err != nil {
+	if err := json.Unmarshal(data, &legacyResultProbe); err == nil && legacyResultProbe.Result != nil {
+		var legacyUpdate UpdateResult
+		if err := json.Unmarshal(data, &legacyUpdate); err != nil {
 			return err
 		}
-		*summary = summarizeUpdateResult(legacy, "")
+		*summary = summarizeUpdateResult(legacyUpdate, "")
 		return nil
 	}
 	type alias UpdateResultSummary
-	var direct alias
-	if err := json.Unmarshal(data, &direct); err != nil {
+	var directSummary alias
+	if err := json.Unmarshal(data, &directSummary); err != nil {
 		return err
 	}
-	if direct.Key != "" || direct.Manager != "" || direct.PackageID != "" || direct.Message != "" || direct.Code != 0 || direct.Success || direct.RestartRequired {
-		*summary = UpdateResultSummary(direct)
-		return nil
-	}
-	*summary = UpdateResultSummary(direct)
+	*summary = UpdateResultSummary(directSummary)
 	return nil
 }
 
@@ -163,8 +159,8 @@ const managerValidationMessage = "manager must be winget, store, or choco"
 const storeActionUnavailableMessage = "native Store CLI is unavailable and winget msstore fallback is unavailable"
 
 func isManagedPackageManager(manager string) bool {
-	for _, supported := range managedPackageManagers {
-		if manager == supported {
+	for _, supportedManager := range managedPackageManagers {
+		if manager == supportedManager {
 			return true
 		}
 	}
@@ -183,32 +179,32 @@ func wingetSourceManager(source string) string {
 }
 
 func managerSortRank(manager string) int {
-	for index, supported := range managedPackageManagers {
-		if manager == supported {
-			return index
+	for rank, supportedManager := range managedPackageManagers {
+		if manager == supportedManager {
+			return rank
 		}
 	}
 	return len(managedPackageManagers)
 }
 
 func versionGreater(candidate, current string) bool {
-	candidateParts := versionParts(candidate)
-	currentParts := versionParts(current)
-	if len(candidateParts) == 0 || len(currentParts) == 0 {
+	candidateVersionParts := versionParts(candidate)
+	currentVersionParts := versionParts(current)
+	if len(candidateVersionParts) == 0 || len(currentVersionParts) == 0 {
 		return false
 	}
-	maxParts := len(candidateParts)
-	if len(currentParts) > maxParts {
-		maxParts = len(currentParts)
+	partCount := len(candidateVersionParts)
+	if len(currentVersionParts) > partCount {
+		partCount = len(currentVersionParts)
 	}
-	for i := 0; i < maxParts; i++ {
+	for partIndex := 0; partIndex < partCount; partIndex++ {
 		candidatePart := 0
 		currentPart := 0
-		if i < len(candidateParts) {
-			candidatePart = candidateParts[i]
+		if partIndex < len(candidateVersionParts) {
+			candidatePart = candidateVersionParts[partIndex]
 		}
-		if i < len(currentParts) {
-			currentPart = currentParts[i]
+		if partIndex < len(currentVersionParts) {
+			currentPart = currentVersionParts[partIndex]
 		}
 		if candidatePart > currentPart {
 			return true
@@ -220,46 +216,46 @@ func versionGreater(candidate, current string) bool {
 	return false
 }
 
-func versionParts(value string) []int {
-	parts := []int{}
-	var current strings.Builder
-	flush := func() bool {
-		if current.Len() == 0 {
+func versionParts(version string) []int {
+	numericParts := []int{}
+	var digitRun strings.Builder
+	appendDigitRun := func() bool {
+		if digitRun.Len() == 0 {
 			return true
 		}
-		part, err := strconv.Atoi(current.String())
-		current.Reset()
+		part, err := strconv.Atoi(digitRun.String())
+		digitRun.Reset()
 		if err != nil {
 			return false
 		}
-		parts = append(parts, part)
+		numericParts = append(numericParts, part)
 		return true
 	}
-	for _, r := range strings.TrimSpace(value) {
-		if r >= '0' && r <= '9' {
-			current.WriteRune(r)
+	for _, versionRune := range strings.TrimSpace(version) {
+		if versionRune >= '0' && versionRune <= '9' {
+			digitRun.WriteRune(versionRune)
 			continue
 		}
-		if !flush() {
+		if !appendDigitRun() {
 			return nil
 		}
 	}
-	if !flush() {
+	if !appendDigitRun() {
 		return nil
 	}
-	return parts
+	return numericParts
 }
 
-func normalizePackageIdentity(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	value = strings.TrimSuffix(value, "_8wekyb3d8bbwe")
-	var normalized strings.Builder
-	for _, r := range value {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-			normalized.WriteRune(r)
+func normalizePackageIdentity(identity string) string {
+	normalizedInput := strings.ToLower(strings.TrimSpace(identity))
+	normalizedInput = strings.TrimSuffix(normalizedInput, "_8wekyb3d8bbwe")
+	var normalizedIdentity strings.Builder
+	for _, identityRune := range normalizedInput {
+		if (identityRune >= 'a' && identityRune <= 'z') || (identityRune >= '0' && identityRune <= '9') {
+			normalizedIdentity.WriteRune(identityRune)
 		}
 	}
-	return normalized.String()
+	return normalizedIdentity.String()
 }
 
 func packageKey(manager, id string) string {
@@ -268,18 +264,18 @@ func packageKey(manager, id string) string {
 
 func packageAutoUpdateEnabled(state State, pkg Package) bool {
 	if pkg.Manager == managerStore {
-		key := storePackageAutoUpdateKey(pkg)
-		return key != "" && state.AutoUpdatePackages[key]
+		storeAutoUpdateKey := storePackageAutoUpdateKey(pkg)
+		return storeAutoUpdateKey != "" && state.AutoUpdatePackages[storeAutoUpdateKey]
 	}
 	if state.AutoUpdatePackages[pkg.Key] {
 		return true
 	}
-	normalizedKey := normalizeAutoUpdatePackageKey(pkg.Key)
-	if state.AutoUpdatePackages[normalizedKey] {
+	normalizedPackageKey := normalizeAutoUpdatePackageKey(pkg.Key)
+	if state.AutoUpdatePackages[normalizedPackageKey] {
 		return true
 	}
-	for key, enabled := range state.AutoUpdatePackages {
-		if enabled && equivalentPackageKeys(pkg.Key, key) {
+	for configuredKey, enabled := range state.AutoUpdatePackages {
+		if enabled && equivalentPackageKeys(pkg.Key, configuredKey) {
 			return true
 		}
 	}
@@ -287,23 +283,23 @@ func packageAutoUpdateEnabled(state State, pkg Package) bool {
 }
 
 func equivalentPackageKeys(left, right string) bool {
-	leftManager, leftID, leftErr := splitPackageKey(left)
-	rightManager, rightID, rightErr := splitPackageKey(right)
+	leftManager, leftPackageID, leftErr := splitPackageKey(left)
+	rightManager, rightPackageID, rightErr := splitPackageKey(right)
 	if leftErr != nil || rightErr != nil || leftManager != rightManager {
 		return false
 	}
 	if leftManager == managerStore {
-		leftNormalized := normalizeAutoUpdatePackageKey(left)
-		rightNormalized := normalizeAutoUpdatePackageKey(right)
-		return leftNormalized != "" && strings.EqualFold(leftNormalized, rightNormalized)
+		leftAutoUpdateKey := normalizeAutoUpdatePackageKey(left)
+		rightAutoUpdateKey := normalizeAutoUpdatePackageKey(right)
+		return leftAutoUpdateKey != "" && strings.EqualFold(leftAutoUpdateKey, rightAutoUpdateKey)
 	}
-	return leftID == rightID
+	return leftPackageID == rightPackageID
 }
 
 func splitPackageKey(key string) (string, string, error) {
-	parts := strings.SplitN(key, ":", 2)
-	if len(parts) != 2 || parts[1] == "" || !isManagedPackageManager(parts[0]) {
+	keyParts := strings.SplitN(key, ":", 2)
+	if len(keyParts) != 2 || keyParts[1] == "" || !isManagedPackageManager(keyParts[0]) {
 		return "", "", errors.New("package key must be manager:id")
 	}
-	return parts[0], parts[1], nil
+	return keyParts[0], keyParts[1], nil
 }

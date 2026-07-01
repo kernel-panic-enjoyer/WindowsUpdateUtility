@@ -1,6 +1,7 @@
 package updater
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -94,143 +95,144 @@ func (checker GitHubReleaseChecker) Check(ctx context.Context, currentVersion st
 	if checker.Client == nil {
 		checker.Client = http.DefaultClient
 	}
-	url := strings.TrimSpace(checker.LatestReleaseURL)
-	if url == "" {
-		url = defaultGitHubReleaseChecker().LatestReleaseURL
+	status := AppUpdateStatus{CurrentVersion: currentVersion}
+	latestReleaseURL := strings.TrimSpace(checker.LatestReleaseURL)
+	if latestReleaseURL == "" {
+		latestReleaseURL = defaultGitHubReleaseChecker().LatestReleaseURL
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, latestReleaseURL, nil)
 	if err != nil {
-		return AppUpdateStatus{CurrentVersion: currentVersion}, err
+		return status, err
 	}
 	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("User-Agent", "WindowsUpdaterWebUI/"+currentAppVersion())
 	response, err := checker.Client.Do(request)
 	if err != nil {
-		return AppUpdateStatus{CurrentVersion: currentVersion}, err
+		return status, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusNotFound {
-		return AppUpdateStatus{CurrentVersion: currentVersion}, nil
+		return status, nil
 	}
 	if response.StatusCode < 200 || response.StatusCode > 299 {
-		return AppUpdateStatus{CurrentVersion: currentVersion}, fmt.Errorf("GitHub release check failed with HTTP %d", response.StatusCode)
+		return status, fmt.Errorf("GitHub release check failed with HTTP %d", response.StatusCode)
 	}
-	data, err := readBounded(response.Body, maxGitHubReleaseResponseBytes, "release response")
+	releaseJSON, err := readBounded(response.Body, maxGitHubReleaseResponseBytes, "release response")
 	if err != nil {
-		return AppUpdateStatus{CurrentVersion: currentVersion}, err
+		return status, err
 	}
-	return parseGitHubRelease(data, currentVersion)
+	return parseGitHubRelease(releaseJSON, currentVersion)
 }
 
-func parseGitHubRelease(data []byte, currentVersion string) (AppUpdateStatus, error) {
-	status := AppUpdateStatus{CurrentVersion: currentVersion}
-	var release githubReleaseResponse
-	decoder := json.NewDecoder(strings.NewReader(string(data)))
-	if err := decoder.Decode(&release); err != nil {
-		return status, err
+func parseGitHubRelease(releaseJSON []byte, currentVersion string) (AppUpdateStatus, error) {
+	updateStatus := AppUpdateStatus{CurrentVersion: currentVersion}
+	var latestRelease githubReleaseResponse
+	decoder := json.NewDecoder(bytes.NewReader(releaseJSON))
+	if err := decoder.Decode(&latestRelease); err != nil {
+		return updateStatus, err
 	}
 	var trailing json.RawMessage
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		if err == nil {
 			err = errors.New("release response contains trailing JSON data")
 		}
-		return status, err
+		return updateStatus, err
 	}
-	status.LatestTag = strings.TrimSpace(release.TagName)
-	status.ReleaseURL = strings.TrimSpace(release.HTMLURL)
-	latestVersion, ok := normalizeAppVersion(status.LatestTag)
+	updateStatus.LatestTag = strings.TrimSpace(latestRelease.TagName)
+	updateStatus.ReleaseURL = strings.TrimSpace(latestRelease.HTMLURL)
+	latestVersion, ok := normalizeAppVersion(updateStatus.LatestTag)
 	if !ok {
-		if status.LatestTag == "" {
-			return status, errors.New("release tag is missing")
+		if updateStatus.LatestTag == "" {
+			return updateStatus, errors.New("release tag is missing")
 		}
-		return status, fmt.Errorf("release tag %q is not a supported semantic version", status.LatestTag)
+		return updateStatus, fmt.Errorf("release tag %q is not a supported semantic version", updateStatus.LatestTag)
 	}
-	status.LatestVersion = latestVersion
-	if release.Draft || release.Prerelease || compareAppVersions(latestVersion, currentVersion) <= 0 {
-		return status, nil
+	updateStatus.LatestVersion = latestVersion
+	if latestRelease.Draft || latestRelease.Prerelease || compareAppVersions(latestVersion, currentVersion) <= 0 {
+		return updateStatus, nil
 	}
-	assets := map[string]githubReleaseAsset{}
-	for _, asset := range release.Assets {
-		assets[asset.Name] = asset
+	assetsByName := make(map[string]githubReleaseAsset, len(latestRelease.Assets))
+	for _, asset := range latestRelease.Assets {
+		assetsByName[asset.Name] = asset
 	}
-	exe := assets[releaseAssetExecutable]
-	metadata := assets[releaseAssetMetadata]
-	checksum := assets[releaseAssetSHA256]
-	if exe.BrowserDownloadURL == "" || metadata.BrowserDownloadURL == "" || checksum.BrowserDownloadURL == "" {
-		return status, errors.New("newer release is missing required release assets")
+	executableAsset := assetsByName[releaseAssetExecutable]
+	metadataAsset := assetsByName[releaseAssetMetadata]
+	checksumAsset := assetsByName[releaseAssetSHA256]
+	if executableAsset.BrowserDownloadURL == "" || metadataAsset.BrowserDownloadURL == "" || checksumAsset.BrowserDownloadURL == "" {
+		return updateStatus, errors.New("newer release is missing required release assets")
 	}
-	if exe.Size > maxSelfUpdateExecutableBytes {
-		return status, fmt.Errorf("release executable exceeds %d bytes", maxSelfUpdateExecutableBytes)
+	if executableAsset.Size > maxSelfUpdateExecutableBytes {
+		return updateStatus, fmt.Errorf("release executable exceeds %d bytes", maxSelfUpdateExecutableBytes)
 	}
-	status.Available = true
-	status.ExecutableURL = exe.BrowserDownloadURL
-	status.MetadataURL = metadata.BrowserDownloadURL
-	status.SHA256URL = checksum.BrowserDownloadURL
-	status.ExecutableSize = exe.Size
-	return status, nil
+	updateStatus.Available = true
+	updateStatus.ExecutableURL = executableAsset.BrowserDownloadURL
+	updateStatus.MetadataURL = metadataAsset.BrowserDownloadURL
+	updateStatus.SHA256URL = checksumAsset.BrowserDownloadURL
+	updateStatus.ExecutableSize = executableAsset.Size
+	return updateStatus, nil
 }
 
-func downloadSelfUpdateArtifact(ctx context.Context, client *http.Client, status AppUpdateStatus, dir string) (selfUpdateArtifact, error) {
+func downloadSelfUpdateArtifact(ctx context.Context, client *http.Client, updateStatus AppUpdateStatus, downloadDir string) (selfUpdateArtifact, error) {
 	if client == nil {
 		client = http.DefaultClient
 	}
-	if !status.Available {
+	if !updateStatus.Available {
 		return selfUpdateArtifact{}, errors.New("no application update is available")
 	}
-	if status.ExecutableURL == "" || status.SHA256URL == "" {
+	if updateStatus.ExecutableURL == "" || updateStatus.SHA256URL == "" {
 		return selfUpdateArtifact{}, errors.New("application update release assets are incomplete")
 	}
-	if status.ExecutableSize > maxSelfUpdateExecutableBytes {
+	if updateStatus.ExecutableSize > maxSelfUpdateExecutableBytes {
 		return selfUpdateArtifact{}, fmt.Errorf("release executable exceeds %d bytes", maxSelfUpdateExecutableBytes)
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(downloadDir, 0o755); err != nil {
 		return selfUpdateArtifact{}, err
 	}
-	expected, err := downloadExpectedSHA256(ctx, client, status.SHA256URL)
+	expectedSHA256, err := downloadExpectedSHA256(ctx, client, updateStatus.SHA256URL)
 	if err != nil {
 		return selfUpdateArtifact{}, err
 	}
-	temp, err := os.CreateTemp(dir, "WindowsUpdaterWebUI-update-*.exe")
+	tempFile, err := os.CreateTemp(downloadDir, "WindowsUpdaterWebUI-update-*.exe")
 	if err != nil {
 		return selfUpdateArtifact{}, err
 	}
-	path := temp.Name()
-	cleanup := true
+	artifactPath := tempFile.Name()
+	removePartialDownload := true
 	defer func() {
-		if cleanup {
-			_ = os.Remove(path)
+		if removePartialDownload {
+			_ = os.Remove(artifactPath)
 		}
 	}()
-	actual, err := downloadFileAndHash(ctx, client, status.ExecutableURL, temp, sha256.New())
-	closeErr := temp.Close()
+	actualSHA256, err := downloadFileAndHash(ctx, client, updateStatus.ExecutableURL, tempFile, sha256.New())
+	closeErr := tempFile.Close()
 	if err != nil {
 		return selfUpdateArtifact{}, err
 	}
 	if closeErr != nil {
 		return selfUpdateArtifact{}, closeErr
 	}
-	if !strings.EqualFold(actual, expected) {
-		return selfUpdateArtifact{}, fmt.Errorf("self-update checksum mismatch: got %s want %s", actual, expected)
+	if !strings.EqualFold(actualSHA256, expectedSHA256) {
+		return selfUpdateArtifact{}, fmt.Errorf("self-update checksum mismatch: got %s want %s", actualSHA256, expectedSHA256)
 	}
-	_ = os.Chmod(path, 0o755)
-	cleanup = false
-	return selfUpdateArtifact{Path: path, SHA256: strings.ToLower(actual), Version: status.LatestVersion}, nil
+	_ = os.Chmod(artifactPath, 0o755)
+	removePartialDownload = false
+	return selfUpdateArtifact{Path: artifactPath, SHA256: strings.ToLower(actualSHA256), Version: updateStatus.LatestVersion}, nil
 }
 
-func downloadExpectedSHA256(ctx context.Context, client *http.Client, url string) (string, error) {
-	data, err := httpGetBounded(ctx, client, url, maxSelfUpdateChecksumBytes, "checksum")
+func downloadExpectedSHA256(ctx context.Context, client *http.Client, checksumURL string) (string, error) {
+	checksumData, err := httpGetBounded(ctx, client, checksumURL, maxSelfUpdateChecksumBytes, "checksum")
 	if err != nil {
 		return "", err
 	}
-	match := sha256LinePattern.FindString(string(data))
-	if match == "" {
+	digest := sha256LinePattern.FindString(string(checksumData))
+	if digest == "" {
 		return "", errors.New("release checksum asset does not contain a SHA-256 digest")
 	}
-	return strings.ToLower(match), nil
+	return strings.ToLower(digest), nil
 }
 
-func downloadFileAndHash(ctx context.Context, client *http.Client, url string, writer io.Writer, hash hash.Hash) (string, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func downloadFileAndHash(ctx context.Context, client *http.Client, downloadURL string, destination io.Writer, digest hash.Hash) (string, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
 	if err != nil {
 		return "", err
 	}
@@ -243,20 +245,20 @@ func downloadFileAndHash(ctx context.Context, client *http.Client, url string, w
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		return "", fmt.Errorf("download failed with HTTP %d", response.StatusCode)
 	}
-	limited := &io.LimitedReader{R: response.Body, N: maxSelfUpdateExecutableBytes + 1}
-	multi := io.MultiWriter(writer, hash)
-	written, err := io.Copy(multi, limited)
+	limitedBody := &io.LimitedReader{R: response.Body, N: maxSelfUpdateExecutableBytes + 1}
+	hashingWriter := io.MultiWriter(destination, digest)
+	bytesWritten, err := io.Copy(hashingWriter, limitedBody)
 	if err != nil {
 		return "", err
 	}
-	if written > maxSelfUpdateExecutableBytes || limited.N == 0 {
+	if bytesWritten > maxSelfUpdateExecutableBytes || limitedBody.N == 0 {
 		return "", fmt.Errorf("downloaded executable exceeds %d bytes", maxSelfUpdateExecutableBytes)
 	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
+	return hex.EncodeToString(digest.Sum(nil)), nil
 }
 
-func httpGetBounded(ctx context.Context, client *http.Client, url string, limit int64, label string) ([]byte, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func httpGetBounded(ctx context.Context, client *http.Client, downloadURL string, maxBytes int64, resourceLabel string) ([]byte, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -267,27 +269,27 @@ func httpGetBounded(ctx context.Context, client *http.Client, url string, limit 
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode > 299 {
-		return nil, fmt.Errorf("%s download failed with HTTP %d", label, response.StatusCode)
+		return nil, fmt.Errorf("%s download failed with HTTP %d", resourceLabel, response.StatusCode)
 	}
-	return readBounded(response.Body, limit, label)
+	return readBounded(response.Body, maxBytes, resourceLabel)
 }
 
-func readBounded(reader io.Reader, limit int64, label string) ([]byte, error) {
-	limited := io.LimitReader(reader, limit+1)
-	data, err := io.ReadAll(limited)
+func readBounded(source io.Reader, maxBytes int64, resourceLabel string) ([]byte, error) {
+	limitedReader := io.LimitReader(source, maxBytes+1)
+	data, err := io.ReadAll(limitedReader)
 	if err != nil {
 		return nil, err
 	}
-	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("%s exceeds %d bytes", label, limit)
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("%s exceeds %d bytes", resourceLabel, maxBytes)
 	}
 	return data, nil
 }
 
 func selfUpdateDownloadDir() (string, error) {
-	dir, err := appTempDir()
+	tempRoot, err := appTempDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "self-update"), nil
+	return filepath.Join(tempRoot, "self-update"), nil
 }

@@ -5,75 +5,75 @@ import (
 	"unicode"
 )
 
-func packageTableColumnStarts(header string) []int {
-	var starts []int
-	inField := false
-	for index, r := range []rune(strings.TrimRight(header, "\r\n")) {
-		if unicode.IsSpace(r) {
-			inField = false
+func packageTableColumnStarts(headerLine string) []int {
+	var columnStarts []int
+	insideColumn := false
+	headerRunes := []rune(strings.TrimRight(headerLine, "\r\n"))
+	for runeIndex, char := range headerRunes {
+		if unicode.IsSpace(char) {
+			insideColumn = false
 			continue
 		}
-		if !inField {
-			starts = append(starts, index)
-			inField = true
+		if !insideColumn {
+			columnStarts = append(columnStarts, runeIndex)
+			insideColumn = true
 		}
 	}
-	return starts
+	return columnStarts
 }
 
-func splitPackageTableColumnsAtStarts(line string, starts []int) []string {
-	line = strings.TrimRight(line, "\r\n")
-	if strings.TrimSpace(line) == "" || len(starts) < 2 {
+func splitPackageTableColumnsAtStarts(rowLine string, columnStarts []int) []string {
+	rowLine = strings.TrimRight(rowLine, "\r\n")
+	if strings.TrimSpace(rowLine) == "" || len(columnStarts) < 2 {
 		return nil
 	}
-	runes := []rune(line)
-	var cols []string
-	for i, start := range starts {
-		if start >= len(runes) {
+	lineRunes := []rune(rowLine)
+	var columns []string
+	for columnIndex, startIndex := range columnStarts {
+		if startIndex >= len(lineRunes) {
 			continue
 		}
-		end := len(runes)
-		if i+1 < len(starts) && starts[i+1] < end {
-			end = starts[i+1]
+		endIndex := len(lineRunes)
+		if columnIndex+1 < len(columnStarts) && columnStarts[columnIndex+1] < endIndex {
+			endIndex = columnStarts[columnIndex+1]
 		}
-		value := strings.TrimSpace(string(runes[start:end]))
+		value := strings.TrimSpace(string(lineRunes[startIndex:endIndex]))
 		if value != "" {
-			cols = append(cols, value)
+			columns = append(columns, value)
 		}
 	}
-	return cols
+	return columns
 }
 
-func splitPackageTableColumns(line string) []string {
-	line = strings.TrimSpace(line)
-	if line == "" {
+func splitPackageTableColumns(rowLine string) []string {
+	rowLine = strings.TrimSpace(rowLine)
+	if rowLine == "" {
 		return nil
 	}
-	var cols []string
-	var field strings.Builder
-	pendingSpace := 0
-	flush := func() {
-		value := strings.TrimSpace(field.String())
-		if value != "" {
-			cols = append(cols, value)
+	var columns []string
+	var currentColumn strings.Builder
+	pendingSpaceCount := 0
+	flushCurrentColumn := func() {
+		if currentColumn.Len() > 0 {
+			columns = append(columns, currentColumn.String())
 		}
-		field.Reset()
+		currentColumn.Reset()
 	}
-	for _, r := range line {
-		if unicode.IsSpace(r) {
-			pendingSpace++
+	for _, char := range rowLine {
+		if unicode.IsSpace(char) {
+			pendingSpaceCount++
 			continue
 		}
-		if pendingSpace > 0 {
-			if pendingSpace >= 2 {
-				flush()
-			} else if field.Len() > 0 {
-				field.WriteRune(' ')
+		if pendingSpaceCount > 0 {
+			if pendingSpaceCount >= 2 {
+				flushCurrentColumn()
+			} else if currentColumn.Len() > 0 {
+				currentColumn.WriteRune(' ')
 			}
-			pendingSpace = 0
+			pendingSpaceCount = 0
 		}
-		field.WriteRune(r)
+		currentColumn.WriteRune(char)
 	}
-	flush()
-	return cols
+	flushCurrentColumn()
+	return columns
 }

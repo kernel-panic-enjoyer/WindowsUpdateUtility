@@ -32,9 +32,9 @@ type LogBuffer struct {
 	maxEntries int
 	maxBytes   int
 
-	global     logRing
-	categories map[string]*logRing
-	jobs       map[string]*logRing
+	globalRing    logEntryRing
+	categoryRings map[string]*logEntryRing
+	jobRings      map[string]*logEntryRing
 }
 
 type LogQueryResult struct {
@@ -64,10 +64,10 @@ type logMetadata struct {
 
 type logMetadataContextKey struct{}
 
-type logRing struct {
+type logEntryRing struct {
 	entries      []LogEntry
-	head         int
-	length       int
+	oldestIndex  int
+	entryCount   int
 	totalBytes   int
 	maxEntries   int
 	maxBytes     int
@@ -173,39 +173,24 @@ func logCategoriesForCommandLine(command string) []string {
 }
 
 func commandArgsFromLine(command string) []string {
-	fields := strings.Fields(command)
-	if len(fields) == 0 {
+	commandFields := strings.Fields(command)
+	if len(commandFields) == 0 {
 		return nil
 	}
-	if name := strings.TrimSuffix(packageManagerNameFromArg(fields[0]), ".exe"); name == managerWinget || name == managerStore || name == managerChoco {
-		return fields
+	firstCommandName := strings.TrimSuffix(packageManagerNameFromArg(commandFields[0]), ".exe")
+	if firstCommandName == managerWinget || firstCommandName == managerStore || firstCommandName == managerChoco {
+		return commandFields
 	}
-	if strings.EqualFold(packageManagerNameFromArg(fields[0]), "cmd.exe") {
-		return fields
+	if strings.EqualFold(packageManagerNameFromArg(commandFields[0]), "cmd.exe") {
+		return commandFields
 	}
-	for index, field := range fields {
-		name := strings.TrimSuffix(packageManagerNameFromArg(field), ".exe")
-		if name == managerWinget || name == managerStore || name == managerChoco {
-			return fields[index:]
+	for commandIndex, field := range commandFields {
+		managerName := strings.TrimSuffix(packageManagerNameFromArg(field), ".exe")
+		if managerName == managerWinget || managerName == managerStore || managerName == managerChoco {
+			return commandFields[commandIndex:]
 		}
 	}
-	return fields
-}
-
-func packageManagerVerbFromCommandLine(command string) (string, string) {
-	fields := strings.Fields(command)
-	for index, field := range fields {
-		manager := strings.TrimSuffix(packageManagerNameFromArg(field), ".exe")
-		switch manager {
-		case managerWinget, managerStore, managerChoco:
-			verb := ""
-			if index+1 < len(fields) {
-				verb = strings.ToLower(strings.Trim(fields[index+1], `"'`))
-			}
-			return manager, verb
-		}
-	}
-	return "", ""
+	return commandFields
 }
 
 func logCategoriesForManagerVerb(manager, verb string) []string {
@@ -244,9 +229,9 @@ func isStoreDetectionCommand(args []string) bool {
 	return false
 }
 
-func commandHasArg(args []string, flag string) bool {
+func commandHasArg(args []string, expectedArg string) bool {
 	for _, arg := range args {
-		if strings.EqualFold(strings.TrimSpace(arg), flag) {
+		if strings.EqualFold(strings.TrimSpace(arg), expectedArg) {
 			return true
 		}
 	}
@@ -254,28 +239,28 @@ func commandHasArg(args []string, flag string) bool {
 }
 
 func normalizeLogCategories(categories []string) []string {
-	seen := map[string]bool{}
-	normalized := []string{}
+	seenCategories := map[string]bool{}
+	normalizedCategories := []string{}
 	add := func(category string) {
 		category = strings.TrimSpace(strings.ToLower(category))
-		if category == "" || seen[category] {
+		if category == "" || seenCategories[category] {
 			return
 		}
-		seen[category] = true
-		normalized = append(normalized, category)
+		seenCategories[category] = true
+		normalizedCategories = append(normalizedCategories, category)
 	}
 
 	add(logCategoryAll)
 	for _, category := range categories {
 		add(category)
 	}
-	if len(normalized) == 1 {
+	if len(normalizedCategories) == 1 {
 		add(logCategoryApplication)
 	}
-	return normalized
+	return normalizedCategories
 }
 
-func categoriesWithMetadata(categories []string, metadata logMetadata) []string {
+func logCategoriesWithMetadata(categories []string, metadata logMetadata) []string {
 	if metadata.Activity != "" {
 		categories = append(categories, metadata.Activity)
 	}
@@ -315,7 +300,7 @@ func (buffer *LogBuffer) AppendContext(ctx context.Context, stream, message stri
 		Timestamp:  utcNow(),
 		Stream:     stream,
 		Message:    strings.TrimRight(message, "\r\n"),
-		Categories: categoriesWithMetadata(categories, metadata),
+		Categories: logCategoriesWithMetadata(categories, metadata),
 		JobID:      metadata.JobID,
 		JobType:    metadata.JobType,
 		PackageKey: metadata.PackageKey,
@@ -325,7 +310,7 @@ func (buffer *LogBuffer) AppendContext(ctx context.Context, stream, message stri
 		ScanID:     metadata.ScanID,
 	}
 	entry = clampLogEntry(entry, maxLogEntryBytes)
-	buffer.global.append(entry)
+	buffer.globalRing.append(entry)
 	for _, category := range entry.Categories {
 		if category == logCategoryAll {
 			continue
@@ -341,32 +326,32 @@ func (buffer *LogBuffer) AppendContext(ctx context.Context, stream, message stri
 
 func (buffer *LogBuffer) ensureLocked() {
 	maxEntries, maxBytes := buffer.limits()
-	if buffer.global.maxEntries == 0 {
-		buffer.global.maxEntries = maxEntries
-		buffer.global.maxBytes = maxBytes
+	if buffer.globalRing.maxEntries == 0 {
+		buffer.globalRing.maxEntries = maxEntries
+		buffer.globalRing.maxBytes = maxBytes
 	}
-	if buffer.categories == nil {
-		buffer.categories = map[string]*logRing{}
+	if buffer.categoryRings == nil {
+		buffer.categoryRings = map[string]*logEntryRing{}
 	}
-	if buffer.jobs == nil {
-		buffer.jobs = map[string]*logRing{}
+	if buffer.jobRings == nil {
+		buffer.jobRings = map[string]*logEntryRing{}
 	}
 }
 
-func (buffer *LogBuffer) categoryRingLocked(category string) *logRing {
-	ring := buffer.categories[category]
+func (buffer *LogBuffer) categoryRingLocked(category string) *logEntryRing {
+	ring := buffer.categoryRings[category]
 	if ring == nil {
-		ring = &logRing{maxEntries: defaultCategoryLogMaxEntries, maxBytes: defaultCategoryLogMaxBytes}
-		buffer.categories[category] = ring
+		ring = &logEntryRing{maxEntries: defaultCategoryLogMaxEntries, maxBytes: defaultCategoryLogMaxBytes}
+		buffer.categoryRings[category] = ring
 	}
 	return ring
 }
 
-func (buffer *LogBuffer) jobRingLocked(jobID string) *logRing {
-	ring := buffer.jobs[jobID]
+func (buffer *LogBuffer) jobRingLocked(jobID string) *logEntryRing {
+	ring := buffer.jobRings[jobID]
 	if ring == nil {
-		ring = &logRing{maxEntries: defaultJobLogMaxEntries, maxBytes: defaultJobLogMaxBytes}
-		buffer.jobs[jobID] = ring
+		ring = &logEntryRing{maxEntries: defaultJobLogMaxEntries, maxBytes: defaultJobLogMaxBytes}
+		buffer.jobRings[jobID] = ring
 	}
 	return ring
 }
@@ -384,38 +369,39 @@ func (buffer *LogBuffer) limits() (int, int) {
 }
 
 func logEntrySize(entry LogEntry) int {
-	size := len(entry.Timestamp) + len(entry.Stream) + len(entry.Message) + 32
+	entryBytes := len(entry.Timestamp) + len(entry.Stream) + len(entry.Message) + 32
 	for _, category := range entry.Categories {
-		size += len(category) + 1
+		entryBytes += len(category) + 1
 	}
-	size += len(entry.JobID) + len(entry.JobType) + len(entry.PackageKey) + len(entry.Manager) + len(entry.Activity) + len(entry.CommandID) + len(entry.ScanID)
-	return size
+	entryBytes += len(entry.JobID) + len(entry.JobType) + len(entry.PackageKey) + len(entry.Manager) + len(entry.Activity) + len(entry.CommandID) + len(entry.ScanID)
+	return entryBytes
 }
 
 func clampLogEntry(entry LogEntry, maxBytes int) LogEntry {
-	if maxBytes <= 0 || logEntrySize(entry) <= maxBytes {
+	entryBytes := logEntrySize(entry)
+	if maxBytes <= 0 || entryBytes <= maxBytes {
 		return entry
 	}
-	overhead := logEntrySize(entry) - len(entry.Message)
-	limit := maxBytes - overhead - 64
-	if limit < 0 {
-		limit = 0
+	nonMessageBytes := entryBytes - len(entry.Message)
+	messageLimit := maxBytes - nonMessageBytes - 64
+	if messageLimit < 0 {
+		messageLimit = 0
 	}
-	if len(entry.Message) > limit {
-		entry.Message = validUTF8TailString([]byte(entry.Message[:limit])) + fmt.Sprintf(" [log entry truncated: omitted %d bytes]", len(entry.Message)-limit)
+	if len(entry.Message) > messageLimit {
+		entry.Message = validUTF8TailString([]byte(entry.Message[:messageLimit])) + fmt.Sprintf(" [log entry truncated: omitted %d bytes]", len(entry.Message)-messageLimit)
 	}
 	return entry
 }
 
 func (buffer *LogBuffer) trimLocked() {
 	buffer.ensureLocked()
-	buffer.global.trim()
+	buffer.globalRing.trim()
 	buffer.syncCompatLocked()
 }
 
 func (buffer *LogBuffer) syncCompatLocked() {
-	buffer.entries = buffer.global.entriesSlice()
-	buffer.totalBytes = buffer.global.totalBytes
+	buffer.entries = buffer.globalRing.entriesInOrder()
+	buffer.totalBytes = buffer.globalRing.totalBytes
 }
 
 func (buffer *LogBuffer) Since(since int64) []LogEntry {
@@ -426,7 +412,7 @@ func (buffer *LogBuffer) Query(since int64) LogQueryResult {
 	buffer.mu.Lock()
 	defer buffer.mu.Unlock()
 	buffer.ensureLocked()
-	return buffer.global.query(since, buffer.nextID)
+	return buffer.globalRing.query(since, buffer.nextID)
 }
 
 func (buffer *LogBuffer) CategoryQuery(category string, since int64) LogQueryResult {
@@ -435,9 +421,9 @@ func (buffer *LogBuffer) CategoryQuery(category string, since int64) LogQueryRes
 	buffer.ensureLocked()
 	category = strings.ToLower(strings.TrimSpace(category))
 	if category == "" || category == logCategoryAll {
-		return buffer.global.query(since, buffer.nextID)
+		return buffer.globalRing.query(since, buffer.nextID)
 	}
-	ring := buffer.categories[category]
+	ring := buffer.categoryRings[category]
 	if ring == nil {
 		return LogQueryResult{LatestID: buffer.nextID}
 	}
@@ -448,7 +434,7 @@ func (buffer *LogBuffer) JobQuery(jobID string, since int64) LogQueryResult {
 	buffer.mu.Lock()
 	defer buffer.mu.Unlock()
 	buffer.ensureLocked()
-	ring := buffer.jobs[jobID]
+	ring := buffer.jobRings[jobID]
 	if ring == nil {
 		return LogQueryResult{LatestID: buffer.nextID}
 	}
@@ -465,7 +451,7 @@ func (buffer *LogBuffer) Snapshot() []LogEntry {
 	buffer.mu.Lock()
 	defer buffer.mu.Unlock()
 	buffer.ensureLocked()
-	return buffer.global.entriesSlice()
+	return buffer.globalRing.entriesInOrder()
 }
 
 func (buffer *LogBuffer) ExportSnapshot() LogStoreSnapshot {
@@ -473,14 +459,14 @@ func (buffer *LogBuffer) ExportSnapshot() LogStoreSnapshot {
 	defer buffer.mu.Unlock()
 	buffer.ensureLocked()
 	snapshot := LogStoreSnapshot{
-		Global:     buffer.global.query(0, buffer.nextID),
+		Global:     buffer.globalRing.query(0, buffer.nextID),
 		Categories: map[string]LogQueryResult{},
 		Jobs:       map[string]LogQueryResult{},
 	}
 	for _, spec := range logCategorySpecs {
 		snapshot.Categories[spec.Category] = buffer.CategoryQueryLocked(spec.Category)
 	}
-	for jobID, ring := range buffer.jobs {
+	for jobID, ring := range buffer.jobRings {
 		snapshot.Jobs[jobID] = ring.query(0, buffer.nextID)
 	}
 	return snapshot
@@ -488,16 +474,16 @@ func (buffer *LogBuffer) ExportSnapshot() LogStoreSnapshot {
 
 func (buffer *LogBuffer) CategoryQueryLocked(category string) LogQueryResult {
 	if category == logCategoryAll {
-		return buffer.global.query(0, buffer.nextID)
+		return buffer.globalRing.query(0, buffer.nextID)
 	}
-	ring := buffer.categories[category]
+	ring := buffer.categoryRings[category]
 	if ring == nil {
 		return LogQueryResult{LatestID: buffer.nextID}
 	}
 	return ring.query(0, buffer.nextID)
 }
 
-func (ring *logRing) limits() (int, int) {
+func (ring *logEntryRing) limits() (int, int) {
 	maxEntries := ring.maxEntries
 	if maxEntries <= 0 {
 		maxEntries = defaultLogMaxEntries
@@ -509,92 +495,93 @@ func (ring *logRing) limits() (int, int) {
 	return maxEntries, maxBytes
 }
 
-func (ring *logRing) append(entry LogEntry) {
+func (ring *logEntryRing) append(entry LogEntry) {
 	maxEntries, maxBytes := ring.limits()
 	if maxEntries <= 0 {
 		return
 	}
-	entry = clampLogEntry(entry, minInt(maxLogEntryBytes, maxBytes))
-	entrySize := logEntrySize(entry)
-	for ring.length > 0 && (ring.length >= maxEntries || ring.totalBytes+entrySize > maxBytes) {
+	entry = clampLogEntry(entry, min(maxLogEntryBytes, maxBytes))
+	entryBytes := logEntrySize(entry)
+	for ring.entryCount > 0 && (ring.entryCount >= maxEntries || ring.totalBytes+entryBytes > maxBytes) {
 		ring.dropOldest()
 	}
-	if entrySize > maxBytes {
+	if entryBytes > maxBytes {
 		ring.droppedCount++
-		ring.droppedBytes += int64(entrySize)
+		ring.droppedBytes += int64(entryBytes)
 		return
 	}
-	if ring.length < len(ring.entries) {
-		index := (ring.head + ring.length) % len(ring.entries)
-		ring.entries[index] = entry
-		ring.length++
-		ring.totalBytes += entrySize
+	if ring.entryCount < len(ring.entries) {
+		writeIndex := (ring.oldestIndex + ring.entryCount) % len(ring.entries)
+		ring.entries[writeIndex] = entry
+		ring.entryCount++
+		ring.totalBytes += entryBytes
 		return
 	}
 	if len(ring.entries) < maxEntries {
 		ring.entries = append(ring.entries, entry)
-		ring.length++
-		ring.totalBytes += entrySize
+		ring.entryCount++
+		ring.totalBytes += entryBytes
 		return
 	}
-	index := (ring.head + ring.length) % len(ring.entries)
-	ring.entries[index] = entry
-	ring.totalBytes += entrySize
-	ring.length++
+	writeIndex := (ring.oldestIndex + ring.entryCount) % len(ring.entries)
+	ring.entries[writeIndex] = entry
+	ring.totalBytes += entryBytes
+	ring.entryCount++
 }
 
-func (ring *logRing) trim() {
+func (ring *logEntryRing) trim() {
 	maxEntries, maxBytes := ring.limits()
-	for ring.length > 0 && (ring.length > maxEntries || ring.totalBytes > maxBytes) {
+	for ring.entryCount > 0 && (ring.entryCount > maxEntries || ring.totalBytes > maxBytes) {
 		ring.dropOldest()
 	}
 }
 
-func (ring *logRing) dropOldest() {
-	if ring.length == 0 || len(ring.entries) == 0 {
+func (ring *logEntryRing) dropOldest() {
+	if ring.entryCount == 0 || len(ring.entries) == 0 {
 		return
 	}
-	entry := ring.entries[ring.head]
-	size := logEntrySize(entry)
-	ring.entries[ring.head] = LogEntry{}
-	ring.head = (ring.head + 1) % len(ring.entries)
-	ring.length--
-	ring.totalBytes -= size
+	oldestEntry := ring.entries[ring.oldestIndex]
+	oldestEntryBytes := logEntrySize(oldestEntry)
+	ring.entries[ring.oldestIndex] = LogEntry{}
+	ring.oldestIndex = (ring.oldestIndex + 1) % len(ring.entries)
+	ring.entryCount--
+	ring.totalBytes -= oldestEntryBytes
 	ring.droppedCount++
-	ring.droppedBytes += int64(size)
+	ring.droppedBytes += int64(oldestEntryBytes)
 	if ring.totalBytes < 0 {
 		ring.totalBytes = 0
 	}
-	if ring.length == 0 {
-		ring.head = 0
+	if ring.entryCount == 0 {
+		ring.oldestIndex = 0
 	}
 }
 
-func (ring *logRing) entriesSlice() []LogEntry {
-	entries := make([]LogEntry, 0, ring.length)
-	if ring.length == 0 || len(ring.entries) == 0 {
-		return entries
+func (ring *logEntryRing) entriesInOrder() []LogEntry {
+	orderedEntries := make([]LogEntry, 0, ring.entryCount)
+	if ring.entryCount == 0 || len(ring.entries) == 0 {
+		return orderedEntries
 	}
-	for i := 0; i < ring.length; i++ {
-		entries = append(entries, ring.entries[(ring.head+i)%len(ring.entries)])
+	for offset := 0; offset < ring.entryCount; offset++ {
+		orderedEntries = append(orderedEntries, ring.entries[(ring.oldestIndex+offset)%len(ring.entries)])
 	}
-	return entries
+	return orderedEntries
 }
 
-func (ring *logRing) query(since int64, latestID int64) LogQueryResult {
-	all := ring.entriesSlice()
+func (ring *logEntryRing) query(since int64, latestID int64) LogQueryResult {
+	orderedEntries := ring.entriesInOrder()
 	oldestID := int64(0)
-	if len(all) > 0 {
-		oldestID = all[0].ID
+	if len(orderedEntries) > 0 {
+		oldestID = orderedEntries[0].ID
 	}
-	start := 0
+	firstNewIndex := 0
 	if since > 0 {
-		for start < len(all) && all[start].ID <= since {
-			start++
+		for firstNewIndex < len(orderedEntries) && orderedEntries[firstNewIndex].ID <= since {
+			firstNewIndex++
 		}
 	}
-	entries := make([]LogEntry, len(all[start:]))
-	copy(entries, all[start:])
+	matchingEntries := orderedEntries[firstNewIndex:]
+	entries := make([]LogEntry, len(matchingEntries))
+	copy(entries, matchingEntries)
 	return LogQueryResult{
 		Entries:      entries,
 		OldestID:     oldestID,
@@ -634,69 +621,62 @@ func isTransientLogFrame(line string) bool {
 	}
 }
 
-func appendLogChunkCategorized(stream, pending, chunk string, categories []string) string {
-	return appendLogChunkContext(context.Background(), stream, pending, chunk, categories, true)
+func appendLogChunkCategorized(stream, pendingLine, chunk string, categories []string) string {
+	return appendLogChunkContext(context.Background(), stream, pendingLine, chunk, categories, true)
 }
 
-func appendLogChunkContext(ctx context.Context, stream, pending, chunk string, categories []string, emit bool) string {
-	text := pending + chunk
-	holdCR := strings.HasSuffix(text, "\r")
-	if holdCR {
-		text = strings.TrimSuffix(text, "\r")
+func appendLogChunkContext(ctx context.Context, stream, pendingLine, chunk string, categories []string, emitSessionLog bool) string {
+	bufferedText := pendingLine + chunk
+	endsWithCarriageReturn := strings.HasSuffix(bufferedText, "\r")
+	if endsWithCarriageReturn {
+		bufferedText = strings.TrimSuffix(bufferedText, "\r")
 	}
-	text = strings.ReplaceAll(text, "\r\n", "\n")
+	bufferedText = strings.ReplaceAll(bufferedText, "\r\n", "\n")
 
-	var line strings.Builder
-	for _, char := range text {
-		switch char {
+	var currentLine strings.Builder
+	for _, r := range bufferedText {
+		switch r {
 		case '\n':
-			if emit {
-				appendLogLineContext(ctx, stream, line.String(), categories)
+			if emitSessionLog {
+				appendLogLineContext(ctx, stream, currentLine.String(), categories)
 			}
-			line.Reset()
+			currentLine.Reset()
 		case '\r':
-			line.Reset()
+			currentLine.Reset()
 		default:
-			line.WriteRune(char)
+			currentLine.WriteRune(r)
 		}
 	}
-	if holdCR {
-		return line.String() + "\r"
+	if endsWithCarriageReturn {
+		return currentLine.String() + "\r"
 	}
-	return line.String()
+	return currentLine.String()
 }
 
 func streamCommandOutputCategorized(reader io.Reader, stream string, output io.Writer, wg *sync.WaitGroup, categories []string) {
 	streamCommandOutputContext(context.Background(), reader, stream, output, wg, categories, true)
 }
 
-func streamCommandOutputContext(ctx context.Context, reader io.Reader, stream string, output io.Writer, wg *sync.WaitGroup, categories []string, emit bool) {
+func streamCommandOutputContext(ctx context.Context, reader io.Reader, stream string, output io.Writer, wg *sync.WaitGroup, categories []string, emitSessionLog bool) {
 	defer wg.Done()
 
-	pending := ""
-	buffer := make([]byte, 4096)
+	pendingLine := ""
+	readBuffer := make([]byte, 4096)
 	for {
-		n, err := reader.Read(buffer)
-		if n > 0 {
-			chunk := decodeCommandOutputBytes(buffer[:n])
-			_, _ = output.Write([]byte(chunk))
-			pending = appendLogChunkContext(ctx, stream, pending, chunk, categories, emit)
+		bytesRead, readErr := reader.Read(readBuffer)
+		if bytesRead > 0 {
+			decodedChunk := decodeCommandOutputBytes(readBuffer[:bytesRead])
+			_, _ = output.Write([]byte(decodedChunk))
+			pendingLine = appendLogChunkContext(ctx, stream, pendingLine, decodedChunk, categories, emitSessionLog)
 		}
-		if err != nil {
-			if err != io.EOF {
-				appLogContext(ctx, "Error reading %s stream: %s", stream, err)
+		if readErr != nil {
+			if readErr != io.EOF {
+				appLogContext(ctx, "Error reading %s stream: %s", stream, readErr)
 			}
 			break
 		}
 	}
-	if pending != "" && emit {
-		appendLogLineContext(ctx, stream, strings.TrimSuffix(pending, "\r"), categories)
+	if pendingLine != "" && emitSessionLog {
+		appendLogLineContext(ctx, stream, strings.TrimSuffix(pendingLine, "\r"), categories)
 	}
-}
-
-func minInt(left, right int) int {
-	if left < right {
-		return left
-	}
-	return right
 }

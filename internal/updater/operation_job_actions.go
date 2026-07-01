@@ -8,30 +8,29 @@ import (
 	"time"
 )
 
-func commandJobNotice(action string, result CommandResult) string {
+func commandResultJobNotice(actionName string, result CommandResult) string {
 	if result.OK {
-		return action + " completed."
+		return actionName + " completed."
 	}
 	if notice := updateFailureNotice(result); notice != "" {
-		return action + " finished with errors. " + notice
+		return actionName + " finished with errors. " + notice
 	}
-	return action + " finished with errors. See Session Log for full output."
+	return actionName + " finished with errors. See Session Log for full output."
 }
 
-func (app *App) startInstallJob(manager, id string) OperationJobStatus {
-	key := packageKey(manager, id)
-	return app.startOperationJob(jobTypeInstall, "", 1, []string{key}, func(ctx context.Context, job *OperationJob) {
-		ctx = withLogMetadata(ctx, logMetadata{PackageKey: key, Manager: manager})
-		started := app.mutateOperationJob(job, func(status *OperationJobStatus) {
+func (app *App) startInstallJob(manager, packageID string) OperationJobStatus {
+	jobPackageKey := packageKey(manager, packageID)
+	return app.startOperationJob(jobTypeInstall, "", 1, []string{jobPackageKey}, func(ctx context.Context, job *OperationJob) {
+		ctx = withLogMetadata(ctx, logMetadata{PackageKey: jobPackageKey, Manager: manager})
+		startedStatus := app.mutateOperationJob(job, func(status *OperationJobStatus) {
 			status.CurrentIndex = 1
-			status.CurrentKey = key
-			status.CurrentPackage = id
+			status.CurrentKey = jobPackageKey
+			status.CurrentPackage = packageID
 		})
-		jobID := started.JobID
-		result := installPackageContext(ctx, manager, id)
+		result := installPackageContext(ctx, manager, packageID)
 		app.mutateOperationJob(job, func(status *OperationJobStatus) {
 			status.Result = &result
-			status.Results = []UpdateResult{{Key: key, Result: result}}
+			status.Results = []UpdateResult{{Key: jobPackageKey, Result: result}}
 			if ctx.Err() != nil || result.Code == commandCancelledCode {
 				status.CancelRequested = true
 				status.State = jobStateCancelled
@@ -43,7 +42,7 @@ func (app *App) startInstallJob(manager, id string) OperationJobStatus {
 			status.Notice = "Install command completed. Refreshing package status..."
 		})
 		if ctx.Err() == nil {
-			app.refreshInventorySyncContext(ctx, "install job "+jobID)
+			app.refreshInventorySyncContext(ctx, "install job "+startedStatus.JobID)
 		}
 		app.mutateOperationJob(job, func(status *OperationJobStatus) {
 			if status.State == jobStateCancelled {
@@ -54,24 +53,23 @@ func (app *App) startInstallJob(manager, id string) OperationJobStatus {
 			} else {
 				status.State = jobStateFailed
 			}
-			status.Notice = commandJobNotice("Install", result)
+			status.Notice = commandResultJobNotice("Install", result)
 		})
 	})
 }
 
-func (app *App) startManagerInstallJob(manager string) OperationJobStatus {
-	return app.startOperationJob(jobTypeManagerInstall, "", 1, []string{manager}, func(ctx context.Context, job *OperationJob) {
-		ctx = withLogMetadata(ctx, logMetadata{PackageKey: manager, Manager: manager})
-		started := app.mutateOperationJob(job, func(status *OperationJobStatus) {
+func (app *App) startManagerInstallJob(managerName string) OperationJobStatus {
+	return app.startOperationJob(jobTypeManagerInstall, "", 1, []string{managerName}, func(ctx context.Context, job *OperationJob) {
+		ctx = withLogMetadata(ctx, logMetadata{PackageKey: managerName, Manager: managerName})
+		startedStatus := app.mutateOperationJob(job, func(status *OperationJobStatus) {
 			status.CurrentIndex = 1
-			status.CurrentKey = manager
-			status.CurrentPackage = manager
+			status.CurrentKey = managerName
+			status.CurrentPackage = managerName
 		})
-		jobID := started.JobID
-		result := installManagerContext(ctx, manager)
+		result := installManagerContext(ctx, managerName)
 		app.mutateOperationJob(job, func(status *OperationJobStatus) {
 			status.Result = &result
-			status.Results = []UpdateResult{{Key: manager, Result: result}}
+			status.Results = []UpdateResult{{Key: managerName, Result: result}}
 			if ctx.Err() != nil || result.Code == commandCancelledCode {
 				status.CancelRequested = true
 				status.State = jobStateCancelled
@@ -83,8 +81,8 @@ func (app *App) startManagerInstallJob(manager string) OperationJobStatus {
 			status.Notice = "Package manager install action completed. Refreshing manager status..."
 		})
 		if ctx.Err() == nil {
-			app.refreshStatusSyncContext(ctx, "manager install job "+jobID)
-			app.refreshInventorySyncContext(ctx, "manager install job "+jobID)
+			app.refreshStatusSyncContext(ctx, "manager install job "+startedStatus.JobID)
+			app.refreshInventorySyncContext(ctx, "manager install job "+startedStatus.JobID)
 		}
 		app.mutateOperationJob(job, func(status *OperationJobStatus) {
 			if status.State == jobStateCancelled {
@@ -95,36 +93,36 @@ func (app *App) startManagerInstallJob(manager string) OperationJobStatus {
 			} else {
 				status.State = jobStateFailed
 			}
-			status.Notice = commandJobNotice("Package manager install", result)
+			status.Notice = commandResultJobNotice("Package manager install", result)
 		})
 	})
 }
 
-func (app *App) startSingleUpdateJob(manager, id string, options UpdateOptions) OperationJobStatus {
-	pkg := app.packageForUpdateContext(app.rootContext(), manager, id)
-	pkg.AllowUnknownVersionUpdate = options.AllowUnknownVersion
-	pkg.AllowPinnedUpdate = options.AllowPinned
-	if pkg.Key == "" {
-		pkg.Key = packageKey(manager, id)
+func (app *App) startSingleUpdateJob(manager, packageID string, options UpdateOptions) OperationJobStatus {
+	targetPackage := app.packageForUpdateContext(app.rootContext(), manager, packageID)
+	targetPackage.AllowUnknownVersionUpdate = options.AllowUnknownVersion
+	targetPackage.AllowPinnedUpdate = options.AllowPinned
+	if targetPackage.Key == "" {
+		targetPackage.Key = packageKey(manager, packageID)
 	}
-	if !packageHasExactStoreUpdateTarget(pkg) {
-		result := validationCommandResult("update", fmt.Errorf("%s has no exact verified Store update target", pkg.Key))
-		return app.startRejectedUpdateJob(pkg, result)
+	if !packageHasExactStoreUpdateTarget(targetPackage) {
+		result := validationCommandResult("update", fmt.Errorf("%s has no exact verified Store update target", targetPackage.Key))
+		return app.startRejectedUpdateJob(targetPackage, result)
 	}
-	if !packageHasFreshStoreAvailableAssessment(pkg) {
-		result := validationCommandResult("update", fmt.Errorf("%s requires a fresh available Store assessment before updating", pkg.Key))
-		return app.startRejectedUpdateJob(pkg, result)
+	if !packageHasFreshStoreAvailableAssessment(targetPackage) {
+		result := validationCommandResult("update", fmt.Errorf("%s requires a fresh available Store assessment before updating", targetPackage.Key))
+		return app.startRejectedUpdateJob(targetPackage, result)
 	}
-	return app.startUpdatePackagesOperation(jobTypeUpdate, updateJobModeSelected, []Package{pkg})
+	return app.startUpdatePackagesOperation(jobTypeUpdate, updateJobModeSelected, []Package{targetPackage})
 }
 
-func (app *App) startRejectedUpdateJob(pkg Package, result CommandResult) OperationJobStatus {
-	return app.startOperationJobWithPackageSnapshot(jobTypeUpdate, updateJobModeSelected, 1, []string{pkg.Key}, []Package{pkg}, func(ctx context.Context, job *OperationJob) {
+func (app *App) startRejectedUpdateJob(rejectedPackage Package, result CommandResult) OperationJobStatus {
+	return app.startOperationJobWithPackageSnapshot(jobTypeUpdate, updateJobModeSelected, 1, []string{rejectedPackage.Key}, []Package{rejectedPackage}, func(ctx context.Context, job *OperationJob) {
 		app.mutateOperationJob(job, func(status *OperationJobStatus) {
 			status.CurrentIndex = 1
-			status.CurrentKey = pkg.Key
-			status.CurrentPackage = updateJobPackageName(pkg)
-			status.Results = []UpdateResult{{Key: pkg.Key, Result: result}}
+			status.CurrentKey = rejectedPackage.Key
+			status.CurrentPackage = updateJobPackageName(rejectedPackage)
+			status.Results = []UpdateResult{{Key: rejectedPackage.Key, Result: result}}
 			status.Result = &result
 			status.State = jobStateFailed
 			status.Notice = "Update not started. " + result.Stderr
@@ -133,19 +131,19 @@ func (app *App) startRejectedUpdateJob(pkg Package, result CommandResult) Operat
 }
 
 func (app *App) startBulkUpdateJob(packageKeys []string, options UpdateOptions) (OperationJobStatus, error) {
-	packages, mode, err := app.updateJobPackagesContext(app.rootContext(), packageKeys, options)
+	updatePackages, updateMode, err := app.updateJobPackagesContext(app.rootContext(), packageKeys, options)
 	if err != nil {
 		return OperationJobStatus{}, err
 	}
-	return app.startUpdatePackagesOperation(jobTypeUpdateAll, mode, packages), nil
+	return app.startUpdatePackagesOperation(jobTypeUpdateAll, updateMode, updatePackages), nil
 }
 
-func (app *App) startUpdatePackagesOperation(jobType, mode string, packages []Package) OperationJobStatus {
-	keys := updateJobPackageKeys(packages)
-	return app.startOperationJobWithPackageSnapshot(jobType, mode, len(packages), keys, packages, func(ctx context.Context, job *OperationJob) {
-		batchPackages, remainingPackages := planElevatedPackageUpdateBatch(packages, elevatedPackageUpdateBatchEligible)
-		if len(batchPackages) > 0 {
-			result := app.updateElevatedPackageBatchForJob(ctx, job, batchPackages)
+func (app *App) startUpdatePackagesOperation(operationType, updateMode string, updatePackages []Package) OperationJobStatus {
+	packageKeys := updateJobPackageKeys(updatePackages)
+	return app.startOperationJobWithPackageSnapshot(operationType, updateMode, len(updatePackages), packageKeys, updatePackages, func(ctx context.Context, job *OperationJob) {
+		batchedPackages, remainingPackages := planElevatedPackageUpdateBatch(updatePackages, elevatedPackageUpdateBatchEligible)
+		if len(batchedPackages) > 0 {
+			result := app.runElevatedPackageUpdateBatchForJob(ctx, job, batchedPackages)
 			if ctx.Err() != nil || result.Code == commandCancelledCode {
 				app.mutateOperationJob(job, func(status *OperationJobStatus) {
 					status.CancelRequested = true
@@ -154,14 +152,14 @@ func (app *App) startUpdatePackagesOperation(jobType, mode string, packages []Pa
 				})
 			}
 		}
-		if ctx.Err() == nil && app.jobCanContinue(job) {
-			for _, pkg := range remainingPackages {
-				packageCtx := withLogMetadata(ctx, logMetadata{PackageKey: pkg.Key, Manager: pkg.Manager})
-				nextIndex := app.nextUpdateJobPackageIndex(job)
+		if ctx.Err() == nil && app.operationJobCanContinue(job) {
+			for _, updatePackage := range remainingPackages {
+				packageCtx := withLogMetadata(ctx, logMetadata{PackageKey: updatePackage.Key, Manager: updatePackage.Manager})
+				nextIndex := app.nextUpdateResultIndex(job)
 				app.mutateOperationJob(job, func(status *OperationJobStatus) {
 					status.CurrentIndex = nextIndex
-					status.CurrentKey = pkg.Key
-					status.CurrentPackage = updateJobPackageName(pkg)
+					status.CurrentKey = updatePackage.Key
+					status.CurrentPackage = updateJobPackageName(updatePackage)
 				})
 				if packageCtx.Err() != nil {
 					app.mutateOperationJob(job, func(status *OperationJobStatus) {
@@ -171,9 +169,9 @@ func (app *App) startUpdatePackagesOperation(jobType, mode string, packages []Pa
 					})
 					break
 				}
-				result := app.updatePackageForJob(packageCtx, job, pkg)
+				result := app.updatePackageForJob(packageCtx, job, updatePackage)
 				app.mutateOperationJob(job, func(status *OperationJobStatus) {
-					status.Results = append(status.Results, UpdateResult{Key: pkg.Key, Result: result})
+					status.Results = append(status.Results, UpdateResult{Key: updatePackage.Key, Result: result})
 					status.Result = &result
 					if packageCtx.Err() != nil || result.Code == commandCancelledCode {
 						status.CancelRequested = true
@@ -195,7 +193,7 @@ func (app *App) startUpdatePackagesOperation(jobType, mode string, packages []Pa
 		})
 		var refreshErr error
 		if ctx.Err() == nil {
-			refreshErr = refreshInventoryAfterUpdateJob(ctx, app, packages)
+			refreshErr = refreshInventoryAfterUpdateJob(ctx, app, updatePackages)
 		}
 		app.mutateOperationJob(job, func(status *OperationJobStatus) {
 			if status.State == jobStateCancelled {
@@ -228,100 +226,99 @@ func (app *App) startUpdatePackagesOperation(jobType, mode string, packages []Pa
 	})
 }
 
-func (app *App) jobCanContinue(job *OperationJob) bool {
-	status := app.updateJobSnapshot(job)
+func (app *App) operationJobCanContinue(job *OperationJob) bool {
+	status := app.operationJobStatusSnapshot(job)
 	return status.State != jobStateCancelled
 }
 
-func (app *App) nextUpdateJobPackageIndex(job *OperationJob) int {
-	status := app.updateJobSnapshot(job)
+func (app *App) nextUpdateResultIndex(job *OperationJob) int {
+	status := app.operationJobStatusSnapshot(job)
 	return len(status.Results) + 1
 }
 
-func (app *App) updateJobSnapshot(job *OperationJob) OperationJobStatus {
+func (app *App) operationJobStatusSnapshot(job *OperationJob) OperationJobStatus {
 	app.jobsMu.Lock()
 	defer app.jobsMu.Unlock()
 	return cloneOperationJobStatus(job.status)
 }
 
-func (app *App) updateElevatedPackageBatchForJob(ctx context.Context, job *OperationJob, packages []Package) CommandResult {
-	first := packages[0]
-	nextIndex := app.nextUpdateJobPackageIndex(job)
-	startNotice := fmt.Sprintf("Starting elevated package batch for %d package(s). Approve the Windows UAC prompt if shown.", len(packages))
-	appLogContext(ctx, "%s", startNotice)
+func (app *App) runElevatedPackageUpdateBatchForJob(ctx context.Context, job *OperationJob, updatePackages []Package) CommandResult {
+	firstPackage := updatePackages[0]
+	firstBatchIndex := app.nextUpdateResultIndex(job)
+	batchStartNotice := fmt.Sprintf("Starting elevated package batch for %d package(s). Approve the Windows UAC prompt if shown.", len(updatePackages))
+	appLogContext(ctx, "%s", batchStartNotice)
 	app.mutateOperationJob(job, func(status *OperationJobStatus) {
 		status.State = jobStateStarting
-		status.CurrentIndex = nextIndex
-		status.CurrentKey = first.Key
-		status.CurrentPackage = updateJobPackageName(first)
-		status.Notice = startNotice
+		status.CurrentIndex = firstBatchIndex
+		status.CurrentKey = firstPackage.Key
+		status.CurrentPackage = updateJobPackageName(firstPackage)
+		status.Notice = batchStartNotice
 	})
-	results, result := elevatedPackageUpdateBatchRunner(ctx, packages, func(index int, pkg Package) {
-		notice := fmt.Sprintf("Elevated package batch running %d/%d: %s.", index, len(packages), updateJobPackageName(pkg))
-		appLogContext(ctx, "%s", notice)
+	batchResults, batchResult := elevatedPackageUpdateBatchRunner(ctx, updatePackages, func(packagePosition int, updatePackage Package) {
+		progressNotice := fmt.Sprintf("Elevated package batch running %d/%d: %s.", packagePosition, len(updatePackages), updateJobPackageName(updatePackage))
+		appLogContext(ctx, "%s", progressNotice)
 		app.mutateOperationJob(job, func(status *OperationJobStatus) {
-			status.CurrentIndex = nextIndex + index - 1
-			status.CurrentKey = pkg.Key
-			status.CurrentPackage = updateJobPackageName(pkg)
-			status.Notice = notice
+			status.CurrentIndex = firstBatchIndex + packagePosition - 1
+			status.CurrentKey = updatePackage.Key
+			status.CurrentPackage = updateJobPackageName(updatePackage)
+			status.Notice = progressNotice
 		})
 	})
-	appLogContext(ctx, "Elevated package batch finished with code %d.", result.Code)
+	appLogContext(ctx, "Elevated package batch finished with code %d.", batchResult.Code)
 	app.mutateOperationJob(job, func(status *OperationJobStatus) {
-		status.Results = append(status.Results, results...)
-		status.Result = &result
-		if len(results) > 0 {
-			last := results[len(results)-1]
+		status.Results = append(status.Results, batchResults...)
+		status.Result = &batchResult
+		if len(batchResults) > 0 {
+			lastResult := batchResults[len(batchResults)-1]
 			status.CurrentIndex = len(status.Results)
-			status.CurrentKey = last.Key
-			status.CurrentPackage = updateJobPackageName(packageByUpdateResultKey(packages, last.Key))
+			status.CurrentKey = lastResult.Key
+			status.CurrentPackage = updateJobPackageName(packageForUpdateResultKey(updatePackages, lastResult.Key))
 		}
 	})
-	return result
+	return batchResult
 }
 
-func packageByUpdateResultKey(packages []Package, key string) Package {
-	for _, pkg := range packages {
-		if pkg.Key == key || normalizedJobPackageKey(pkg) == key {
-			return pkg
+func packageForUpdateResultKey(updatePackages []Package, resultKey string) Package {
+	for _, updatePackage := range updatePackages {
+		if updatePackage.Key == resultKey || normalizedJobPackageKey(updatePackage) == resultKey {
+			return updatePackage
 		}
 	}
-	if len(packages) == 0 {
+	if len(updatePackages) == 0 {
 		return Package{}
 	}
-	return packages[len(packages)-1]
+	return updatePackages[len(updatePackages)-1]
 }
 
-func (app *App) updatePackageForJob(ctx context.Context, job *OperationJob, pkg Package) CommandResult {
-	if pkg.Manager == managerStore && pkg.UpdateState != "" {
-		return storeExactUpdateExecutor.ExecuteWithCallbacks(ctx, pkg, StoreExactUpdateCallbacks{
+func (app *App) updatePackageForJob(ctx context.Context, job *OperationJob, updatePackage Package) CommandResult {
+	if updatePackage.Manager == managerStore && updatePackage.UpdateState != "" {
+		return storeExactUpdateExecutor.ExecuteWithCallbacks(ctx, updatePackage, StoreExactUpdateCallbacks{
 			Starting: func(StoreExactUpdateRequest) {
 				app.mutateOperationJob(job, func(status *OperationJobStatus) {
 					status.State = jobStateStarting
-					status.Notice = "Starting exact Store update for " + updateJobPackageName(pkg) + "..."
+					status.Notice = "Starting exact Store update for " + updateJobPackageName(updatePackage) + "..."
 				})
 			},
 			Accepted: func(StoreExactUpdateRequest, CommandResult) {
 				app.mutateOperationJob(job, func(status *OperationJobStatus) {
 					status.State = jobStateAccepted
-					status.Notice = "Store update accepted for " + updateJobPackageName(pkg) + "."
+					status.Notice = "Store update accepted for " + updateJobPackageName(updatePackage) + "."
 				})
 			},
 			Verifying: func(StoreExactUpdateRequest) {
 				app.mutateOperationJob(job, func(status *OperationJobStatus) {
 					status.State = jobStateVerifying
-					status.Notice = "Verifying exact Store update for " + updateJobPackageName(pkg) + "..."
+					status.Notice = "Verifying exact Store update for " + updateJobPackageName(updatePackage) + "..."
 				})
 			},
 		})
 	}
-	return app.updatePackageWithInventoryRetry(ctx, pkg)
+	return app.updatePackageWithInventoryRetry(ctx, updatePackage)
 }
 
 func (app *App) startScanJob() OperationJobStatus {
 	return app.startOperationJob(jobTypeScan, "", 1, nil, func(ctx context.Context, job *OperationJob) {
-		started := app.mutateOperationJob(job, func(status *OperationJobStatus) {})
-		jobID := started.JobID
+		startedStatus := app.mutateOperationJob(job, func(status *OperationJobStatus) {})
 		if ctx.Err() != nil {
 			app.mutateOperationJob(job, func(status *OperationJobStatus) {
 				status.CancelRequested = true
@@ -330,15 +327,15 @@ func (app *App) startScanJob() OperationJobStatus {
 			})
 			return
 		}
-		store, err := defaultStateStore()
-		var scan ScanResult
+		stateStore, err := defaultStateStore()
+		var scanResult ScanResult
 		if err != nil {
-			scan = ScanResult{Errors: []map[string]string{{"source": "state", "error": err.Error()}}}
+			scanResult = ScanResult{Errors: []map[string]string{{"source": "state", "error": err.Error()}}}
 		} else {
-			scan = scanInstalledApplicationsWithStore(ctx, store)
+			scanResult = scanInstalledApplicationsWithStore(ctx, stateStore)
 		}
 		app.mutateOperationJob(job, func(status *OperationJobStatus) {
-			status.Scan = &scan
+			status.Scan = &scanResult
 			if ctx.Err() != nil {
 				status.CancelRequested = true
 				status.State = jobStateCancelled
@@ -350,13 +347,13 @@ func (app *App) startScanJob() OperationJobStatus {
 			status.Notice = "Application scan completed. Refreshing package status..."
 		})
 		if ctx.Err() == nil {
-			app.refreshInventorySyncContext(ctx, "scan job "+jobID)
+			app.refreshInventorySyncContext(ctx, "scan job "+startedStatus.JobID)
 		}
 		app.mutateOperationJob(job, func(status *OperationJobStatus) {
 			if status.State == jobStateCancelled {
 				return
 			}
-			if len(scan.Errors) > 0 {
+			if len(scanResult.Errors) > 0 {
 				status.State = jobStateFailed
 				status.Notice = "Application scan completed with errors."
 				return
@@ -369,8 +366,7 @@ func (app *App) startScanJob() OperationJobStatus {
 
 func (app *App) startInventoryRefreshJob() OperationJobStatus {
 	return app.startOperationJob(jobTypeInventoryRefresh, "", 1, nil, func(ctx context.Context, job *OperationJob) {
-		started := app.mutateOperationJob(job, func(status *OperationJobStatus) {})
-		jobID := started.JobID
+		startedStatus := app.mutateOperationJob(job, func(status *OperationJobStatus) {})
 		if ctx.Err() != nil {
 			app.mutateOperationJob(job, func(status *OperationJobStatus) {
 				status.CancelRequested = true
@@ -384,7 +380,7 @@ func (app *App) startInventoryRefreshJob() OperationJobStatus {
 			status.RefreshStarted = true
 			status.Notice = "Refreshing package status..."
 		})
-		app.refreshInventorySyncContext(ctx, "inventory refresh job "+jobID)
+		app.refreshInventorySyncContext(ctx, "inventory refresh job "+startedStatus.JobID)
 		app.mutateOperationJob(job, func(status *OperationJobStatus) {
 			if ctx.Err() != nil {
 				status.CancelRequested = true
@@ -410,57 +406,57 @@ func (app *App) startSelfUpdateJob() OperationJobStatus {
 			app.finishSelfUpdateJob(job, result, jobStateFailed, "Application self-update is not configured.")
 			return
 		}
-		update := app.appUpdateStatusContext(ctx, true)
+		updateStatus := app.appUpdateStatusContext(ctx, true)
 		if ctx.Err() != nil {
 			result := commandContextDoneResult(ctx, "self-update", "while checking for application update", []string{"all", "application"})
 			app.finishSelfUpdateJob(job, result, jobStateCancelled, "Application self-update cancelled.")
 			return
 		}
-		if update.Error != "" {
-			result := validationCommandResult("self-update", errors.New(update.Error))
+		if updateStatus.Error != "" {
+			result := validationCommandResult("self-update", errors.New(updateStatus.Error))
 			app.finishSelfUpdateJob(job, result, jobStateFailed, "Application update check failed.")
 			return
 		}
-		if !update.Available {
+		if !updateStatus.Available {
 			result := CommandResult{OK: true, Command: "self-update", Stdout: "No newer application release is available."}
 			app.finishSelfUpdateJob(job, result, jobStateSucceeded, "Application is already up to date.")
 			return
 		}
 		app.mutateOperationJob(job, func(status *OperationJobStatus) {
-			status.Notice = "Downloading application update " + update.LatestVersion + "..."
+			status.Notice = "Downloading application update " + updateStatus.LatestVersion + "..."
 		})
-		dir, err := selfUpdateDownloadDir()
+		downloadDir, err := selfUpdateDownloadDir()
 		if err != nil {
 			result := workerCommandResultError("self-update", err)
 			app.finishSelfUpdateJob(job, result, jobStateFailed, "Application update download failed.")
 			return
 		}
-		artifact, err := downloadSelfUpdateArtifact(ctx, http.DefaultClient, update, dir)
+		downloadedArtifact, err := downloadSelfUpdateArtifact(ctx, http.DefaultClient, updateStatus, downloadDir)
 		if err != nil {
 			result := workerCommandResultError("self-update", err)
 			app.finishSelfUpdateJob(job, result, jobStateFailed, "Application update download failed.")
 			return
 		}
-		target, err := osExecutable()
+		currentExecutable, err := osExecutable()
 		if err != nil {
 			result := workerCommandResultError("self-update", err)
 			app.finishSelfUpdateJob(job, result, jobStateFailed, "Application update could not locate the running executable.")
 			return
 		}
 		app.mutateOperationJob(job, func(status *OperationJobStatus) {
-			status.Notice = "Preparing to restart and apply application update " + update.LatestVersion + "..."
+			status.Notice = "Preparing to restart and apply application update " + updateStatus.LatestVersion + "..."
 		})
-		if err := launchSelfUpdateApply(ctx, artifact, target); err != nil {
+		if err := launchSelfUpdateApply(ctx, downloadedArtifact, currentExecutable); err != nil {
 			result := workerCommandResultError("self-update", err)
 			app.finishSelfUpdateJob(job, result, jobStateFailed, "Application update could not start the apply helper.")
 			return
 		}
-		result := CommandResult{
+		successResult := CommandResult{
 			OK:      true,
 			Command: "self-update",
-			Stdout:  "Application update " + update.LatestVersion + " downloaded and verified. Restarting to apply it.",
+			Stdout:  "Application update " + updateStatus.LatestVersion + " downloaded and verified. Restarting to apply it.",
 		}
-		app.finishSelfUpdateJob(job, result, jobStateSucceeded, "Application update downloaded. Restarting to apply it...")
+		app.finishSelfUpdateJob(job, successResult, jobStateSucceeded, "Application update downloaded. Restarting to apply it...")
 		go func() {
 			time.Sleep(200 * time.Millisecond)
 			app.requestShutdown("Application self-update")
@@ -468,11 +464,11 @@ func (app *App) startSelfUpdateJob() OperationJobStatus {
 	})
 }
 
-func (app *App) finishSelfUpdateJob(job *OperationJob, result CommandResult, state, notice string) {
+func (app *App) finishSelfUpdateJob(job *OperationJob, result CommandResult, jobState, notice string) {
 	app.mutateOperationJob(job, func(status *OperationJobStatus) {
 		status.Result = &result
 		status.Results = []UpdateResult{{Key: "app:self-update", Result: result}}
-		status.State = state
+		status.State = jobState
 		status.Notice = notice
 	})
 }
@@ -481,9 +477,9 @@ func jobAcceptedResponse(w http.ResponseWriter, status OperationJobStatus) {
 	writeJSON(w, http.StatusAccepted, status)
 }
 
-func jobNotFoundError(id string) string {
-	if id == "" {
+func jobNotFoundError(jobID string) string {
+	if jobID == "" {
 		return "job_id is required"
 	}
-	return fmt.Sprintf("job %s was not found", id)
+	return fmt.Sprintf("job %s was not found", jobID)
 }

@@ -14,95 +14,97 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func TestWindowsCommandProcessOwnerTerminatesGrandchild(t *testing.T) {
-	dir := t.TempDir()
-	gatePath := dir + `\gate.txt`
-	pidPath := dir + `\child.pid`
-	script := `
-$gate = ` + powerShellSingleQuoted(gatePath) + `
-$pidPath = ` + powerShellSingleQuoted(pidPath) + `
+func TestCommandProcessOwnerTerminatesGrandchildProcessTree(t *testing.T) {
+	testDir := t.TempDir()
+	grandchildStartGatePath := testDir + `\gate.txt`
+	grandchildPIDPath := testDir + `\child.pid`
+	launcherScript := `
+$gate = ` + quotePowerShellSingleQuotedString(grandchildStartGatePath) + `
+$pidPath = ` + quotePowerShellSingleQuotedString(grandchildPIDPath) + `
 while (!(Test-Path -LiteralPath $gate)) { Start-Sleep -Milliseconds 25 }
 $child = Start-Process powershell.exe -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-Command','Start-Sleep -Seconds 60'
 Set-Content -LiteralPath $pidPath -Value $child.Id
 Start-Sleep -Seconds 60
 `
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script)
-	cmd.SysProcAttr = hiddenSysProcAttr()
-	owner, err := newCommandProcessOwner(true)
+	parentCommand := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", launcherScript)
+	parentCommand.SysProcAttr = hiddenSysProcAttr()
+	processOwner, err := newCommandProcessOwner(true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer owner.Close()
-	if err := cmd.Start(); err != nil {
+	defer processOwner.Close()
+	if err := parentCommand.Start(); err != nil {
 		t.Fatal(err)
 	}
-	defer terminateStartedCommand(cmd, owner)
-	if err := owner.Assign(cmd); err != nil {
+	defer terminateStartedCommand(parentCommand, processOwner)
+	if err := processOwner.Assign(parentCommand); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(gatePath, []byte("go"), 0o600); err != nil {
+	if err := os.WriteFile(grandchildStartGatePath, []byte("go"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	childPID := waitForPIDFile(t, pidPath)
-	if !processRunning(childPID) {
-		t.Fatalf("expected child process %d to be running before termination", childPID)
+	grandchildPID := waitForProcessIDFile(t, grandchildPIDPath)
+	if !isProcessRunning(grandchildPID) {
+		t.Fatalf("expected grandchild process %d to be running before termination", grandchildPID)
 	}
 
-	owner.Terminate()
-	waitDone := make(chan error, 1)
-	go func() { waitDone <- cmd.Wait() }()
+	processOwner.Terminate()
+	commandExited := make(chan error, 1)
+	go func() { commandExited <- parentCommand.Wait() }()
 	select {
-	case <-waitDone:
+	case <-commandExited:
 	case <-time.After(5 * time.Second):
 		t.Fatal("owned process did not exit after job termination")
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if !processRunning(childPID) {
+	grandchildExitDeadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(grandchildExitDeadline) {
+		if !isProcessRunning(grandchildPID) {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("grandchild process %d survived job termination", childPID)
+	t.Fatalf("grandchild process %d survived job termination", grandchildPID)
 }
 
-func powerShellSingleQuoted(value string) string {
+func quotePowerShellSingleQuotedString(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
-func waitForPIDFile(t *testing.T, path string) uint32 {
+func waitForProcessIDFile(t *testing.T, path string) uint32 {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(path)
-		if err == nil {
-			pid, parseErr := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 32)
-			if parseErr != nil {
-				t.Fatal(parseErr)
-			}
-			return uint32(pid)
+		if err != nil {
+			time.Sleep(25 * time.Millisecond)
+			continue
 		}
-		time.Sleep(25 * time.Millisecond)
+
+		processID, parseErr := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 32)
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		return uint32(processID)
 	}
 	t.Fatalf("pid file %s was not written", path)
 	return 0
 }
 
-func processRunning(pid uint32) bool {
-	handle, err := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+func isProcessRunning(processID uint32) bool {
+	handle, err := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, processID)
 	if err != nil {
 		return false
 	}
 	defer windows.CloseHandle(handle)
-	event, err := windows.WaitForSingleObject(handle, 0)
-	return err == nil && event == uint32(windows.WAIT_TIMEOUT)
+	waitResult, err := windows.WaitForSingleObject(handle, 0)
+	return err == nil && waitResult == uint32(windows.WAIT_TIMEOUT)
 }
 
 func TestRunCommandContextCancellationTerminatesOwnedPackageProcessTree(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	cancelledContext, cancel := context.WithCancel(context.Background())
 	cancel()
-	result := runCommandContext(ctx, time.Minute, "cmd.exe", "/d", "/c", "winget", "--version")
-	if result.Code != commandCancelledCode {
-		t.Fatalf("expected cancelled owned command, got %#v", result)
+	commandResult := runCommandContext(cancelledContext, time.Minute, "cmd.exe", "/d", "/c", "winget", "--version")
+	if commandResult.Code != commandCancelledCode {
+		t.Fatalf("expected cancelled owned command, got %#v", commandResult)
 	}
 }

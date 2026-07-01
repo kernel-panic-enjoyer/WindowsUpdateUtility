@@ -86,8 +86,8 @@ type elevatedWorkerAuthContext struct {
 	SessionID  uint32
 }
 
-func newElevatedWorkerRequest(auth elevatedWorkerAuthContext, requestID, operation string, payload any) (elevatedWorkerMessage, error) {
-	raw, err := marshalWorkerPayload(payload)
+func newElevatedWorkerRequest(auth elevatedWorkerAuthContext, requestID, operation string, operationPayload any) (elevatedWorkerMessage, error) {
+	rawPayload, err := marshalWorkerPayload(operationPayload)
 	if err != nil {
 		return elevatedWorkerMessage{}, err
 	}
@@ -99,7 +99,7 @@ func newElevatedWorkerRequest(auth elevatedWorkerAuthContext, requestID, operati
 		UserSID:    auth.UserSID,
 		SessionID:  auth.SessionID,
 		Operation:  operation,
-		Payload:    raw,
+		Payload:    rawPayload,
 	}, nil
 }
 
@@ -114,31 +114,31 @@ func newElevatedWorkerCancel(auth elevatedWorkerAuthContext, requestID string) e
 	}
 }
 
-func marshalWorkerPayload(payload any) (json.RawMessage, error) {
-	if payload == nil {
+func marshalWorkerPayload(operationPayload any) (json.RawMessage, error) {
+	if operationPayload == nil {
 		return nil, nil
 	}
-	data, err := json.Marshal(payload)
+	encodedPayload, err := json.Marshal(operationPayload)
 	if err != nil {
 		return nil, err
 	}
-	return data, nil
+	return encodedPayload, nil
 }
 
-func validateElevatedWorkerMessage(message elevatedWorkerMessage, expected elevatedWorkerAuthContext) error {
+func validateElevatedWorkerMessage(message elevatedWorkerMessage, expectedAuth elevatedWorkerAuthContext) error {
 	if message.Version != elevatedWorkerProtocolVersion {
 		return fmt.Errorf("unsupported worker protocol version %d", message.Version)
 	}
 	if message.RequestID == "" {
 		return errors.New("worker request_id is required")
 	}
-	if message.Capability == "" || message.Capability != expected.Capability {
+	if message.Capability == "" || message.Capability != expectedAuth.Capability {
 		return errors.New("worker capability is invalid")
 	}
-	if message.UserSID == "" || !strings.EqualFold(message.UserSID, expected.UserSID) {
+	if message.UserSID == "" || !strings.EqualFold(message.UserSID, expectedAuth.UserSID) {
 		return errors.New("worker user SID is invalid")
 	}
-	if message.SessionID != expected.SessionID {
+	if message.SessionID != expectedAuth.SessionID {
 		return errors.New("worker session is invalid")
 	}
 	switch message.Type {
@@ -157,78 +157,82 @@ func validateElevatedWorkerMessage(message elevatedWorkerMessage, expected eleva
 	}
 }
 
-func validateWorkerOperationPayload(operation string, payload json.RawMessage) error {
+func validateWorkerOperationPayload(operation string, rawPayload json.RawMessage) error {
 	switch operation {
 	case workerOperationPackageInstall:
-		var decoded elevatedWorkerPackageInstallPayload
-		if err := decodeWorkerPayload(payload, &decoded); err != nil {
+		var installPayload elevatedWorkerPackageInstallPayload
+		if err := decodeWorkerPayload(rawPayload, &installPayload); err != nil {
 			return err
 		}
-		if decoded.Manager != managerWinget && decoded.Manager != managerChoco {
+		if !isElevatedWorkerPackageManager(installPayload.Manager) {
 			return errors.New("package install worker operation only allows winget or choco")
 		}
-		return validateManagerAndID(decoded.Manager, decoded.PackageID)
+		return validateManagerAndID(installPayload.Manager, installPayload.PackageID)
 	case workerOperationPackageUpdate:
-		var decoded elevatedWorkerPackageUpdatePayload
-		if err := decodeWorkerPayload(payload, &decoded); err != nil {
+		var updatePayload elevatedWorkerPackageUpdatePayload
+		if err := decodeWorkerPayload(rawPayload, &updatePayload); err != nil {
 			return err
 		}
-		if decoded.Package.Manager != managerWinget && decoded.Package.Manager != managerChoco {
+		if !isElevatedWorkerPackageManager(updatePayload.Package.Manager) {
 			return errors.New("package update worker operation only allows winget or choco")
 		}
-		return validateManagerAndID(decoded.Package.Manager, decoded.Package.ID)
+		return validateManagerAndID(updatePayload.Package.Manager, updatePayload.Package.ID)
 	case workerOperationPackageUpdateBatch:
-		var decoded elevatedWorkerPackageUpdateBatchPayload
-		if err := decodeWorkerPayload(payload, &decoded); err != nil {
+		var batchPayload elevatedWorkerPackageUpdateBatchPayload
+		if err := decodeWorkerPayload(rawPayload, &batchPayload); err != nil {
 			return err
 		}
-		return validateElevatedWorkerPackageUpdateBatchPayload(decoded)
+		return validateElevatedWorkerPackageUpdateBatchPayload(batchPayload)
 	case workerOperationManagerInstall:
-		var decoded elevatedWorkerManagerInstallPayload
-		if err := decodeWorkerPayload(payload, &decoded); err != nil {
+		var managerInstallPayload elevatedWorkerManagerInstallPayload
+		if err := decodeWorkerPayload(rawPayload, &managerInstallPayload); err != nil {
 			return err
 		}
-		if decoded.Manager != managerChoco {
+		if managerInstallPayload.Manager != managerChoco {
 			return errors.New("manager install worker operation only allows choco")
 		}
 		return nil
 	case workerOperationStartupTask, workerOperationAutoUpdateTask:
-		var decoded elevatedWorkerTaskPayload
-		return decodeWorkerPayload(payload, &decoded)
+		var taskPayload elevatedWorkerTaskPayload
+		return decodeWorkerPayload(rawPayload, &taskPayload)
 	default:
 		return fmt.Errorf("unknown worker operation %q", operation)
 	}
 }
 
-func validateElevatedWorkerPackageUpdateBatchPayload(payload elevatedWorkerPackageUpdateBatchPayload) error {
-	if len(payload.Packages) == 0 {
+func isElevatedWorkerPackageManager(manager string) bool {
+	return manager == managerWinget || manager == managerChoco
+}
+
+func validateElevatedWorkerPackageUpdateBatchPayload(batchPayload elevatedWorkerPackageUpdateBatchPayload) error {
+	if len(batchPayload.Packages) == 0 {
 		return errors.New("package update batch requires at least one package")
 	}
-	if len(payload.Packages) > elevatedWorkerPackageUpdateBatchMaxPackages {
-		return fmt.Errorf("package update batch has %d packages; maximum is %d", len(payload.Packages), elevatedWorkerPackageUpdateBatchMaxPackages)
+	if len(batchPayload.Packages) > elevatedWorkerPackageUpdateBatchMaxPackages {
+		return fmt.Errorf("package update batch has %d packages; maximum is %d", len(batchPayload.Packages), elevatedWorkerPackageUpdateBatchMaxPackages)
 	}
-	for _, pkg := range payload.Packages {
-		if pkg.Manager != managerWinget && pkg.Manager != managerChoco {
+	for _, packageToUpdate := range batchPayload.Packages {
+		if !isElevatedWorkerPackageManager(packageToUpdate.Manager) {
 			return errors.New("package update batch only allows winget or choco packages")
 		}
-		if err := validateManagerAndID(pkg.Manager, pkg.ID); err != nil {
+		if err := validateManagerAndID(packageToUpdate.Manager, packageToUpdate.ID); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func decodeWorkerPayload(data json.RawMessage, target any) error {
-	if len(data) == 0 {
+func decodeWorkerPayload(rawPayload json.RawMessage, target any) error {
+	if len(rawPayload) == 0 {
 		return errors.New("worker operation payload is required")
 	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder := json.NewDecoder(bytes.NewReader(rawPayload))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		return err
 	}
-	var trailing struct{}
-	if err := decoder.Decode(&trailing); err != io.EOF {
+	var extraValue struct{}
+	if err := decoder.Decode(&extraValue); err != io.EOF {
 		return errors.New("worker operation payload contains multiple values")
 	}
 	return nil

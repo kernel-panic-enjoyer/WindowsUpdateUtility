@@ -100,9 +100,42 @@ func fileExists(path string) bool {
 
 func startBrowserTestServer(t *testing.T, app *updater.App) *httptest.Server {
 	t.Helper()
-	server := httptest.NewServer(app.TestHandler())
+	return startBrowserTestServerWithRoutes(t, app, nil)
+}
+
+func startBrowserTestServerWithRoutes(t *testing.T, app *updater.App, routes map[string]http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	appHandler := app.TestHandler()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if route := routes[r.URL.Path]; route != nil {
+			route(w, r)
+			return
+		}
+		appHandler.ServeHTTP(w, r)
+	}))
 	t.Cleanup(server.Close)
 	return server
+}
+
+func authenticateBrowserTestRequest(app *updater.App, w http.ResponseWriter, r *http.Request) bool {
+	updater.SetTestSecurityHeaders(w)
+	if !app.TestSessionOK(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
+func writeAuthenticatedBrowserTestJSON(app *updater.App, w http.ResponseWriter, r *http.Request, status int, payload any) {
+	if !authenticateBrowserTestRequest(app, w, r) {
+		return
+	}
+	updater.WriteTestJSON(w, status, payload)
+}
+
+func writeBrowserTestJSON(w http.ResponseWriter, status int, payload any) {
+	updater.SetTestSecurityHeaders(w)
+	updater.WriteTestJSON(w, status, payload)
 }
 
 func navigateAuthenticated(t *testing.T, ctx context.Context, serverURL string) {
@@ -232,11 +265,9 @@ func TestBrowserConnectionBadgeExpiresWhenBackendStops(t *testing.T) {
 func TestBrowserWingetLogTabSurvivesStoreFlood(t *testing.T) {
 	app := updater.NewBrowserTestApp()
 	logPayload := browserLogFloodPayload(t)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/events" {
-			updater.SetTestSecurityHeaders(w)
-			if !app.TestSessionOK(r) {
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	server := startBrowserTestServerWithRoutes(t, app, map[string]http.HandlerFunc{
+		"/api/events": func(w http.ResponseWriter, r *http.Request) {
+			if !authenticateBrowserTestRequest(app, w, r) {
 				return
 			}
 			w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
@@ -245,11 +276,8 @@ func TestBrowserWingetLogTabSurvivesStoreFlood(t *testing.T) {
 			if flusher, ok := w.(http.Flusher); ok {
 				flusher.Flush()
 			}
-			return
-		}
-		app.TestHandler()(w, r)
-	}))
-	t.Cleanup(server.Close)
+		},
+	})
 	ctx, cancel := newBrowserContext(t)
 	defer cancel()
 
@@ -370,10 +398,108 @@ func TestBrowserSearchShowsPartialFailuresAndProvenance(t *testing.T) {
 		t.Fatalf("search provenance did not describe partial result sources: %q", provenance)
 	}
 	table := waitForText(t, ctx, `#search-results-panel`, "Exact package ID match.")
-	for _, expected := range []string{"Chocolatey", "Store CLI", "Backend:", "gh", "GitHubCLI"} {
+	for _, expected := range []string{"Chocolatey", "Store CLI", "gh", "GitHubCLI"} {
 		if !strings.Contains(table, expected) {
 			t.Fatalf("search table missing %q in:\n%s", expected, table)
 		}
+	}
+	if strings.Contains(table, "Backend:") {
+		t.Fatalf("search table still duplicates manager/backend labels:\n%s", table)
+	}
+}
+
+func TestBrowserSuccessfulSearchInstallDisablesClickedButton(t *testing.T) {
+	restoreManagers := updater.ReplaceManagerDetectionCacheForTest(map[string]updater.ManagerStatus{
+		updater.ManagerWinget: {Available: true},
+		updater.ManagerStore:  {Available: false},
+		updater.ManagerChoco:  {Available: false},
+	})
+	defer restoreManagers()
+	restoreSearch := updater.ReplacePackageSearchRunnersForTest([]updater.StubSearchResult{
+		{Manager: updater.ManagerWinget, Run: func(string) (updater.CommandResult, []updater.Package) {
+			return updater.CommandResult{OK: true, Command: "winget search Cryptomator"}, []updater.Package{{
+				Key:         "winget:Cryptomator.Cryptomator",
+				Manager:     updater.ManagerWinget,
+				ID:          "Cryptomator.Cryptomator",
+				Name:        "Cryptomator",
+				Version:     "1.19.3",
+				Source:      updater.SourceWinget,
+				MatchReason: "Exact package name match.",
+			}}
+		}},
+	})
+	defer restoreSearch()
+
+	app := updater.NewBrowserTestApp()
+	var installRequests atomic.Int32
+	server := startBrowserTestServerWithRoutes(t, app, map[string]http.HandlerFunc{
+		"/api/install": func(w http.ResponseWriter, r *http.Request) {
+			if !authenticateBrowserTestRequest(app, w, r) {
+				return
+			}
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			if err := r.ParseForm(); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if got := r.Form.Get("manager"); got != updater.ManagerWinget {
+				http.Error(w, "unexpected manager "+got, http.StatusBadRequest)
+				return
+			}
+			if got := r.Form.Get("package_id"); got != "Cryptomator.Cryptomator" {
+				http.Error(w, "unexpected package_id "+got, http.StatusBadRequest)
+				return
+			}
+			installRequests.Add(1)
+			updater.WriteTestJSON(w, http.StatusAccepted, updater.OperationJobStatus{
+				JobID:   "install-job",
+				Type:    "install",
+				State:   "accepted",
+				Running: true,
+				Total:   1,
+				Notice:  "Installing package...",
+			})
+		},
+		"/api/jobs/status": func(w http.ResponseWriter, r *http.Request) {
+			writeAuthenticatedBrowserTestJSON(app, w, r, http.StatusOK, updater.OperationJobStatus{
+				JobID:   "install-job",
+				Type:    "install",
+				State:   updater.JobStateSucceeded,
+				Running: false,
+				Total:   1,
+				Notice:  "Install command completed.",
+				Result:  &updater.CommandResult{OK: true, Command: "winget install Cryptomator.Cryptomator"},
+			})
+		},
+	})
+	ctx, cancel := newBrowserContext(t)
+	defer cancel()
+
+	navigateAuthenticated(t, ctx, server.URL)
+	if err := chromedp.Run(ctx,
+		chromedp.SetValue(`#search-input`, `Cryptomator`, chromedp.ByQuery),
+		chromedp.Click(`#search-form button[type="submit"]`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#search-results-body .install-form button`, chromedp.ByQuery),
+		chromedp.Click(`#search-results-body .install-form button`, chromedp.ByQuery),
+		chromedp.Poll(`(() => {
+		  const button = document.querySelector("#search-results-body .install-form button");
+		  return !!button && button.disabled && button.innerText.includes("Installed");
+		})()`, nil, chromedp.WithPollingInterval(50*time.Millisecond), chromedp.WithPollingTimeout(8*time.Second)),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if got := installRequests.Load(); got != 1 {
+		t.Fatalf("install endpoint was called %d times, want 1", got)
+	}
+	var rowText string
+	if err := chromedp.Run(ctx, chromedp.Text(`#search-results-body`, &rowText, chromedp.ByQuery)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rowText, "Installed") || !strings.Contains(rowText, "Installed from this search session.") {
+		t.Fatalf("search row did not show installed state:\n%s", rowText)
 	}
 }
 
@@ -462,12 +588,9 @@ func TestBrowserReloadDuringJobAndCancellation(t *testing.T) {
 func TestBrowserIgnoresStalePackageResponses(t *testing.T) {
 	app := updater.NewBrowserTestApp()
 	var packageRequests atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/packages":
-			updater.SetTestSecurityHeaders(w)
-			if !app.TestSessionOK(r) {
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	server := startBrowserTestServerWithRoutes(t, app, map[string]http.HandlerFunc{
+		"/api/packages": func(w http.ResponseWriter, r *http.Request) {
+			if !authenticateBrowserTestRequest(app, w, r) {
 				return
 			}
 			count := packageRequests.Add(1)
@@ -477,17 +600,14 @@ func TestBrowserIgnoresStalePackageResponses(t *testing.T) {
 				return
 			}
 			updater.WriteTestJSON(w, http.StatusOK, updater.InventoryResponse{Inventory: updater.Inventory{PackageLookup: updater.PackageLookup{Packages: []updater.Package{{Key: "winget:new", Manager: updater.ManagerWinget, ID: "new", Name: "Fresh Package", Installed: true}}}}})
-		case "/api/inventory/refresh":
-			updater.SetTestSecurityHeaders(w)
-			updater.WriteTestJSON(w, http.StatusAccepted, updater.OperationJobStatus{JobID: "refresh-job", Type: updater.JobTypeInventoryRefresh, State: updater.JobStateSucceeded, Total: 1, Notice: "Package status refreshed."})
-		case "/api/jobs/status":
-			updater.SetTestSecurityHeaders(w)
-			updater.WriteTestJSON(w, http.StatusOK, updater.OperationJobStatus{JobID: "refresh-job", Type: updater.JobTypeInventoryRefresh, State: updater.JobStateSucceeded, Total: 1, Notice: "Package status refreshed."})
-		default:
-			app.TestHandler()(w, r)
-		}
-	}))
-	t.Cleanup(server.Close)
+		},
+		"/api/inventory/refresh": func(w http.ResponseWriter, r *http.Request) {
+			writeBrowserTestJSON(w, http.StatusAccepted, updater.OperationJobStatus{JobID: "refresh-job", Type: updater.JobTypeInventoryRefresh, State: updater.JobStateSucceeded, Total: 1, Notice: "Package status refreshed."})
+		},
+		"/api/jobs/status": func(w http.ResponseWriter, r *http.Request) {
+			writeBrowserTestJSON(w, http.StatusOK, updater.OperationJobStatus{JobID: "refresh-job", Type: updater.JobTypeInventoryRefresh, State: updater.JobStateSucceeded, Total: 1, Notice: "Package status refreshed."})
+		},
+	})
 
 	ctx, cancel := newBrowserContext(t)
 	defer cancel()
@@ -514,15 +634,9 @@ func TestBrowserIgnoresStalePackageResponses(t *testing.T) {
 
 func TestBrowserManagerFilterUsesVisiblePackages(t *testing.T) {
 	app := updater.NewBrowserTestApp()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/packages":
-			updater.SetTestSecurityHeaders(w)
-			if !app.TestSessionOK(r) {
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
-			}
-			updater.WriteTestJSON(w, http.StatusOK, updater.InventoryResponse{Inventory: updater.Inventory{PackageLookup: updater.PackageLookup{
+	server := startBrowserTestServerWithRoutes(t, app, map[string]http.HandlerFunc{
+		"/api/packages": func(w http.ResponseWriter, r *http.Request) {
+			writeAuthenticatedBrowserTestJSON(app, w, r, http.StatusOK, updater.InventoryResponse{Inventory: updater.Inventory{PackageLookup: updater.PackageLookup{
 				Managers: map[string]updater.ManagerStatus{
 					updater.ManagerWinget: {Available: true},
 					updater.ManagerStore:  {Available: false, InventoryAvailable: true, InventoryBackend: updater.InventoryBackendAppX, Error: "store unavailable"},
@@ -533,11 +647,8 @@ func TestBrowserManagerFilterUsesVisiblePackages(t *testing.T) {
 					{Key: "store:Visible.Store_abc123", Manager: updater.ManagerStore, ID: "Visible.Store_abc123", Name: "Visible Store App", Installed: true, UpdateSupported: false},
 				},
 			}}})
-		default:
-			app.TestHandler()(w, r)
-		}
-	}))
-	t.Cleanup(server.Close)
+		},
+	})
 
 	ctx, cancel := newBrowserContext(t)
 	defer cancel()
@@ -573,15 +684,9 @@ func TestBrowserManagerFilterUsesVisiblePackages(t *testing.T) {
 
 func TestBrowserPackageRowsUseUniformHeight(t *testing.T) {
 	app := updater.NewBrowserTestApp()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/packages":
-			updater.SetTestSecurityHeaders(w)
-			if !app.TestSessionOK(r) {
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
-			}
-			updater.WriteTestJSON(w, http.StatusOK, updater.InventoryResponse{Inventory: updater.Inventory{PackageLookup: updater.PackageLookup{
+	server := startBrowserTestServerWithRoutes(t, app, map[string]http.HandlerFunc{
+		"/api/packages": func(w http.ResponseWriter, r *http.Request) {
+			writeAuthenticatedBrowserTestJSON(app, w, r, http.StatusOK, updater.InventoryResponse{Inventory: updater.Inventory{PackageLookup: updater.PackageLookup{
 				Managers: map[string]updater.ManagerStatus{
 					updater.ManagerWinget: {Available: true},
 				},
@@ -590,11 +695,8 @@ func TestBrowserPackageRowsUseUniformHeight(t *testing.T) {
 					{Key: "winget:Very.Long.Row", Manager: updater.ManagerWinget, ID: "Very.Long.Package.Identifier.With.Many.Sections.And.Overflow.Text", Name: "Very Long Package Name That Previously Stretched The Updates Table Row", Version: "2026.06.29-build-with-extra-long-channel-and-metadata", AvailableVersion: "2026.06.30-build-with-extra-long-channel-and-metadata", UpdateAvailable: true, UpdateSupported: true, Installed: true, Source: updater.SourceWinget, PreferenceEligible: true, CanUpdateNow: true},
 				},
 			}}})
-		default:
-			app.TestHandler()(w, r)
-		}
-	}))
-	t.Cleanup(server.Close)
+		},
+	})
 
 	ctx, cancel := newBrowserContext(t)
 	defer cancel()
@@ -618,15 +720,9 @@ func TestBrowserPackageRowsUseUniformHeight(t *testing.T) {
 
 func TestBrowserHidesStaleStoreEvidenceFromUpdatesQueue(t *testing.T) {
 	app := updater.NewBrowserTestApp()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/packages":
-			updater.SetTestSecurityHeaders(w)
-			if !app.TestSessionOK(r) {
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
-			}
-			updater.WriteTestJSON(w, http.StatusOK, updater.InventoryResponse{Inventory: updater.Inventory{PackageLookup: updater.PackageLookup{
+	server := startBrowserTestServerWithRoutes(t, app, map[string]http.HandlerFunc{
+		"/api/packages": func(w http.ResponseWriter, r *http.Request) {
+			writeAuthenticatedBrowserTestJSON(app, w, r, http.StatusOK, updater.InventoryResponse{Inventory: updater.Inventory{PackageLookup: updater.PackageLookup{
 				Managers: map[string]updater.ManagerStatus{
 					updater.ManagerWinget: {Available: true},
 					updater.ManagerStore:  {Available: true, InventoryAvailable: true, InventoryBackend: updater.InventoryBackendAppX, ActionBackend: updater.ActionBackendStoreCLI},
@@ -671,11 +767,8 @@ func TestBrowserHidesStaleStoreEvidenceFromUpdatesQueue(t *testing.T) {
 				Reason:        "retained previous positive update because the latest scan was incomplete",
 				Counts:        map[string]int{"available": 1, "stale": 1},
 			}}})
-		default:
-			app.TestHandler()(w, r)
-		}
-	}))
-	t.Cleanup(server.Close)
+		},
+	})
 
 	ctx, cancel := newBrowserContext(t)
 	defer cancel()
@@ -710,12 +803,9 @@ func TestBrowserAppUpdatePromptDismissesPerVersion(t *testing.T) {
 			ReleaseURL:     "https://example.test/releases/v" + version,
 		}
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/status":
-			updater.SetTestSecurityHeaders(w)
-			if !app.TestSessionOK(r) {
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	server := startBrowserTestServerWithRoutes(t, app, map[string]http.HandlerFunc{
+		"/api/status": func(w http.ResponseWriter, r *http.Request) {
+			if !authenticateBrowserTestRequest(app, w, r) {
 				return
 			}
 			settings := updater.StatusSettings{Theme: "dark"}
@@ -731,17 +821,12 @@ func TestBrowserAppUpdatePromptDismissesPerVersion(t *testing.T) {
 				Settings:  settings,
 				AppUpdate: appUpdateStatus(),
 			})
-		case "/api/app-update/check":
-			updater.SetTestSecurityHeaders(w)
-			if !app.TestSessionOK(r) {
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
-			}
-			updater.WriteTestJSON(w, http.StatusOK, appUpdateStatus())
-		case "/api/settings/app-update-prompt":
-			updater.SetTestSecurityHeaders(w)
-			if !app.TestSessionOK(r) {
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		},
+		"/api/app-update/check": func(w http.ResponseWriter, r *http.Request) {
+			writeAuthenticatedBrowserTestJSON(app, w, r, http.StatusOK, appUpdateStatus())
+		},
+		"/api/settings/app-update-prompt": func(w http.ResponseWriter, r *http.Request) {
+			if !authenticateBrowserTestRequest(app, w, r) {
 				return
 			}
 			if err := r.ParseForm(); err != nil {
@@ -753,11 +838,8 @@ func TestBrowserAppUpdatePromptDismissesPerVersion(t *testing.T) {
 			updater.WriteTestJSON(w, http.StatusOK, map[string]any{
 				"settings": updater.StatusSettings{Theme: "dark", AppUpdatePromptDismissedVersion: version},
 			})
-		default:
-			app.TestHandler()(w, r)
-		}
-	}))
-	t.Cleanup(server.Close)
+		},
+	})
 
 	ctx, cancel := newBrowserContext(t)
 	defer cancel()

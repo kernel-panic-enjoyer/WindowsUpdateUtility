@@ -6,76 +6,80 @@ import (
 	"strings"
 )
 
-func (app *App) updateJobPackages(packageKeys []string, options UpdateOptions) ([]Package, string, error) {
-	return app.updateJobPackagesContext(context.Background(), packageKeys, options)
+func (app *App) updateJobPackages(requestedPackageKeys []string, options UpdateOptions) ([]Package, string, error) {
+	return app.updateJobPackagesContext(context.Background(), requestedPackageKeys, options)
 }
 
-func (app *App) updateJobPackagesContext(ctx context.Context, packageKeys []string, options UpdateOptions) ([]Package, string, error) {
+func (app *App) updateJobPackagesContext(ctx context.Context, requestedPackageKeys []string, options UpdateOptions) ([]Package, string, error) {
 	inventory, err := app.effectiveInventorySnapshot(ctx)
 	if err != nil {
 		return nil, updateJobModeSelected, err
 	}
 	inventoryPackages := inventory.Packages
 
-	byKey := map[string]Package{}
+	inventoryByUpdateKey := map[string]Package{}
 	for _, pkg := range inventoryPackages {
-		key := normalizedJobPackageKey(pkg)
-		if key != "" {
-			pkg.Key = key
-			byKey[key] = pkg
+		updateKey := normalizedJobPackageKey(pkg)
+		if updateKey != "" {
+			pkg.Key = updateKey
+			inventoryByUpdateKey[updateKey] = pkg
 		}
 	}
 
-	if len(packageKeys) == 0 {
-		var packages []Package
-		seen := map[string]bool{}
+	if len(requestedPackageKeys) == 0 {
+		var selectedPackages []Package
+		selectedKeys := map[string]bool{}
 		for _, pkg := range inventoryPackages {
-			key := normalizedJobPackageKey(pkg)
-			if key == "" || seen[key] || !packageAllowedInBulkUpdate(pkg, options) {
+			updateKey := normalizedJobPackageKey(pkg)
+			if updateKey == "" || selectedKeys[updateKey] || !packageAllowedInBulkUpdate(pkg, options) {
 				continue
 			}
-			pkg.Key = key
-			applyUpdateOptions(&pkg, options)
-			packages = append(packages, pkg)
-			seen[key] = true
+			pkg.Key = updateKey
+			applyPackageUpdateOptions(&pkg, options)
+			selectedPackages = append(selectedPackages, pkg)
+			selectedKeys[updateKey] = true
 		}
-		if len(packages) == 0 {
+		if len(selectedPackages) == 0 {
 			return nil, updateJobModeAll, errNoUpdateCandidates
 		}
-		return packages, updateJobModeAll, nil
+		return selectedPackages, updateJobModeAll, nil
 	}
 
-	var packages []Package
-	seen := map[string]bool{}
-	for _, key := range packageKeys {
-		normalized := normalizeJobRequestPackageKey(key)
-		if normalized == "" {
-			normalized = key
+	var selectedPackages []Package
+	selectedKeys := map[string]bool{}
+	for _, requestedKey := range requestedPackageKeys {
+		updateKey := normalizeJobRequestPackageKey(requestedKey)
+		if updateKey == "" {
+			updateKey = requestedKey
 		}
-		if seen[normalized] {
+		if selectedKeys[updateKey] {
 			continue
 		}
-		manager, id, err := splitPackageKey(normalized)
+		requestedManager, requestedID, err := splitPackageKey(updateKey)
 		if err != nil {
 			return nil, updateJobModeSelected, err
 		}
-		pkg, ok := byKey[normalized]
+		pkg, ok := inventoryByUpdateKey[updateKey]
 		if !ok {
-			pkg = Package{Key: normalized, Manager: manager, ID: id, Name: id, UpdateSupported: true}
+			pkg = Package{Key: updateKey, Manager: requestedManager, ID: requestedID, Name: requestedID, UpdateSupported: true}
 		}
 		policy := packageUpdatePolicy(pkg, options)
 		if !policy.CanUpdateNow {
-			return nil, updateJobModeSelected, fmt.Errorf("%s cannot be updated now: %s", normalized, firstNonEmpty(policy.CannotUpdateReason, "not actionable"))
+			return nil, updateJobModeSelected, fmt.Errorf(
+				"%s cannot be updated now: %s",
+				updateKey,
+				firstNonEmpty(policy.CannotUpdateReason, "not actionable"),
+			)
 		}
-		pkg.Key = normalized
-		applyUpdateOptions(&pkg, options)
-		packages = append(packages, pkg)
-		seen[normalized] = true
+		pkg.Key = updateKey
+		applyPackageUpdateOptions(&pkg, options)
+		selectedPackages = append(selectedPackages, pkg)
+		selectedKeys[updateKey] = true
 	}
-	if len(packages) == 0 {
+	if len(selectedPackages) == 0 {
 		return nil, updateJobModeSelected, errNoUpdateCandidates
 	}
-	return packages, updateJobModeSelected, nil
+	return selectedPackages, updateJobModeSelected, nil
 }
 
 func packageAllowedInBulkUpdate(pkg Package, options UpdateOptions) bool {
@@ -86,13 +90,14 @@ func packageHasFreshStoreAvailableAssessment(pkg Package) bool {
 	if pkg.Manager != managerStore {
 		return true
 	}
-	if pkg.UpdateState == "" {
+	updateState := strings.TrimSpace(pkg.UpdateState)
+	if updateState == "" {
 		return false
 	}
-	return strings.EqualFold(strings.TrimSpace(pkg.UpdateState), string(StoreUpdateAvailable)) && !pkg.Stale
+	return strings.EqualFold(updateState, string(StoreUpdateAvailable)) && !pkg.Stale
 }
 
-func applyUpdateOptions(pkg *Package, options UpdateOptions) {
+func applyPackageUpdateOptions(pkg *Package, options UpdateOptions) {
 	pkg.AllowUnknownVersionUpdate = options.AllowUnknownVersion
 	pkg.AllowPinnedUpdate = options.AllowPinned
 }
@@ -102,51 +107,51 @@ func (app *App) packageForUpdate(manager, id string) Package {
 }
 
 func (app *App) packageForUpdateContext(ctx context.Context, manager, id string) Package {
-	fallback := Package{
-		Key:             packageKey(manager, id),
+	requestedKey := packageKey(manager, id)
+	fallbackPackage := Package{
+		Key:             requestedKey,
 		Manager:         manager,
 		ID:              id,
 		Name:            id,
 		UpdateSupported: true,
 	}
-	requestedKey := packageKey(manager, id)
-	normalizedRequested := normalizeAutoUpdatePackageKey(requestedKey)
+	normalizedRequestedKey := normalizeAutoUpdatePackageKey(requestedKey)
 
 	inventory, err := app.effectiveInventorySnapshot(ctx)
 	if err != nil {
-		return fallback
+		return fallbackPackage
 	}
 	for _, pkg := range inventory.Packages {
 		if pkg.Manager != manager {
 			continue
 		}
-		key := normalizedJobPackageKey(pkg)
-		if key == "" {
-			key = packageKey(pkg.Manager, pkg.ID)
+		updateKey := normalizedJobPackageKey(pkg)
+		if updateKey == "" {
+			updateKey = packageKey(pkg.Manager, pkg.ID)
 		}
-		normalizedKey := normalizeAutoUpdatePackageKey(key)
+		normalizedUpdateKey := normalizeAutoUpdatePackageKey(updateKey)
 		if strings.EqualFold(pkg.ID, id) ||
-			strings.EqualFold(key, requestedKey) ||
-			strings.EqualFold(normalizedKey, normalizedRequested) ||
-			(manager == managerStore && equivalentPackageKeys(key, requestedKey)) {
-			pkg.Key = key
+			strings.EqualFold(updateKey, requestedKey) ||
+			strings.EqualFold(normalizedUpdateKey, normalizedRequestedKey) ||
+			(manager == managerStore && equivalentPackageKeys(updateKey, requestedKey)) {
+			pkg.Key = updateKey
 			if pkg.Name == "" {
 				pkg.Name = id
 			}
 			return pkg
 		}
 	}
-	return fallback
+	return fallbackPackage
 }
 
 func updateJobPackageKeys(packages []Package) []string {
-	keys := make([]string, 0, len(packages))
+	updateKeys := make([]string, 0, len(packages))
 	for _, pkg := range packages {
 		if pkg.Key != "" {
-			keys = append(keys, pkg.Key)
+			updateKeys = append(updateKeys, pkg.Key)
 		}
 	}
-	return keys
+	return updateKeys
 }
 
 func normalizedJobPackageKey(pkg Package) string {
@@ -154,8 +159,8 @@ func normalizedJobPackageKey(pkg Package) string {
 		return storePackagePublicKey(pkg)
 	}
 	if pkg.Key != "" {
-		if normalized := normalizeAutoUpdatePackageKey(pkg.Key); normalized != "" {
-			return normalized
+		if normalizedKey := normalizeAutoUpdatePackageKey(pkg.Key); normalizedKey != "" {
+			return normalizedKey
 		}
 		return pkg.Key
 	}
@@ -165,28 +170,28 @@ func normalizedJobPackageKey(pkg Package) string {
 	return packageKey(pkg.Manager, pkg.ID)
 }
 
-func normalizeJobRequestPackageKey(key string) string {
-	manager, id, err := splitPackageKey(key)
+func normalizeJobRequestPackageKey(requestedKey string) string {
+	manager, id, err := splitPackageKey(requestedKey)
 	if err != nil {
-		return key
+		return requestedKey
 	}
 	if manager == managerStore {
-		if _, pfn, ok := splitCanonicalStoreAutoUpdateKey(key); ok {
-			return packageKey(managerStore, pfn)
+		if _, packageFamilyName, ok := splitCanonicalStoreAutoUpdateKey(requestedKey); ok {
+			return packageKey(managerStore, packageFamilyName)
 		}
 		return packageKey(managerStore, id)
 	}
-	if normalized := normalizeAutoUpdatePackageKey(key); normalized != "" {
-		return normalized
+	if normalizedKey := normalizeAutoUpdatePackageKey(requestedKey); normalizedKey != "" {
+		return normalizedKey
 	}
-	return key
+	return requestedKey
 }
 
 func updateJobPackageName(pkg Package) string {
-	for _, value := range []string{pkg.Name, pkg.ID, pkg.Key} {
-		value = strings.TrimSpace(value)
-		if value != "" {
-			return value
+	for _, candidateName := range []string{pkg.Name, pkg.ID, pkg.Key} {
+		candidateName = strings.TrimSpace(candidateName)
+		if candidateName != "" {
+			return candidateName
 		}
 	}
 	return "package"

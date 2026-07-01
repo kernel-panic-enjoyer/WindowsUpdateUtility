@@ -104,95 +104,95 @@ func runElevatedWorkerInvocation(ctx context.Context, invocation elevatedWorkerI
 	if err != nil {
 		return elevatedWorkerResponse{}, err
 	}
-	auth := elevatedWorkerAuthContext{Capability: capability, UserSID: userSID, SessionID: sessionID}
-	request, err := newElevatedWorkerRequest(auth, requestID, invocation.Operation, invocation.Payload)
+	authContext := elevatedWorkerAuthContext{Capability: capability, UserSID: userSID, SessionID: sessionID}
+	workerRequest, err := newElevatedWorkerRequest(authContext, requestID, invocation.Operation, invocation.Payload)
 	if err != nil {
 		return elevatedWorkerResponse{}, err
 	}
 
 	pipeName := `\\.\pipe\WindowsUpdaterWebUI-` + requestID
-	server, err := newElevatedWorkerPipeServer(pipeName, userSID)
+	pipeServer, err := newElevatedWorkerPipeServer(pipeName, userSID)
 	if err != nil {
 		return elevatedWorkerResponse{}, err
 	}
-	defer server.Close()
+	defer pipeServer.Close()
 
 	appLogContext(ctx, "Launching elevated worker for %s. Approve the Windows UAC prompt if shown.", invocation.Operation)
-	process, err := launchElevatedWorkerProcess(pipeName, capability, userSID, sessionID)
+	workerProcess, err := launchElevatedWorkerProcess(pipeName, capability, userSID, sessionID)
 	if err != nil {
 		appLogContext(ctx, "Elevated worker launch failed for %s: %s.", invocation.Operation, err)
 		return elevatedWorkerResponse{}, err
 	}
-	defer process.Close()
+	defer workerProcess.Close()
 
 	appLogContext(ctx, "Elevated worker launched for %s; waiting for connection.", invocation.Operation)
 	startupCtx, cancelStartup := context.WithTimeout(ctx, elevatedWorkerStartupTimeout)
-	conn, err := acceptElevatedWorkerConnection(startupCtx, server, process)
+	pipeConn, err := acceptElevatedWorkerConnection(startupCtx, pipeServer, workerProcess)
 	cancelStartup()
 	if err != nil {
-		process.Terminate()
+		workerProcess.Terminate()
 		appLogContext(ctx, "Elevated worker did not connect for %s: %s.", invocation.Operation, err)
 		return elevatedWorkerResponse{}, fmt.Errorf("elevated worker did not connect: %w", err)
 	}
-	defer conn.Close()
+	defer pipeConn.Close()
 	appLogContext(ctx, "Elevated worker connected for %s.", invocation.Operation)
 
-	done := make(chan struct{})
-	var doneOnce sync.Once
-	closeDone := func() {
-		doneOnce.Do(func() {
-			close(done)
+	workerExchangeDone := make(chan struct{})
+	var exchangeDoneOnce sync.Once
+	markWorkerExchangeDone := func() {
+		exchangeDoneOnce.Do(func() {
+			close(workerExchangeDone)
 		})
 	}
-	defer closeDone()
+	defer markWorkerExchangeDone()
 	go func() {
 		select {
 		case <-ctx.Done():
-			process.Terminate()
-			_ = conn.Close()
-		case <-done:
+			workerProcess.Terminate()
+			_ = pipeConn.Close()
+		case <-workerExchangeDone:
 		}
 	}()
 
-	response, err := exchangeElevatedWorkerRequest(ctx, conn, auth, request, invocation.Progress)
-	closeDone()
+	response, err := exchangeElevatedWorkerRequest(ctx, pipeConn, authContext, workerRequest, invocation.Progress)
+	markWorkerExchangeDone()
 	if err != nil {
-		process.Terminate()
+		workerProcess.Terminate()
 		return elevatedWorkerResponse{}, err
 	}
 	return response, nil
 }
 
-func acceptElevatedWorkerConnection(ctx context.Context, server *elevatedWorkerPipeServer, process elevatedWorkerProcess) (io.ReadWriteCloser, error) {
+func acceptElevatedWorkerConnection(ctx context.Context, pipeServer *elevatedWorkerPipeServer, workerProcess elevatedWorkerProcess) (io.ReadWriteCloser, error) {
 	type acceptResult struct {
-		conn io.ReadWriteCloser
-		err  error
+		pipeConn io.ReadWriteCloser
+		err      error
 	}
-	acceptCh := make(chan acceptResult, 1)
+	acceptResultCh := make(chan acceptResult, 1)
 	go func() {
-		conn, err := server.Accept(ctx)
-		acceptCh <- acceptResult{conn: conn, err: err}
+		pipeConn, err := pipeServer.Accept(ctx)
+		acceptResultCh <- acceptResult{pipeConn: pipeConn, err: err}
 	}()
 
-	var exitCh chan elevatedWorkerExit
-	if process.handle != 0 {
-		exitCh = make(chan elevatedWorkerExit, 1)
+	var processExitCh chan elevatedWorkerExit
+	if workerProcess.handle != 0 {
+		processExitCh = make(chan elevatedWorkerExit, 1)
 		go func() {
-			exitCh <- process.Wait()
+			processExitCh <- workerProcess.Wait()
 		}()
 	}
 
 	select {
-	case accepted := <-acceptCh:
-		return accepted.conn, accepted.err
-	case exited := <-exitCh:
-		server.Close()
+	case accepted := <-acceptResultCh:
+		return accepted.pipeConn, accepted.err
+	case exited := <-processExitCh:
+		pipeServer.Close()
 		if exited.Err != nil {
 			return nil, fmt.Errorf("elevated worker exited before connecting: %w", exited.Err)
 		}
 		return nil, fmt.Errorf("elevated worker exited before connecting with code %d", exited.Code)
 	case <-ctx.Done():
-		server.Close()
+		pipeServer.Close()
 		return nil, ctx.Err()
 	}
 }
@@ -205,50 +205,46 @@ func validateWorkerOperationPayloadFromAny(operation string, payload any) error 
 	return validateWorkerOperationPayload(operation, raw)
 }
 
-func exchangeElevatedWorkerRequest(ctx context.Context, conn io.ReadWriteCloser, auth elevatedWorkerAuthContext, request elevatedWorkerMessage, progress func(elevatedWorkerProgress)) (elevatedWorkerResponse, error) {
-	encoder := json.NewEncoder(conn)
-	decoder := json.NewDecoder(conn)
+func exchangeElevatedWorkerRequest(ctx context.Context, pipeConn io.ReadWriteCloser, _ elevatedWorkerAuthContext, request elevatedWorkerMessage, progress func(elevatedWorkerProgress)) (elevatedWorkerResponse, error) {
+	encoder := json.NewEncoder(pipeConn)
+	decoder := json.NewDecoder(pipeConn)
 	decoder.DisallowUnknownFields()
 
-	var writeMu sync.Mutex
-	writeMu.Lock()
 	if err := encoder.Encode(request); err != nil {
-		writeMu.Unlock()
 		return elevatedWorkerResponse{}, fmt.Errorf("send elevated worker request: %w", err)
 	}
-	writeMu.Unlock()
 
-	responseCh := make(chan elevatedWorkerResponse, 1)
-	errCh := make(chan error, 1)
+	finalResponseCh := make(chan elevatedWorkerResponse, 1)
+	decodeErrCh := make(chan error, 1)
 	go func() {
 		for {
-			var response elevatedWorkerResponse
-			if err := decoder.Decode(&response); err != nil {
-				errCh <- err
+			var workerResponse elevatedWorkerResponse
+			if err := decoder.Decode(&workerResponse); err != nil {
+				decodeErrCh <- err
 				return
 			}
-			if err := validateElevatedWorkerResponse(response, request.RequestID); err != nil {
-				errCh <- err
+			if err := validateElevatedWorkerResponse(workerResponse, request.RequestID); err != nil {
+				decodeErrCh <- err
 				return
 			}
-			if response.Type == workerResponseProgress {
-				if response.Progress != nil && progress != nil {
-					progress(*response.Progress)
+			if workerResponse.Type == workerResponseProgress {
+				if workerResponse.Progress != nil && progress != nil {
+					progress(*workerResponse.Progress)
 				}
 				continue
 			}
-			responseCh <- response
+			finalResponseCh <- workerResponse
 			return
 		}
 	}()
 
 	select {
-	case response := <-responseCh:
-		if !response.OK && response.Error != "" && response.Result.Stderr == "" {
-			response.Result.Stderr = response.Error
+	case workerResponse := <-finalResponseCh:
+		if !workerResponse.OK && workerResponse.Error != "" && workerResponse.Result.Stderr == "" {
+			workerResponse.Result.Stderr = workerResponse.Error
 		}
-		return response, nil
-	case err := <-errCh:
+		return workerResponse, nil
+	case err := <-decodeErrCh:
 		return elevatedWorkerResponse{}, fmt.Errorf("read elevated worker response: %w", err)
 	case <-ctx.Done():
 		return elevatedWorkerResponse{
@@ -278,7 +274,7 @@ type elevatedWorkerPipeServer struct {
 }
 
 func newElevatedWorkerPipeServer(pipeName, userSID string) (*elevatedWorkerPipeServer, error) {
-	name, err := windows.UTF16PtrFromString(pipeName)
+	pipeNameUTF16, err := windows.UTF16PtrFromString(pipeName)
 	if err != nil {
 		return nil, err
 	}
@@ -287,8 +283,8 @@ func newElevatedWorkerPipeServer(pipeName, userSID string) (*elevatedWorkerPipeS
 		return nil, err
 	}
 	defer cleanup()
-	handle, err := windows.CreateNamedPipe(
-		name,
+	pipeHandle, err := windows.CreateNamedPipe(
+		pipeNameUTF16,
 		windows.PIPE_ACCESS_DUPLEX|windows.FILE_FLAG_FIRST_PIPE_INSTANCE,
 		windows.PIPE_TYPE_BYTE|windows.PIPE_READMODE_BYTE|windows.PIPE_WAIT|windows.PIPE_REJECT_REMOTE_CLIENTS,
 		1,
@@ -300,7 +296,7 @@ func newElevatedWorkerPipeServer(pipeName, userSID string) (*elevatedWorkerPipeS
 	if err != nil {
 		return nil, err
 	}
-	return &elevatedWorkerPipeServer{handle: handle}, nil
+	return &elevatedWorkerPipeServer{handle: pipeHandle}, nil
 }
 
 func (server *elevatedWorkerPipeServer) Accept(ctx context.Context) (io.ReadWriteCloser, error) {
@@ -349,32 +345,32 @@ func runElevatedWorkerFromArgs() error {
 	pipeName, _ := argValue("--worker-pipe")
 	capability, _ := argValue("--worker-capability")
 	userSID, _ := argValue("--worker-user-sid")
-	sessionRaw, _ := argValue("--worker-session-id")
-	sessionID, err := parseUint32(sessionRaw)
+	sessionIDRaw, _ := argValue("--worker-session-id")
+	sessionID, err := parseRequiredUint32(sessionIDRaw)
 	if err != nil {
 		return err
 	}
-	auth := elevatedWorkerAuthContext{Capability: capability, UserSID: userSID, SessionID: sessionID}
+	authContext := elevatedWorkerAuthContext{Capability: capability, UserSID: userSID, SessionID: sessionID}
 	if pipeName == "" || capability == "" || userSID == "" {
 		return errors.New("worker pipe, capability, and user SID are required")
 	}
-	conn, err := connectElevatedWorkerPipe(pipeName, elevatedWorkerStartupTimeout)
+	pipeConn, err := connectElevatedWorkerPipe(pipeName, elevatedWorkerStartupTimeout)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	return serveElevatedWorkerConnection(conn, auth)
+	defer pipeConn.Close()
+	return serveElevatedWorkerConnection(pipeConn, authContext)
 }
 
 func connectElevatedWorkerPipe(pipeName string, timeout time.Duration) (io.ReadWriteCloser, error) {
 	deadline := time.Now().Add(timeout)
-	name, err := windows.UTF16PtrFromString(pipeName)
+	pipeNameUTF16, err := windows.UTF16PtrFromString(pipeName)
 	if err != nil {
 		return nil, err
 	}
 	for {
-		handle, err := windows.CreateFile(
-			name,
+		pipeHandle, err := windows.CreateFile(
+			pipeNameUTF16,
 			windows.GENERIC_READ|windows.GENERIC_WRITE,
 			0,
 			nil,
@@ -383,7 +379,7 @@ func connectElevatedWorkerPipe(pipeName string, timeout time.Duration) (io.ReadW
 			0,
 		)
 		if err == nil {
-			return os.NewFile(uintptr(handle), "elevated-worker-pipe"), nil
+			return os.NewFile(uintptr(pipeHandle), "elevated-worker-pipe"), nil
 		}
 		if time.Now().After(deadline) {
 			return nil, err
@@ -392,38 +388,39 @@ func connectElevatedWorkerPipe(pipeName string, timeout time.Duration) (io.ReadW
 	}
 }
 
-func serveElevatedWorkerConnection(conn io.ReadWriter, auth elevatedWorkerAuthContext) error {
-	decoder := json.NewDecoder(conn)
+func serveElevatedWorkerConnection(pipeConn io.ReadWriter, authContext elevatedWorkerAuthContext) error {
+	decoder := json.NewDecoder(pipeConn)
 	decoder.DisallowUnknownFields()
-	encoder := json.NewEncoder(conn)
-	var request elevatedWorkerMessage
-	if err := decoder.Decode(&request); err != nil {
+	encoder := json.NewEncoder(pipeConn)
+	var workerRequest elevatedWorkerMessage
+	if err := decoder.Decode(&workerRequest); err != nil {
 		return err
 	}
-	if err := validateElevatedWorkerMessage(request, auth); err != nil {
+	if err := validateElevatedWorkerMessage(workerRequest, authContext); err != nil {
 		_ = encoder.Encode(elevatedWorkerResponse{
 			Version:   elevatedWorkerProtocolVersion,
-			RequestID: request.RequestID,
+			RequestID: workerRequest.RequestID,
 			OK:        false,
 			Error:     err.Error(),
-			Result:    validationCommandResult(request.Operation, err),
+			Result:    validationCommandResult(workerRequest.Operation, err),
 		})
 		return err
 	}
-	if request.Type != workerMessageRequest {
+	if workerRequest.Type != workerMessageRequest {
 		return errors.New("first worker message must be a request")
 	}
 
 	ctx := context.Background()
+	batchProgressTotal := packageUpdateBatchProgressTotal(workerRequest.Operation, workerRequest.Payload)
 
 	progress := func(index int, pkg Package) {
 		_ = encoder.Encode(elevatedWorkerResponse{
 			Version:   elevatedWorkerProtocolVersion,
 			Type:      workerResponseProgress,
-			RequestID: request.RequestID,
+			RequestID: workerRequest.RequestID,
 			Progress: &elevatedWorkerProgress{
 				CurrentIndex:   index,
-				Total:          packageUpdateBatchProgressTotal(request.Operation, request.Payload),
+				Total:          batchProgressTotal,
 				PackageKey:     normalizedJobPackageKey(pkg),
 				PackageName:    updateJobPackageName(pkg),
 				PackageID:      pkg.ID,
@@ -431,18 +428,18 @@ func serveElevatedWorkerConnection(conn io.ReadWriter, auth elevatedWorkerAuthCo
 			},
 		})
 	}
-	result := executeElevatedWorkerOperation(ctx, request.Operation, request.Payload, auth, progress)
-	response := elevatedWorkerResponse{
+	operationResult := executeElevatedWorkerOperation(ctx, workerRequest.Operation, workerRequest.Payload, authContext, progress)
+	workerResponse := elevatedWorkerResponse{
 		Version:   elevatedWorkerProtocolVersion,
-		RequestID: request.RequestID,
-		OK:        result.Result.OK,
-		Result:    result.Result,
-		Results:   result.Results,
+		RequestID: workerRequest.RequestID,
+		OK:        operationResult.Result.OK,
+		Result:    operationResult.Result,
+		Results:   operationResult.Results,
 	}
-	if !result.Result.OK {
-		response.Error = strings.TrimSpace(result.Result.Stderr)
+	if !operationResult.Result.OK {
+		workerResponse.Error = strings.TrimSpace(operationResult.Result.Stderr)
 	}
-	_ = encoder.Encode(response)
+	_ = encoder.Encode(workerResponse)
 	return nil
 }
 
@@ -499,7 +496,7 @@ func executeElevatedWorkerOperation(ctx context.Context, operation string, paylo
 }
 
 func validateBatchWorkerIdentity(auth elevatedWorkerAuthContext, packages []Package) error {
-	if !packageBatchIncludesManager(packages, managerWinget) {
+	if !packageUpdateBatchIncludesManager(packages, managerWinget) {
 		return nil
 	}
 	actualSID, err := currentUserSID()
@@ -621,7 +618,7 @@ func runElevatedPackageUpdateBatch(ctx context.Context, packages []Package, prog
 	return response.Results, response.Result
 }
 
-func packageBatchIncludesManager(packages []Package, manager string) bool {
+func packageUpdateBatchIncludesManager(packages []Package, manager string) bool {
 	for _, pkg := range packages {
 		if pkg.Manager == manager {
 			return true
@@ -654,7 +651,7 @@ func appendWorkerResultLogsContext(ctx context.Context, result CommandResult) {
 	}
 }
 
-func parseUint32(value string) (uint32, error) {
+func parseRequiredUint32(value string) (uint32, error) {
 	var parsed uint64
 	if value == "" {
 		return 0, errors.New("uint32 value is required")

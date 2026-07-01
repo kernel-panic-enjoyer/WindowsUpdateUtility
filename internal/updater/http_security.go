@@ -22,7 +22,7 @@ func setSecurityHeaders(w http.ResponseWriter) {
 	header.Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; connect-src 'self'; script-src 'self'; style-src 'self'")
 }
 
-func (app *App) expectedPort() int {
+func (app *App) expectedListenPort() int {
 	if app.listenPort != 0 {
 		return app.listenPort
 	}
@@ -33,49 +33,50 @@ func (app *App) trustedHost(r *http.Request) bool {
 	if app.listenHost == "" && app.listenPort == 0 {
 		return true
 	}
-	host := strings.TrimSpace(r.Host)
-	if host == "" {
+	hostHeader := strings.TrimSpace(r.Host)
+	if hostHeader == "" {
 		return false
 	}
-	name, portText, err := net.SplitHostPort(host)
+	hostName, portText, err := net.SplitHostPort(hostHeader)
 	if err != nil {
-		name = host
+		hostName = hostHeader
 		portText = ""
 	}
-	name = strings.Trim(strings.ToLower(name), "[]")
-	if !isLoopbackHostName(name) {
+	hostName = strings.Trim(strings.ToLower(hostName), "[]")
+	if !isLoopbackHostName(hostName) {
 		return false
 	}
+	expectedPort := app.expectedListenPort()
 	if portText == "" {
-		return app.expectedPort() == 80
+		return expectedPort == 80
 	}
-	port, err := strconv.Atoi(portText)
-	return err == nil && port == app.expectedPort()
+	requestPort, err := strconv.Atoi(portText)
+	return err == nil && requestPort == expectedPort
 }
 
-func isLoopbackHostName(host string) bool {
-	switch host {
+func isLoopbackHostName(hostName string) bool {
+	switch hostName {
 	case "localhost", "127.0.0.1", "::1":
 		return true
 	}
-	ip := net.ParseIP(host)
+	ip := net.ParseIP(hostName)
 	return ip != nil && ip.IsLoopback()
 }
 
-func (app *App) sameOrigin(raw string) bool {
-	origin, err := url.Parse(raw)
-	if err != nil || origin.Scheme != "http" || origin.Host == "" {
+func (app *App) sameOrigin(originHeader string) bool {
+	originURL, err := url.Parse(originHeader)
+	if err != nil || originURL.Scheme != "http" || originURL.Host == "" {
 		return false
 	}
-	request := &http.Request{Host: origin.Host}
+	request := &http.Request{Host: originURL.Host}
 	return app.trustedHost(request)
 }
 
-func constantTokenEqual(got, want string) bool {
-	if got == "" || want == "" {
+func tokensEqualConstantTime(providedToken, expectedToken string) bool {
+	if providedToken == "" || expectedToken == "" {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+	return subtle.ConstantTimeCompare([]byte(providedToken), []byte(expectedToken)) == 1
 }
 
 func (app *App) sessionOK(r *http.Request) bool {
@@ -83,7 +84,7 @@ func (app *App) sessionOK(r *http.Request) bool {
 	if err != nil {
 		return false
 	}
-	return constantTokenEqual(cookie.Value, app.sessionToken)
+	return tokensEqualConstantTime(cookie.Value, app.sessionToken)
 }
 
 func (app *App) setSessionCookie(w http.ResponseWriter) {
@@ -97,7 +98,7 @@ func (app *App) setSessionCookie(w http.ResponseWriter) {
 }
 
 func (app *App) consumeBootstrapToken(token string) bool {
-	if !constantTokenEqual(token, app.token) {
+	if !tokensEqualConstantTime(token, app.token) {
 		return false
 	}
 	app.mu.Lock()
@@ -109,46 +110,48 @@ func (app *App) consumeBootstrapToken(token string) bool {
 	return true
 }
 
-func cleanURLWithoutToken(r *http.Request) string {
-	values := r.URL.Query()
-	values.Del("token")
-	next := r.URL.Path
-	if next == "" {
-		next = "/"
+func redirectPathWithoutBootstrapToken(r *http.Request) string {
+	query := r.URL.Query()
+	query.Del("token")
+	redirectPath := r.URL.Path
+	if redirectPath == "" {
+		redirectPath = "/"
 	}
-	if encoded := values.Encode(); encoded != "" {
-		next += "?" + encoded
+	if encodedQuery := query.Encode(); encodedQuery != "" {
+		redirectPath += "?" + encodedQuery
 	}
-	return next
+	return redirectPath
 }
 
 func (app *App) handleBootstrap(w http.ResponseWriter, r *http.Request) bool {
-	token := r.URL.Query().Get("token")
-	if token == "" || r.URL.Path != "/" {
+	bootstrapToken := r.URL.Query().Get("token")
+	if bootstrapToken == "" || r.URL.Path != "/" {
 		return false
 	}
+	redirectPath := redirectPathWithoutBootstrapToken(r)
 	if app.sessionOK(r) {
-		http.Redirect(w, r, cleanURLWithoutToken(r), http.StatusSeeOther)
+		http.Redirect(w, r, redirectPath, http.StatusSeeOther)
 		return true
 	}
-	if r.Method != http.MethodGet || !app.consumeBootstrapToken(token) {
+	if r.Method != http.MethodGet || !app.consumeBootstrapToken(bootstrapToken) {
 		return false
 	}
 	app.setSessionCookie(w)
-	http.Redirect(w, r, cleanURLWithoutToken(r), http.StatusSeeOther)
+	http.Redirect(w, r, redirectPath, http.StatusSeeOther)
 	return true
 }
 
-func requestIsMutating(r *http.Request) bool {
+func isMutatingRequest(r *http.Request) bool {
 	return r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions
 }
 
 func (app *App) requestBoundaryOK(w http.ResponseWriter, r *http.Request) bool {
-	if !requestIsMutating(r) {
+	if !isMutatingRequest(r) {
 		return true
 	}
-	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" && !app.sameOrigin(origin) {
-		if !(strings.EqualFold(origin, "null") && app.trustedUIRequest(r)) {
+	if originHeader := strings.TrimSpace(r.Header.Get("Origin")); originHeader != "" && !app.sameOrigin(originHeader) {
+		trustedNullOriginRequest := strings.EqualFold(originHeader, "null") && app.trustedUIRequest(r)
+		if !trustedNullOriginRequest {
 			writeAPIError(w, http.StatusForbidden, "forbidden origin")
 			return false
 		}

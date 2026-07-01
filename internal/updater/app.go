@@ -48,10 +48,10 @@ type AsyncSnapshot struct {
 	Error     string `json:"error,omitempty"`
 }
 
-func asyncSnapshot(loading bool, fetchedAt time.Time, errText string) AsyncSnapshot {
-	snapshot := AsyncSnapshot{Loading: loading, Error: errText}
-	if !fetchedAt.IsZero() {
-		snapshot.UpdatedAt = fetchedAt.UTC().Truncate(time.Second).Format(time.RFC3339)
+func asyncSnapshot(loading bool, updatedAt time.Time, errorText string) AsyncSnapshot {
+	snapshot := AsyncSnapshot{Loading: loading, Error: errorText}
+	if !updatedAt.IsZero() {
+		snapshot.UpdatedAt = updatedAt.UTC().Truncate(time.Second).Format(time.RFC3339)
 	}
 	return snapshot
 }
@@ -120,20 +120,20 @@ func (app *App) isShuttingDown() bool {
 	return app.shuttingDown
 }
 
-func (app *App) startBackgroundWork(name string, run func(context.Context)) bool {
+func (app *App) startBackgroundWork(workName string, runWork func(context.Context)) bool {
 	app.lifecycleMu.Lock()
 	if app.shuttingDown {
 		app.lifecycleMu.Unlock()
-		appLog("Skipping %s because shutdown is in progress.", name)
+		appLog("Skipping %s because shutdown is in progress.", workName)
 		return false
 	}
-	ctx := app.ensureRootContextLocked()
+	rootCtx := app.ensureRootContextLocked()
 	app.backgroundWg.Add(1)
 	app.lifecycleMu.Unlock()
 
 	go func() {
 		defer app.backgroundWg.Done()
-		run(ctx)
+		runWork(rootCtx)
 	}()
 	return true
 }
@@ -155,17 +155,17 @@ func (app *App) beginShutdown() {
 }
 
 func (app *App) waitForBackgroundWork(timeout time.Duration) bool {
-	done := make(chan struct{})
+	backgroundDone := make(chan struct{})
 	go func() {
 		app.backgroundWg.Wait()
-		close(done)
+		close(backgroundDone)
 	}()
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
+	timeoutTimer := time.NewTimer(timeout)
+	defer timeoutTimer.Stop()
 	select {
-	case <-done:
+	case <-backgroundDone:
 		return true
-	case <-timer.C:
+	case <-timeoutTimer.C:
 		return false
 	}
 }
@@ -181,25 +181,27 @@ func (app *App) addShutdownCleanup(cleanup func()) {
 
 func (app *App) runShutdownCleanups() {
 	app.shutdownCleanupMu.Lock()
-	cleanups := append([]func(){}, app.shutdownCleanups...)
+	pendingCleanups := append([]func(){}, app.shutdownCleanups...)
 	app.shutdownCleanups = nil
 	app.shutdownCleanupMu.Unlock()
 
-	for i := len(cleanups) - 1; i >= 0; i-- {
-		func(cleanup func()) {
-			defer func() {
-				if recovered := recover(); recovered != nil {
-					appLog("Shutdown cleanup failed: %v", recovered)
-				}
-			}()
-			cleanup()
-		}(cleanups[i])
+	runCleanup := func(cleanup func()) {
+		defer func() {
+			if panicValue := recover(); panicValue != nil {
+				appLog("Shutdown cleanup failed: %v", panicValue)
+			}
+		}()
+		cleanup()
+	}
+
+	for cleanupIndex := len(pendingCleanups) - 1; cleanupIndex >= 0; cleanupIndex-- {
+		runCleanup(pendingCleanups[cleanupIndex])
 	}
 }
 
-func (app *App) requestShutdown(source string) {
+func (app *App) requestShutdown(requestSource string) {
 	app.shutdownOnce.Do(func() {
-		appLog("%s quit requested.", source)
+		appLog("%s quit requested.", requestSource)
 		app.beginShutdown()
 		if !app.waitForBackgroundWork(gracefulShutdownTimeout) {
 			appLog("Shutdown timed out waiting for background work.")
@@ -208,10 +210,10 @@ func (app *App) requestShutdown(source string) {
 		if app.server == nil {
 			return
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
 		defer cancel()
-		if err := app.server.Shutdown(ctx); err != nil {
-			appLog("Graceful shutdown failed: %s; forcing server close.", err)
+		if shutdownErr := app.server.Shutdown(shutdownCtx); shutdownErr != nil {
+			appLog("Graceful shutdown failed: %s; forcing server close.", shutdownErr)
 			_ = app.server.Close()
 		}
 	})

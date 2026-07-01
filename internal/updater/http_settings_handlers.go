@@ -6,124 +6,128 @@ import (
 	"strings"
 )
 
-func setThemePreference(theme string) (State, error) {
-	store, err := defaultStateStore()
+func setThemePreference(requestedTheme string) (State, error) {
+	stateStore, err := defaultStateStore()
 	if err != nil {
 		return State{}, err
 	}
-	return setThemePreferenceWithStore(context.Background(), store, theme)
+	return setThemePreferenceWithStore(context.Background(), stateStore, requestedTheme)
 }
 
-func setThemePreferenceWithStore(ctx context.Context, store StateStore, theme string) (State, error) {
-	return store.Update(ctx, func(state *State) error {
-		if theme == "light" {
-			state.Theme = "light"
-		} else {
-			state.Theme = "dark"
-		}
+func setThemePreferenceWithStore(ctx context.Context, stateStore StateStore, requestedTheme string) (State, error) {
+	themePreference := "dark"
+	if requestedTheme == "light" {
+		themePreference = "light"
+	}
+	return stateStore.Update(ctx, func(state *State) error {
+		state.Theme = themePreference
 		return nil
 	})
 }
 
-func setAppUpdatePromptSuppressedVersion(version string) (State, error) {
-	store, err := defaultStateStore()
+func setAppUpdatePromptDismissedVersion(dismissedVersion string) (State, error) {
+	stateStore, err := defaultStateStore()
 	if err != nil {
 		return State{}, err
 	}
-	return setAppUpdatePromptSuppressedVersionWithStore(context.Background(), store, version)
+	return setAppUpdatePromptDismissedVersionWithStore(context.Background(), stateStore, dismissedVersion)
 }
 
-func setAppUpdatePromptSuppressedVersionWithStore(ctx context.Context, store StateStore, version string) (State, error) {
-	version = strings.TrimSpace(version)
-	return store.Update(ctx, func(state *State) error {
-		state.AppUpdatePromptDismissedVersion = version
+func setAppUpdatePromptDismissedVersionWithStore(ctx context.Context, stateStore StateStore, dismissedVersion string) (State, error) {
+	dismissedVersion = strings.TrimSpace(dismissedVersion)
+	return stateStore.Update(ctx, func(state *State) error {
+		state.AppUpdatePromptDismissedVersion = dismissedVersion
 		return nil
 	})
 }
 
 func parseStartupRequest(r *http.Request) (bool, *CommandResult) {
 	if requestIsJSON(r) {
-		var payload struct {
+		var startupSettings struct {
 			Enabled *bool `json:"enabled"`
 		}
-		if err := decodeJSONRequest(r, &payload); err != nil {
+		if err := decodeJSONRequest(r, &startupSettings); err != nil {
 			result := validationCommandResult("startup settings", err)
 			return false, &result
 		}
-		if payload.Enabled == nil {
+		if startupSettings.Enabled == nil {
 			return false, nil
 		}
-		return *payload.Enabled, nil
+		return *startupSettings.Enabled, nil
 	}
 	_ = r.ParseForm()
-	enabled, _ := formBool(r, "enabled")
-	return enabled, nil
+	startupEnabled, _ := formBool(r, "enabled")
+	return startupEnabled, nil
 }
 
 func parseAutoUpdateRequest(r *http.Request) (*bool, []string, *bool, *CommandResult) {
 	if requestIsJSON(r) {
-		var payload struct {
+		var autoUpdateSettings struct {
 			Global         *bool            `json:"global"`
 			PackageKey     oneOrManyStrings `json:"package_key"`
 			PackageKeys    oneOrManyStrings `json:"package_keys"`
 			PackageEnabled *bool            `json:"package_enabled"`
 		}
-		if err := decodeJSONRequest(r, &payload); err != nil {
+		if err := decodeJSONRequest(r, &autoUpdateSettings); err != nil {
 			result := validationCommandResult("auto-update settings", err)
 			return nil, nil, nil, &result
 		}
-		return payload.Global, combineStringLists(payload.PackageKey, payload.PackageKeys), payload.PackageEnabled, nil
+		packageKeys := combineStringLists(autoUpdateSettings.PackageKey, autoUpdateSettings.PackageKeys)
+		return autoUpdateSettings.Global, packageKeys, autoUpdateSettings.PackageEnabled, nil
 	}
 	_ = r.ParseForm()
-	var global *bool
+	var globalAutoUpdateEnabled *bool
 	if value, ok := formBool(r, "global"); ok {
-		global = &value
+		globalAutoUpdateEnabled = &value
 	}
-	var packageEnabled *bool
+	var packageAutoUpdateEnabled *bool
 	if value, ok := formBool(r, "package_enabled"); ok {
-		packageEnabled = &value
+		packageAutoUpdateEnabled = &value
 	}
-	return global, r.Form["package_key"], packageEnabled, nil
+	return globalAutoUpdateEnabled, r.Form["package_key"], packageAutoUpdateEnabled, nil
 }
 
 func parseThemeRequest(r *http.Request) (string, error) {
 	if requestIsJSON(r) {
-		var payload struct {
+		var themeSettings struct {
 			Theme string `json:"theme"`
 		}
-		if err := decodeJSONRequest(r, &payload); err != nil {
+		if err := decodeJSONRequest(r, &themeSettings); err != nil {
 			return "", err
 		}
-		return payload.Theme, nil
+		return themeSettings.Theme, nil
 	}
 	_ = r.ParseForm()
 	return r.Form.Get("theme"), nil
 }
 
 func parseAppUpdatePromptRequest(r *http.Request) (string, error) {
+	var dismissedVersion string
 	if requestIsJSON(r) {
-		var payload struct {
+		var appUpdatePromptSettings struct {
 			Version string `json:"version"`
 		}
-		if err := decodeJSONRequest(r, &payload); err != nil {
+		if err := decodeJSONRequest(r, &appUpdatePromptSettings); err != nil {
 			return "", err
 		}
-		return strings.TrimSpace(payload.Version), nil
+		dismissedVersion = appUpdatePromptSettings.Version
+	} else {
+		_ = r.ParseForm()
+		dismissedVersion = r.Form.Get("version")
 	}
-	_ = r.ParseForm()
-	return strings.TrimSpace(r.Form.Get("version")), nil
+	return strings.TrimSpace(dismissedVersion), nil
 }
 
 func (app *App) handleStartupSettingsAPI(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
-	enabled, invalid := parseStartupRequest(r)
-	if invalid != nil {
-		writeJSON(w, http.StatusBadRequest, commandResponse(*invalid))
+	startupEnabled, validationFailure := parseStartupRequest(r)
+	if validationFailure != nil {
+		writeJSON(w, http.StatusBadRequest, commandResponse(*validationFailure))
 		return
 	}
-	result := setStartup(enabled)
+	result := setStartup(startupEnabled)
 	app.refreshStatus(true)
 	writeJSON(w, http.StatusOK, commandResponse(result))
 }
@@ -132,12 +136,12 @@ func (app *App) handleAutoUpdateSettingsAPI(w http.ResponseWriter, r *http.Reque
 	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
-	global, packageKeys, packageEnabled, invalid := parseAutoUpdateRequest(r)
-	if invalid != nil {
-		writeJSON(w, http.StatusBadRequest, commandResponse(*invalid))
+	globalAutoUpdateEnabled, packageKeys, packageAutoUpdateEnabled, validationFailure := parseAutoUpdateRequest(r)
+	if validationFailure != nil {
+		writeJSON(w, http.StatusBadRequest, commandResponse(*validationFailure))
 		return
 	}
-	state, result := setAutoUpdate(global, packageKeys, packageEnabled)
+	state, result := setAutoUpdate(globalAutoUpdateEnabled, packageKeys, packageAutoUpdateEnabled)
 	app.refreshStatus(true)
 	writeJSON(w, http.StatusOK, settingsCommandResponse(state, result))
 }
@@ -163,12 +167,12 @@ func (app *App) handleAppUpdatePromptSettingsAPI(w http.ResponseWriter, r *http.
 	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
-	version, err := parseAppUpdatePromptRequest(r)
+	dismissedVersion, err := parseAppUpdatePromptRequest(r)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	state, err := setAppUpdatePromptSuppressedVersion(version)
+	state, err := setAppUpdatePromptDismissedVersion(dismissedVersion)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return

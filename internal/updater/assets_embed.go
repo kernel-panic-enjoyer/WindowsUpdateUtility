@@ -7,6 +7,8 @@ import (
 	_ "embed"
 )
 
+const assetVersionHexLength = 12
+
 //go:embed assets/app.ico
 var appIconICO []byte
 
@@ -17,13 +19,17 @@ var uiCSS string
 var uiJS string
 
 func appIconVersion() string {
-	sum := sha256.Sum256(appIconICO)
-	return hex.EncodeToString(sum[:])[:12]
+	iconDigest := sha256.Sum256(appIconICO)
+	return shortAssetVersion(iconDigest[:])
 }
 
 func frontendAssetVersion() string {
-	hash := sha256.New()
-	_, _ = hash.Write([]byte(uiCSS))
-	_, _ = hash.Write([]byte(uiJS))
-	return hex.EncodeToString(hash.Sum(nil))[:12]
+	assetDigest := sha256.New()
+	_, _ = assetDigest.Write([]byte(uiCSS))
+	_, _ = assetDigest.Write([]byte(uiJS))
+	return shortAssetVersion(assetDigest.Sum(nil))
+}
+
+func shortAssetVersion(digest []byte) string {
+	return hex.EncodeToString(digest)[:assetVersionHexLength]
 }

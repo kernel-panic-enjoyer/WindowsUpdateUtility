@@ -5,26 +5,27 @@ import (
 	"os/exec"
 )
 
-func waitForStartedCommand(ctx context.Context, cmd *exec.Cmd, owner *commandProcessOwner) error {
-	done := make(chan error, 1)
+func waitForStartedCommand(ctx context.Context, startedCommand *exec.Cmd, processOwner *commandProcessOwner) error {
+	waitResult := make(chan error, 1)
 	go func() {
-		done <- cmd.Wait()
+		waitResult <- startedCommand.Wait()
 	}()
 	select {
-	case err := <-done:
+	case err := <-waitResult:
 		return err
 	case <-ctx.Done():
-		terminateStartedCommand(cmd, owner)
-		return <-done
+		terminateStartedCommand(startedCommand, processOwner)
+		return <-waitResult
 	}
 }
 
-func terminateStartedCommand(cmd *exec.Cmd, owner *commandProcessOwner) {
-	if owner != nil {
-		owner.Terminate()
+func terminateStartedCommand(startedCommand *exec.Cmd, processOwner *commandProcessOwner) {
+	if processOwner != nil {
+		processOwner.Terminate()
 		return
 	}
-	if cmd != nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
+	if startedCommand == nil || startedCommand.Process == nil {
+		return
 	}
+	_ = startedCommand.Process.Kill()
 }

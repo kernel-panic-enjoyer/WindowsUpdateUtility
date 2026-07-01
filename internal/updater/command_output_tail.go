@@ -11,98 +11,99 @@ import (
 // produced; this limit only caps per-result JSON/job retention.
 const commandResultStreamLimitBytes = 2 * 1024 * 1024
 
-type boundedOutputTail struct {
-	limit   int
-	buffer  []byte
-	omitted int64
+type boundedCommandOutputTail struct {
+	limitBytes    int
+	retainedBytes []byte
+	omittedBytes  int64
 }
 
-func newBoundedOutputTail(limit int) *boundedOutputTail {
-	return &boundedOutputTail{limit: limit}
+func newBoundedOutputTail(limitBytes int) *boundedCommandOutputTail {
+	return &boundedCommandOutputTail{limitBytes: limitBytes}
 }
 
-func (tail *boundedOutputTail) Write(data []byte) (int, error) {
-	written := len(data)
-	if written == 0 {
+func (tail *boundedCommandOutputTail) Write(chunk []byte) (int, error) {
+	chunkLen := len(chunk)
+	if chunkLen == 0 {
 		return 0, nil
 	}
-	if tail.limit <= 0 {
-		tail.omitted += int64(written)
-		return written, nil
+	if tail.limitBytes <= 0 {
+		tail.omittedBytes += int64(chunkLen)
+		return chunkLen, nil
 	}
-	if len(data) >= tail.limit {
-		tail.omitted += int64(len(tail.buffer) + len(data) - tail.limit)
-		tail.buffer = append(tail.buffer[:0], data[len(data)-tail.limit:]...)
-		return written, nil
+	if chunkLen >= tail.limitBytes {
+		tail.omittedBytes += int64(len(tail.retainedBytes) + chunkLen - tail.limitBytes)
+		tail.retainedBytes = append(tail.retainedBytes[:0], chunk[chunkLen-tail.limitBytes:]...)
+		return chunkLen, nil
 	}
-	overflow := len(tail.buffer) + len(data) - tail.limit
-	if overflow > 0 {
-		tail.omitted += int64(overflow)
-		copy(tail.buffer, tail.buffer[overflow:])
-		tail.buffer = tail.buffer[:len(tail.buffer)-overflow]
+	overflowBytes := len(tail.retainedBytes) + chunkLen - tail.limitBytes
+	if overflowBytes > 0 {
+		tail.omittedBytes += int64(overflowBytes)
+		copy(tail.retainedBytes, tail.retainedBytes[overflowBytes:])
+		tail.retainedBytes = tail.retainedBytes[:len(tail.retainedBytes)-overflowBytes]
 	}
-	tail.buffer = append(tail.buffer, data...)
-	return written, nil
+	tail.retainedBytes = append(tail.retainedBytes, chunk...)
+	return chunkLen, nil
 }
 
-func (tail *boundedOutputTail) String() string {
-	output := validUTF8TailString([]byte(decodeCommandOutputBytes(tail.buffer)))
-	if tail.omitted == 0 {
-		return output
+func (tail *boundedCommandOutputTail) String() string {
+	retainedText := validUTF8TailString([]byte(decodeCommandOutputBytes(tail.retainedBytes)))
+	if tail.omittedBytes == 0 {
+		return retainedText
 	}
-	marker := fmt.Sprintf("[output truncated: omitted %d bytes]\n", tail.omitted)
-	return marker + output
+	truncationNotice := fmt.Sprintf("[output truncated: omitted %d bytes]\n", tail.omittedBytes)
+	return truncationNotice + retainedText
 }
 
-func validUTF8TailString(data []byte) string {
-	if len(data) == 0 {
+func validUTF8TailString(tailBytes []byte) string {
+	if len(tailBytes) == 0 {
 		return ""
 	}
-	if utf8.Valid(data) {
-		return string(data)
+	if utf8.Valid(tailBytes) {
+		return string(tailBytes)
 	}
-	trimmed := data
-	for len(trimmed) > 0 {
-		r, size := utf8.DecodeRune(trimmed)
-		if r != utf8.RuneError || size > 1 || trimmed[0] < utf8.RuneSelf {
+	utf8AlignedTail := tailBytes
+	for len(utf8AlignedTail) > 0 {
+		r, size := utf8.DecodeRune(utf8AlignedTail)
+		startsWithInvalidUTF8Byte := r == utf8.RuneError && size == 1 && utf8AlignedTail[0] >= utf8.RuneSelf
+		if !startsWithInvalidUTF8Byte {
 			break
 		}
-		trimmed = trimmed[1:]
+		utf8AlignedTail = utf8AlignedTail[1:]
 	}
-	return strings.ToValidUTF8(string(trimmed), "")
+	return strings.ToValidUTF8(string(utf8AlignedTail), "")
 }
 
-func compactCommandResult(result CommandResult, streamLimit, commandLimit int) CommandResult {
-	if streamLimit <= 0 {
-		streamLimit = commandResultStreamLimitBytes
+func compactCommandResult(result CommandResult, streamLimitBytes, commandLimitBytes int) CommandResult {
+	if streamLimitBytes <= 0 {
+		streamLimitBytes = commandResultStreamLimitBytes
 	}
-	if commandLimit <= 0 {
-		commandLimit = maxCommandResultCommandBytes
+	if commandLimitBytes <= 0 {
+		commandLimitBytes = maxCommandResultCommandBytes
 	}
-	result.Command = truncateCommandField(result.Command, commandLimit)
-	result.Stdout = boundCommandText(result.Stdout, streamLimit)
-	result.Stderr = boundCommandText(result.Stderr, streamLimit)
+	result.Command = truncateCommandField(result.Command, commandLimitBytes)
+	result.Stdout = boundCommandText(result.Stdout, streamLimitBytes)
+	result.Stderr = boundCommandText(result.Stderr, streamLimitBytes)
 	return result
 }
 
-func truncateCommandField(value string, limit int) string {
-	if limit <= 0 || len(value) <= limit {
-		return value
+func truncateCommandField(commandText string, limitBytes int) string {
+	if limitBytes <= 0 || len(commandText) <= limitBytes {
+		return commandText
 	}
-	omitted := len(value) - limit
-	marker := fmt.Sprintf("[command truncated: omitted %d bytes]\n", omitted)
-	keep := limit - len(marker)
-	if keep < 0 {
-		keep = 0
+	omittedBytes := len(commandText) - limitBytes
+	truncationNotice := fmt.Sprintf("[command truncated: omitted %d bytes]\n", omittedBytes)
+	keepBytes := limitBytes - len(truncationNotice)
+	if keepBytes < 0 {
+		keepBytes = 0
 	}
-	return marker + validUTF8TailString([]byte(value[len(value)-keep:]))
+	return truncationNotice + validUTF8TailString([]byte(commandText[len(commandText)-keepBytes:]))
 }
 
-func boundCommandText(value string, limit int) string {
-	if limit <= 0 || len(value) <= limit {
-		return value
+func boundCommandText(streamText string, limitBytes int) string {
+	if limitBytes <= 0 || len(streamText) <= limitBytes {
+		return streamText
 	}
-	tail := newBoundedOutputTail(limit)
-	_, _ = tail.Write([]byte(value))
-	return tail.String()
+	retainedTail := newBoundedOutputTail(limitBytes)
+	_, _ = retainedTail.Write([]byte(streamText))
+	return retainedTail.String()
 }

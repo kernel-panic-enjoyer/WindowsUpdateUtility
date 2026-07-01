@@ -28,36 +28,42 @@ func getInventory() Inventory {
 }
 
 func getInventoryContext(ctx context.Context) Inventory {
-	state := loadStateContext(ctx)
-	managers := detectManagersContext(ctx)
-	commandResults := map[string]CommandResult{}
-	var packages []Package
-	storeUpdateVersions := map[string]string{}
+	persistedState := loadStateContext(ctx)
+	managerStatuses := detectManagersContext(ctx)
+	commandResultsByKey := map[string]CommandResult{}
+	var inventoryPackages []Package
 
-	inputs := collectInventoryInputs(ctx, managers)
-	commandResults["appx_inventory"] = inputs.appxResult
-	if inputs.storePackagedResult.Command != "" {
-		commandResults["native_store_inventory"] = inputs.storePackagedResult
+	collectedInputs := collectInventoryInputs(ctx, managerStatuses)
+	commandResultsByKey["appx_inventory"] = collectedInputs.appxResult
+	if collectedInputs.storePackagedResult.Command != "" {
+		commandResultsByKey["native_store_inventory"] = collectedInputs.storePackagedResult
 	}
-	for _, inventory := range inputs.managerInventories {
-		commandResults[inventory.listKey] = inventory.listResult
-		commandResults[inventory.updateKey] = inventory.updateResult
-		packages = append(packages, packagesFromManagerInventory(state, inventory)...)
-	}
-
-	if inputs.appxResult.OK || len(inputs.appxPackages) > 0 {
-		packages = mergeAppxInventoryPackages(&state, managers, commandResults, packages, inputs.appxPackages, storeUpdateVersions)
+	for _, managerSnapshot := range collectedInputs.managerInventories {
+		commandResultsByKey[managerSnapshot.listKey] = managerSnapshot.listResult
+		commandResultsByKey[managerSnapshot.updateKey] = managerSnapshot.updateResult
+		inventoryPackages = append(inventoryPackages, packagesFromManagerInventory(persistedState, managerSnapshot)...)
 	}
 
-	sourceCounts := managedScanSourceCounts(state)
-	inventory := Inventory{
+	if collectedInputs.appxResult.OK || len(collectedInputs.appxPackages) > 0 {
+		inventoryPackages = mergeAppxInventoryPackages(
+			&persistedState,
+			managerStatuses,
+			commandResultsByKey,
+			inventoryPackages,
+			collectedInputs.appxPackages,
+			map[string]string{},
+		)
+	}
+
+	managedSourceCounts := managedScanSourceCounts(persistedState)
+	result := Inventory{
 		PackageLookup: PackageLookup{
-			Packages:       packages,
-			Managers:       managers,
-			CommandResults: commandResults,
+			Packages:       inventoryPackages,
+			Managers:       managerStatuses,
+			CommandResults: commandResultsByKey,
 		},
-		Scan: inventoryScanSummary(state, sourceCounts),
+		Scan: inventoryScanSummary(persistedState, managedSourceCounts),
 	}
-	sortInventoryPackages(inventory.Packages)
-	return inventory
+	sortInventoryPackages(result.Packages)
+	return result
 }

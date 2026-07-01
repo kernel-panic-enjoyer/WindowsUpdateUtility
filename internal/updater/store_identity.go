@@ -2,45 +2,50 @@ package updater
 
 import "strings"
 
-func stableStoreActionID(id string) string {
-	id = strings.TrimSpace(id)
-	if before, _, ok := strings.Cut(id, "_"); ok && strings.Contains(before, ".") {
-		return before
+func stableStoreActionID(actionID string) string {
+	actionID = strings.TrimSpace(actionID)
+	if packageName, _, ok := strings.Cut(actionID, "_"); ok && strings.Contains(packageName, ".") {
+		return packageName
 	}
-	return id
+	return actionID
 }
 
 func stableScannedStoreAppID(key string, app ScannedApp) string {
-	for _, value := range []string{app.PackageID, strings.TrimPrefix(key, "store:"), app.InstallLocation} {
-		value = strings.TrimSpace(value)
-		if value == "" {
+	scanIdentityCandidates := []string{
+		app.PackageID,
+		strings.TrimPrefix(key, "store:"),
+		app.InstallLocation,
+	}
+	for _, candidateIdentity := range scanIdentityCandidates {
+		candidateIdentity = strings.TrimSpace(candidateIdentity)
+		if candidateIdentity == "" {
 			continue
 		}
-		return stableStoreScanIdentity(value)
+		return stableStoreScanIdentity(candidateIdentity)
 	}
 	return ""
 }
 
 func stableStoreScanIdentity(value string) string {
-	stableID := stableAppxIdentity(value)
-	if stableID == "" {
+	familyCandidate := stableAppxFamilyCandidate(value)
+	if familyCandidate == "" {
 		return ""
 	}
-	return stableStoreActionID(stableID)
+	return stableStoreActionID(familyCandidate)
 }
 
-func stableAppxIdentity(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
+func stableAppxFamilyCandidate(identity string) string {
+	identity = strings.TrimSpace(identity)
+	if identity == "" {
 		return ""
 	}
-	parts := strings.Split(value, "_")
-	if len(parts) >= 3 && looksLikeVersion(parts[1]) {
-		name := strings.TrimSpace(parts[0])
-		publisherID := strings.TrimSpace(parts[len(parts)-1])
-		if name != "" && publisherID != "" {
-			return name + "_" + publisherID
+	identityParts := strings.Split(identity, "_")
+	if len(identityParts) >= 3 && looksLikeVersion(identityParts[1]) {
+		packageName := strings.TrimSpace(identityParts[0])
+		publisherID := strings.TrimSpace(identityParts[len(identityParts)-1])
+		if packageName != "" && publisherID != "" {
+			return packageName + "_" + publisherID
 		}
 	}
-	return value
+	return identity
 }

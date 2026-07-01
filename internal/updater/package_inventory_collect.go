@@ -5,52 +5,64 @@ import (
 	"sync"
 )
 
-type managerInventoryCollector struct {
-	manager   string
-	installed func(context.Context) ([]Package, CommandResult)
-	updates   func(context.Context) (map[string]string, map[string]Package, CommandResult)
-	listKey   string
-	updateKey string
+type packageManagerInventoryCollector struct {
+	manager          string
+	collectInstalled func(context.Context) ([]Package, CommandResult)
+	collectUpdates   func(context.Context) (map[string]string, map[string]Package, CommandResult)
+	listResultKey    string
+	updateResultKey  string
 }
 
-var managerInventoryCollectors = []managerInventoryCollector{
-	{managerWinget, wingetInstalledContext, wingetUpdatesContext, "winget_list", "winget_upgrade"},
-	{managerChoco, chocoInstalledContext, chocoUpdatesContext, "choco_list", "choco_outdated"},
+var packageManagerInventoryCollectors = []packageManagerInventoryCollector{
+	{
+		manager:          managerWinget,
+		collectInstalled: wingetInstalledContext,
+		collectUpdates:   wingetUpdatesContext,
+		listResultKey:    "winget_list",
+		updateResultKey:  "winget_upgrade",
+	},
+	{
+		manager:          managerChoco,
+		collectInstalled: chocoInstalledContext,
+		collectUpdates:   chocoUpdatesContext,
+		listResultKey:    "choco_list",
+		updateResultKey:  "choco_outdated",
+	},
 }
 
 func collectManagerInventory(
 	ctx context.Context,
 	manager string,
-	installedFn func(context.Context) ([]Package, CommandResult),
-	updatesFn func(context.Context) (map[string]string, map[string]Package, CommandResult),
-	listKey string,
-	updateKey string,
+	collectInstalled func(context.Context) ([]Package, CommandResult),
+	collectUpdates func(context.Context) (map[string]string, map[string]Package, CommandResult),
+	listResultKey string,
+	updateResultKey string,
 ) managerInventory {
-	var installed []Package
+	var installedPackages []Package
 	var listResult CommandResult
-	var updates map[string]string
-	var updateDetails map[string]Package
+	var availableVersions map[string]string
+	var updateDetailsByKey map[string]Package
 	var updateResult CommandResult
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		installed, listResult = installedFn(ctx)
+		installedPackages, listResult = collectInstalled(ctx)
 	}()
 	go func() {
 		defer wg.Done()
-		updates, updateDetails, updateResult = updatesFn(ctx)
+		availableVersions, updateDetailsByKey, updateResult = collectUpdates(ctx)
 	}()
 	wg.Wait()
 	return managerInventory{
 		manager:       manager,
-		installed:     installed,
+		installed:     installedPackages,
 		listResult:    listResult,
-		updates:       updates,
-		updateDetails: updateDetails,
+		updates:       availableVersions,
+		updateDetails: updateDetailsByKey,
 		updateResult:  updateResult,
-		listKey:       listKey,
-		updateKey:     updateKey,
+		listKey:       listResultKey,
+		updateKey:     updateResultKey,
 	}
 }
 
@@ -64,26 +76,30 @@ func collectInventoryInputs(ctx context.Context, managers map[string]ManagerStat
 		defer wg.Done()
 		inputs.storePackagedInventory, inputs.storePackagedResult = collectNativeStorePackagedInventoryContext(ctx)
 	}()
-	for _, collector := range managerInventoryCollectors {
+	for _, collector := range packageManagerInventoryCollectors {
 		if !managers[collector.manager].Available {
 			continue
 		}
-		collector := collector
+		activeCollector := collector
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			inventoryCh <- collectManagerInventory(ctx, collector.manager, collector.installed, collector.updates, collector.listKey, collector.updateKey)
+			inventoryCh <- collectManagerInventory(
+				ctx,
+				activeCollector.manager,
+				activeCollector.collectInstalled,
+				activeCollector.collectUpdates,
+				activeCollector.listResultKey,
+				activeCollector.updateResultKey,
+			)
 		}()
 	}
 
 	wg.Wait()
+	inputs.appxResult = inputs.storePackagedResult
 	if inputs.storePackagedResult.OK {
 		state := loadStateContext(ctx)
 		inputs.appxPackages = packagesFromNativeStorePackagedInventory(state, inputs.storePackagedInventory)
-		inputs.appxResult = inputs.storePackagedResult
-	} else {
-		inputs.appxPackages = nil
-		inputs.appxResult = inputs.storePackagedResult
 	}
 	close(inventoryCh)
 	for inventory := range inventoryCh {

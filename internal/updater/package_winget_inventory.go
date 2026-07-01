@@ -13,43 +13,43 @@ func wingetInstalled() ([]Package, CommandResult) {
 }
 
 func wingetInstalledContext(ctx context.Context) ([]Package, CommandResult) {
-	var listResult CommandResult
-	var tablePackages []Package
-	var exportResult CommandResult
-	var exported []Package
-	exportPath := ""
+	var listCommandResult CommandResult
+	var listedPackages []Package
+	var exportCommandResult CommandResult
+	var exportedPackages []Package
+	var exportFilePath string
 	if tempDir, err := appTempDir(); err == nil {
-		if tmp, err := os.CreateTemp(tempDir, "windows-updater-winget-*.json"); err == nil {
-			exportPath = tmp.Name()
-			_ = tmp.Close()
-			_ = os.Remove(exportPath)
-			defer os.Remove(exportPath)
+		if exportFile, err := os.CreateTemp(tempDir, "windows-updater-winget-*.json"); err == nil {
+			exportFilePath = exportFile.Name()
+			_ = exportFile.Close()
+			_ = os.Remove(exportFilePath)
+			defer os.Remove(exportFilePath)
 		}
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(1)
+	var inventoryCommands sync.WaitGroup
+	inventoryCommands.Add(1)
 	go func() {
-		defer wg.Done()
-		listResult = runCommandContext(ctx, 120*time.Second, managerCommand(managerWinget, "list", "--accept-source-agreements", "--disable-interactivity")...)
-		tablePackages = parseWingetTable(listResult.Stdout + "\n" + listResult.Stderr)
+		defer inventoryCommands.Done()
+		listCommandResult = runCommandContext(ctx, 120*time.Second, managerCommand(managerWinget, "list", "--accept-source-agreements", "--disable-interactivity")...)
+		listedPackages = parseWingetTable(listCommandResult.Stdout + "\n" + listCommandResult.Stderr)
 	}()
-	if exportPath != "" {
-		wg.Add(1)
+	if exportFilePath != "" {
+		inventoryCommands.Add(1)
 		go func() {
-			defer wg.Done()
-			exportResult = runCommandContext(ctx, 180*time.Second, managerCommand(managerWinget, "export", "-o", exportPath, "--include-versions", "--accept-source-agreements", "--disable-interactivity")...)
-			exportOutput, _ := os.ReadFile(exportPath)
-			exported = parseWingetExport(string(exportOutput))
+			defer inventoryCommands.Done()
+			exportCommandResult = runCommandContext(ctx, 180*time.Second, managerCommand(managerWinget, "export", "-o", exportFilePath, "--include-versions", "--accept-source-agreements", "--disable-interactivity")...)
+			exportData, _ := os.ReadFile(exportFilePath)
+			exportedPackages = parseWingetExport(string(exportData))
 		}()
 	}
-	wg.Wait()
+	inventoryCommands.Wait()
 
-	listResult.Stderr += exportResult.Stderr
-	if len(exported) > 0 {
-		return mergeWingetExportWithTable(exported, tablePackages), listResult
+	listCommandResult.Stderr += exportCommandResult.Stderr
+	if len(exportedPackages) > 0 {
+		return mergeWingetExportWithTable(exportedPackages, listedPackages), listCommandResult
 	}
-	return tablePackages, listResult
+	return listedPackages, listCommandResult
 }
 
 func wingetUpdates() (map[string]string, map[string]Package, CommandResult) {
@@ -57,63 +57,63 @@ func wingetUpdates() (map[string]string, map[string]Package, CommandResult) {
 }
 
 func wingetUpdatesContext(ctx context.Context) (map[string]string, map[string]Package, CommandResult) {
-	updates := map[string]string{}
-	details := map[string]Package{}
-	result := runCommandContext(ctx, 120*time.Second, managerCommand(managerWinget, "upgrade", "--accept-source-agreements", "--disable-interactivity")...)
-	mergeWingetUpdateOutput(updates, details, result.Stdout+"\n"+result.Stderr, "")
-	storeResult := runCommandContext(ctx, 120*time.Second, managerCommand(managerWinget, "upgrade", "--source", sourceMSStore, "--accept-source-agreements", "--disable-interactivity")...)
-	mergeWingetUpdateOutput(updates, details, storeResult.Stdout+"\n"+storeResult.Stderr, managerStore)
-	return updates, details, mergeReadOnlyCommandResults(result, storeResult, "winget msstore update check")
+	availableVersionsByKey := map[string]string{}
+	updateDetailsByKey := map[string]Package{}
+	defaultUpgradeResult := runCommandContext(ctx, 120*time.Second, managerCommand(managerWinget, "upgrade", "--accept-source-agreements", "--disable-interactivity")...)
+	mergeWingetUpdateOutput(availableVersionsByKey, updateDetailsByKey, defaultUpgradeResult.Stdout+"\n"+defaultUpgradeResult.Stderr, "")
+	storeUpgradeResult := runCommandContext(ctx, 120*time.Second, managerCommand(managerWinget, "upgrade", "--source", sourceMSStore, "--accept-source-agreements", "--disable-interactivity")...)
+	mergeWingetUpdateOutput(availableVersionsByKey, updateDetailsByKey, storeUpgradeResult.Stdout+"\n"+storeUpgradeResult.Stderr, managerStore)
+	return availableVersionsByKey, updateDetailsByKey, mergeReadOnlyCommandResults(defaultUpgradeResult, storeUpgradeResult, "winget msstore update check")
 }
 
-func mergeWingetUpdateOutput(updates map[string]string, details map[string]Package, output, forceManager string) {
-	for _, pkg := range parseWingetTable(output) {
-		if pkg.AvailableVersion == "" {
+func mergeWingetUpdateOutput(availableVersionsByKey map[string]string, updateDetailsByKey map[string]Package, output, managerOverride string) {
+	for _, parsedPackage := range parseWingetTable(output) {
+		if parsedPackage.AvailableVersion == "" {
 			continue
 		}
-		if fallback, ok := wingetTruncatedMSIXPackage(pkg); ok {
-			pkg = fallback
-		} else if isTruncatedID(pkg.ID) {
+		if storeFallback, ok := wingetTruncatedMSIXPackage(parsedPackage); ok {
+			parsedPackage = storeFallback
+		} else if isTruncatedID(parsedPackage.ID) {
 			continue
 		}
-		manager := pkg.Manager
-		if forceManager != "" {
-			manager = forceManager
+		effectiveManager := parsedPackage.Manager
+		if managerOverride != "" {
+			effectiveManager = managerOverride
 		}
-		key := packageKey(manager, strings.ToLower(pkg.ID))
-		pkg.Key = key
-		pkg.Manager = manager
-		updates[key] = pkg.AvailableVersion
-		if details != nil {
-			details[key] = pkg
+		key := packageKey(effectiveManager, strings.ToLower(parsedPackage.ID))
+		parsedPackage.Key = key
+		parsedPackage.Manager = effectiveManager
+		availableVersionsByKey[key] = parsedPackage.AvailableVersion
+		if updateDetailsByKey != nil {
+			updateDetailsByKey[key] = parsedPackage
 		}
 	}
 }
 
-func mergeReadOnlyCommandResults(primary, secondary CommandResult, label string) CommandResult {
-	merged := primary
-	if merged.Command != "" && secondary.Command != "" {
-		merged.Command += "\n" + label + ": " + secondary.Command
-	} else if secondary.Command != "" {
-		merged.Command = secondary.Command
+func mergeReadOnlyCommandResults(primaryResult, secondaryResult CommandResult, secondaryLabel string) CommandResult {
+	mergedResult := primaryResult
+	if mergedResult.Command != "" && secondaryResult.Command != "" {
+		mergedResult.Command += "\n" + secondaryLabel + ": " + secondaryResult.Command
+	} else if secondaryResult.Command != "" {
+		mergedResult.Command = secondaryResult.Command
 	}
-	merged.Stdout = strings.TrimRight(primary.Stdout, "\r\n")
-	if merged.Stdout != "" && secondary.Stdout != "" {
-		merged.Stdout += "\n"
+	mergedResult.Stdout = appendReadOnlyCommandOutput(primaryResult.Stdout, secondaryResult.Stdout)
+	mergedResult.Stderr = appendReadOnlyCommandOutput(primaryResult.Stderr, secondaryResult.Stderr)
+	if primaryResult.OK || secondaryResult.OK {
+		mergedResult.OK = true
+		mergedResult.Code = 0
+		return mergedResult
 	}
-	merged.Stdout += secondary.Stdout
-	merged.Stderr = strings.TrimRight(primary.Stderr, "\r\n")
-	if merged.Stderr != "" && secondary.Stderr != "" {
-		merged.Stderr += "\n"
+	if secondaryResult.Code != 0 {
+		mergedResult.Code = secondaryResult.Code
 	}
-	merged.Stderr += secondary.Stderr
-	if primary.OK || secondary.OK {
-		merged.OK = true
-		merged.Code = 0
-		return merged
+	return mergedResult
+}
+
+func appendReadOnlyCommandOutput(primaryOutput, secondaryOutput string) string {
+	mergedOutput := strings.TrimRight(primaryOutput, "\r\n")
+	if mergedOutput != "" && secondaryOutput != "" {
+		mergedOutput += "\n"
 	}
-	if secondary.Code != 0 {
-		merged.Code = secondary.Code
-	}
-	return merged
+	return mergedOutput + secondaryOutput
 }

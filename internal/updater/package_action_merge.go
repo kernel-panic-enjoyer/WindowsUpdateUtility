@@ -2,18 +2,18 @@ package updater
 
 import "strings"
 
-func mergeCommandAttemptsWithFinalResult(priorAttempt, finalAttempt CommandResult, label string) CommandResult {
-	merged := finalAttempt
-	merged.Command = priorAttempt.Command + "\n" + label + ": " + finalAttempt.Command
-	merged.Stdout = strings.TrimRight(priorAttempt.Stdout, "\r\n")
-	if merged.Stdout != "" && finalAttempt.Stdout != "" {
-		merged.Stdout += "\n"
+func mergeCommandAttemptsWithFinalResult(previousAttempt, finalAttempt CommandResult, finalAttemptLabel string) CommandResult {
+	mergedResult := finalAttempt
+	mergedResult.Command = previousAttempt.Command + "\n" + finalAttemptLabel + ": " + finalAttempt.Command
+	mergedResult.Stdout = mergeCommandAttemptOutput(previousAttempt.Stdout, finalAttempt.Stdout)
+	mergedResult.Stderr = mergeCommandAttemptOutput(previousAttempt.Stderr, finalAttempt.Stderr)
+	return compactCommandResult(mergedResult, commandResultStreamLimitBytes, maxCommandResultCommandBytes)
+}
+
+func mergeCommandAttemptOutput(previousOutput, finalOutput string) string {
+	previousOutput = strings.TrimRight(previousOutput, "\r\n")
+	if previousOutput != "" && finalOutput != "" {
+		return previousOutput + "\n" + finalOutput
 	}
-	merged.Stdout += finalAttempt.Stdout
-	merged.Stderr = strings.TrimRight(priorAttempt.Stderr, "\r\n")
-	if merged.Stderr != "" && finalAttempt.Stderr != "" {
-		merged.Stderr += "\n"
-	}
-	merged.Stderr += finalAttempt.Stderr
-	return compactCommandResult(merged, commandResultStreamLimitBytes, maxCommandResultCommandBytes)
+	return previousOutput + finalOutput
 }

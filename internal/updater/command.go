@@ -9,7 +9,11 @@ import (
 	"time"
 )
 
-const commandCancelledCode = 130
+const (
+	commandTimeoutCode       = 124
+	commandCancelledCode     = 130
+	commandLaunchFailureCode = 127
+)
 
 type CommandResult struct {
 	OK      bool   `json:"ok"`
@@ -27,131 +31,129 @@ func runCommand(timeout time.Duration, args ...string) CommandResult {
 	return runCommandContext(context.Background(), timeout, args...)
 }
 
-func runCommandContext(parent context.Context, timeout time.Duration, args ...string) CommandResult {
+func runCommandContext(parentCtx context.Context, timeout time.Duration, args ...string) CommandResult {
 	result := CommandResult{Command: strings.Join(args, " ")}
-	categories := logCategoriesForCommand(args)
-	parent = withLogMetadata(parent, logMetadata{CommandID: nextCommandLogID()})
+	logCategories := logCategoriesForCommand(args)
+	commandLogCtx := withLogMetadata(parentCtx, logMetadata{CommandID: nextCommandLogID()})
 	logCommand := func(stream, message string) {
-		sessionLogs.AppendContext(parent, stream, message, categories)
+		sessionLogs.AppendContext(commandLogCtx, stream, message, logCategories)
 	}
-	// fail127 records an internal launch failure (code 127) consistently: the
+	// launchFailureResult records an internal launch failure consistently: the
 	// process never produced its own exit code, so we synthesize one and log it.
-	fail127 := func(message string) CommandResult {
-		result.Code = 127
+	launchFailureResult := func(message string) CommandResult {
+		result.Code = commandLaunchFailureCode
 		result.Stderr = message
 		logCommand("stderr", message)
-		logCommand("exit", fmt.Sprintf("%s exited with code 127", result.Command))
+		logCommand("exit", fmt.Sprintf("%s exited with code %d", result.Command, commandLaunchFailureCode))
 		return result
 	}
 	if len(args) == 0 {
 		result.Stderr = "empty command"
-		result.Code = 127
+		result.Code = commandLaunchFailureCode
 		logCommand("command", "<empty command>")
 		logCommand("stderr", result.Stderr)
-		logCommand("exit", "empty command exited with code 127")
+		logCommand("exit", fmt.Sprintf("empty command exited with code %d", commandLaunchFailureCode))
 		return result
 	}
-	ctx, cancel := context.WithTimeout(parent, timeout)
+	commandCtx, cancel := context.WithTimeout(commandLogCtx, timeout)
 	defer cancel()
 
 	startedAt := time.Now()
 	logCommand("command", result.Command)
-	mutationCommand := isPackageManagerMutationCommand(args)
-	if mutationCommand {
-		releasePackageOperation, err := defaultPackageMutationCoordinator.Acquire(ctx, func() {
+	if isPackageManagerMutationCommand(args) {
+		releasePackageOperation, err := defaultPackageMutationCoordinator.Acquire(commandCtx, func() {
 			logCommand("app", "Waiting for another package operation before running "+result.Command)
 		})
 		if err != nil {
-			return packageMutationLockFailureResult(ctx, result.Command, categories, err)
+			return packageMutationLockFailureResult(commandCtx, result.Command, logCategories, err)
 		}
 		defer releasePackageOperation()
 	}
 	if shouldAcquireWingetCommandLock(args) {
-		if !lockMutexContextWithWait(ctx, &wingetCommandMu, func() {
+		if !lockMutexContextWithWait(commandCtx, &wingetCommandMu, func() {
 			logCommand("app", "Waiting for another winget mutation to finish before running "+result.Command)
 		}) {
-			return commandContextDoneResult(ctx, result.Command, "while waiting for winget lock", categories)
+			return commandContextDoneResult(commandCtx, result.Command, "while waiting for winget lock", logCategories)
 		}
 		defer wingetCommandMu.Unlock()
 	}
 
-	owner, ownerErr := newCommandProcessOwner(shouldOwnCommandProcessTree(args))
-	if ownerErr != nil {
-		return fail127(ownerErr.Error())
+	processOwner, err := newCommandProcessOwner(shouldOwnCommandProcessTree(args))
+	if err != nil {
+		return launchFailureResult(err.Error())
 	}
-	if owner != nil {
-		defer owner.Close()
+	if processOwner != nil {
+		defer processOwner.Close()
 	}
 
-	cmd := exec.Command(args[0], args[1:]...)
-	cmd.Env = launchEnv()
-	cmd.SysProcAttr = hiddenSysProcAttr()
-	stdout := newBoundedOutputTail(commandResultStreamLimitBytes)
-	stderr := newBoundedOutputTail(commandResultStreamLimitBytes)
-	stdoutPipe, err := cmd.StdoutPipe()
+	commandProcess := exec.Command(args[0], args[1:]...)
+	commandProcess.Env = launchEnv()
+	commandProcess.SysProcAttr = hiddenSysProcAttr()
+	stdoutTail := newBoundedOutputTail(commandResultStreamLimitBytes)
+	stderrTail := newBoundedOutputTail(commandResultStreamLimitBytes)
+	stdoutPipe, err := commandProcess.StdoutPipe()
 	if err != nil {
-		return fail127(err.Error())
+		return launchFailureResult(err.Error())
 	}
-	stderrPipe, err := cmd.StderrPipe()
+	stderrPipe, err := commandProcess.StderrPipe()
 	if err != nil {
-		return fail127(err.Error())
+		return launchFailureResult(err.Error())
 	}
 
-	if err := cmd.Start(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			result.Code = 124
+	if err := commandProcess.Start(); err != nil {
+		if commandCtx.Err() == context.DeadlineExceeded {
+			result.Code = commandTimeoutCode
 			result.Stderr = "Timed out."
 			logCommand("stderr", result.Stderr)
 			logCommand("exit", fmt.Sprintf("%s timed out before start", result.Command))
 			return result
 		}
-		if ctx.Err() == context.Canceled {
+		if commandCtx.Err() == context.Canceled {
 			result.Code = commandCancelledCode
 			result.Stderr = "Cancelled."
 			logCommand("stderr", result.Stderr)
 			logCommand("exit", fmt.Sprintf("%s cancelled before start", result.Command))
 			return result
 		}
-		return fail127(err.Error())
+		return launchFailureResult(err.Error())
 	}
-	if owner != nil {
-		ownerErr = owner.Assign(cmd)
-	}
-	if ownerErr != nil {
-		terminateStartedCommand(cmd, owner)
-		_ = cmd.Wait()
-		return fail127(ownerErr.Error())
+	if processOwner != nil {
+		if err := processOwner.Assign(commandProcess); err != nil {
+			terminateStartedCommand(commandProcess, processOwner)
+			_ = commandProcess.Wait()
+			return launchFailureResult(err.Error())
+		}
 	}
 
-	var wg sync.WaitGroup
-	suppressDetectionOutput := suppressCommandStdoutInSessionLog(args)
-	wg.Add(2)
-	go streamCommandOutputContext(ctx, stdoutPipe, "stdout", stdout, &wg, categories, !suppressDetectionOutput)
-	go streamCommandOutputContext(ctx, stderrPipe, "stderr", stderr, &wg, categories, true)
-	err = waitForStartedCommand(ctx, cmd, owner)
-	wg.Wait()
+	var outputReaders sync.WaitGroup
+	emitStdoutToSessionLog := !suppressCommandStdoutInSessionLog(args)
+	outputReaders.Add(2)
+	go streamCommandOutputContext(commandCtx, stdoutPipe, "stdout", stdoutTail, &outputReaders, logCategories, emitStdoutToSessionLog)
+	go streamCommandOutputContext(commandCtx, stderrPipe, "stderr", stderrTail, &outputReaders, logCategories, true)
+	err = waitForStartedCommand(commandCtx, commandProcess, processOwner)
+	outputReaders.Wait()
 
-	result.Stdout = stdout.String()
-	result.Stderr = stderr.String()
-	logSuppressedDetectionSummary := func() {
-		if !suppressDetectionOutput {
+	result.Stdout = stdoutTail.String()
+	result.Stderr = stderrTail.String()
+	logDetectionSummaryIfStdoutSuppressed := func() {
+		if emitStdoutToSessionLog {
 			return
 		}
-		logStoreDetectionCommandSummary(ctx, args, result, categories, time.Since(startedAt))
+		logStoreDetectionCommandSummary(commandCtx, args, result, logCategories, time.Since(startedAt))
 	}
-	if ctx.Err() == context.DeadlineExceeded {
-		result.Code = 124
+	if commandCtx.Err() == context.DeadlineExceeded {
+		result.Code = commandTimeoutCode
 		result.Stderr += "\nTimed out."
 		logCommand("stderr", "Timed out.")
-		logSuppressedDetectionSummary()
-		logCommand("exit", fmt.Sprintf("%s exited with code 124", result.Command))
+		logDetectionSummaryIfStdoutSuppressed()
+		logCommand("exit", fmt.Sprintf("%s exited with code %d", result.Command, commandTimeoutCode))
 		return result
 	}
-	if ctx.Err() == context.Canceled {
+	if commandCtx.Err() == context.Canceled {
 		result.Code = commandCancelledCode
 		result.Stderr += "\nCancelled."
 		logCommand("stderr", "Cancelled.")
-		logSuppressedDetectionSummary()
+		logDetectionSummaryIfStdoutSuppressed()
 		logCommand("exit", fmt.Sprintf("%s cancelled with code %d", result.Command, result.Code))
 		return result
 	}
@@ -159,17 +161,17 @@ func runCommandContext(parent context.Context, timeout time.Duration, args ...st
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			result.Code = exitErr.ExitCode()
 		} else {
-			result.Code = 127
+			result.Code = commandLaunchFailureCode
 			if result.Stderr == "" {
 				result.Stderr = err.Error()
 			}
 		}
-		logSuppressedDetectionSummary()
+		logDetectionSummaryIfStdoutSuppressed()
 		logCommand("exit", fmt.Sprintf("%s exited with code %d", result.Command, result.Code))
 		return result
 	}
 	result.OK = true
-	logSuppressedDetectionSummary()
+	logDetectionSummaryIfStdoutSuppressed()
 	logCommand("exit", fmt.Sprintf("%s exited with code 0", result.Command))
 	return result
 }

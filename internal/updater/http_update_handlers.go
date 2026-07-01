@@ -18,120 +18,133 @@ func packageActionRequestFromForm(r *http.Request) packageActionRequest {
 	}
 }
 
-func validatePackageActionRequest(command string, request packageActionRequest) (string, string, *CommandResult) {
-	if err := validateManagerAndID(request.Manager, request.PackageID); err != nil {
-		result := validationCommandResult(command, err)
+func validatePackageActionRequest(commandName string, actionRequest packageActionRequest) (string, string, *CommandResult) {
+	if err := validateManagerAndID(actionRequest.Manager, actionRequest.PackageID); err != nil {
+		result := validationCommandResult(commandName, err)
 		return "", "", &result
 	}
-	return request.Manager, request.PackageID, nil
+	return actionRequest.Manager, actionRequest.PackageID, nil
 }
 
-func parsePackageAction(r *http.Request, command string) (string, string, *CommandResult) {
-	var request packageActionRequest
+func parsePackageAction(r *http.Request, commandName string) (string, string, *CommandResult) {
+	var actionRequest packageActionRequest
 	if requestIsJSON(r) {
-		if err := decodeJSONRequest(r, &request); err != nil {
-			result := validationCommandResult(command, err)
+		if err := decodeJSONRequest(r, &actionRequest); err != nil {
+			result := validationCommandResult(commandName, err)
 			return "", "", &result
 		}
 	} else {
-		request = packageActionRequestFromForm(r)
+		actionRequest = packageActionRequestFromForm(r)
 	}
-	return validatePackageActionRequest(command, request)
+	return validatePackageActionRequest(commandName, actionRequest)
 }
 
 func parsePackageUpdateAction(r *http.Request) (string, string, UpdateOptions, *CommandResult) {
-	var request packageActionRequest
+	var actionRequest packageActionRequest
 	var options UpdateOptions
 	if requestIsJSON(r) {
-		var payload struct {
+		var jsonPayload struct {
 			Manager             string `json:"manager"`
 			PackageID           string `json:"package_id"`
 			AllowUnknownVersion bool   `json:"allow_unknown_version"`
 			AllowPinned         bool   `json:"allow_pinned"`
 		}
-		if err := decodeJSONRequest(r, &payload); err != nil {
+		if err := decodeJSONRequest(r, &jsonPayload); err != nil {
 			result := validationCommandResult("update", err)
 			return "", "", UpdateOptions{}, &result
 		}
-		request.Manager = payload.Manager
-		request.PackageID = payload.PackageID
-		options.AllowUnknownVersion = payload.AllowUnknownVersion
-		options.AllowPinned = payload.AllowPinned
+		actionRequest = packageActionRequest{
+			Manager:   jsonPayload.Manager,
+			PackageID: jsonPayload.PackageID,
+		}
+		options = UpdateOptions{
+			AllowUnknownVersion: jsonPayload.AllowUnknownVersion,
+			AllowPinned:         jsonPayload.AllowPinned,
+		}
 	} else {
-		request = packageActionRequestFromForm(r)
+		actionRequest = packageActionRequestFromForm(r)
 		options = updateOptionsFromForm(r)
 	}
-	manager, id, invalid := validatePackageActionRequest("update", request)
-	if invalid != nil {
-		return "", "", UpdateOptions{}, invalid
+	manager, packageID, validationFailure := validatePackageActionRequest("update", actionRequest)
+	if validationFailure != nil {
+		return "", "", UpdateOptions{}, validationFailure
 	}
-	return manager, id, options, nil
+	return manager, packageID, options, nil
 }
 
 func parseManagerRequest(r *http.Request) (string, *CommandResult) {
 	if requestIsJSON(r) {
-		var payload struct {
+		var jsonPayload struct {
 			Manager string `json:"manager"`
 		}
-		if err := decodeJSONRequest(r, &payload); err != nil {
+		if err := decodeJSONRequest(r, &jsonPayload); err != nil {
 			result := validationCommandResult("manager install", err)
 			return "", &result
 		}
-		return payload.Manager, nil
+		return jsonPayload.Manager, nil
 	}
 	_ = r.ParseForm()
 	return r.Form.Get("manager"), nil
 }
 
 func updateOptionsFromForm(r *http.Request) UpdateOptions {
-	allowUnknown, _ := formBool(r, "allow_unknown_version")
+	allowUnknownVersion, _ := formBool(r, "allow_unknown_version")
 	allowPinned, _ := formBool(r, "allow_pinned")
 	return UpdateOptions{
-		AllowUnknownVersion: allowUnknown,
+		AllowUnknownVersion: allowUnknownVersion,
 		AllowPinned:         allowPinned,
 	}
 }
 
 func parseUpdateAllRequest(r *http.Request) ([]string, UpdateOptions, *UpdateResult) {
 	if requestIsJSON(r) {
-		var payload struct {
+		var jsonPayload struct {
 			PackageKey          oneOrManyStrings `json:"package_key"`
 			PackageKeys         oneOrManyStrings `json:"package_keys"`
 			AllowUnknownVersion bool             `json:"allow_unknown_version"`
 			AllowPinned         bool             `json:"allow_pinned"`
 		}
-		if err := decodeJSONRequest(r, &payload); err != nil {
+		if err := decodeJSONRequest(r, &jsonPayload); err != nil {
 			result := UpdateResult{Result: validationCommandResult("update-all", err)}
 			return nil, UpdateOptions{}, &result
 		}
-		return combineStringLists(payload.PackageKey, payload.PackageKeys), UpdateOptions{
-			AllowUnknownVersion: payload.AllowUnknownVersion,
-			AllowPinned:         payload.AllowPinned,
+		return combineStringLists(jsonPayload.PackageKey, jsonPayload.PackageKeys), UpdateOptions{
+			AllowUnknownVersion: jsonPayload.AllowUnknownVersion,
+			AllowPinned:         jsonPayload.AllowPinned,
 		}, nil
 	}
 	_ = r.ParseForm()
 	return r.Form["package_key"], updateOptionsFromForm(r), nil
 }
 
+func writeUpdateAllValidationFailure(w http.ResponseWriter, result UpdateResult) {
+	results := []UpdateResult{result}
+	writeJSON(w, http.StatusBadRequest, UpdateJobStatus{
+		Results:        results,
+		RefreshStarted: false,
+		Notice:         updateResultsFailureNotice(results),
+	})
+}
+
 func (app *App) handleInstallAPI(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
-	manager, id, invalid := parsePackageAction(r, "install")
-	if invalid != nil {
-		writeJSON(w, http.StatusBadRequest, commandResponse(*invalid))
+	manager, packageID, validationFailure := parsePackageAction(r, "install")
+	if validationFailure != nil {
+		writeJSON(w, http.StatusBadRequest, commandResponse(*validationFailure))
 		return
 	}
-	jobAcceptedResponse(w, app.startInstallJob(manager, id))
+	jobAcceptedResponse(w, app.startInstallJob(manager, packageID))
 }
 
 func (app *App) handleManagerInstallAPI(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
-	manager, invalid := parseManagerRequest(r)
-	if invalid != nil {
-		writeJSON(w, http.StatusBadRequest, commandResponse(*invalid))
+	manager, validationFailure := parseManagerRequest(r)
+	if validationFailure != nil {
+		writeJSON(w, http.StatusBadRequest, commandResponse(*validationFailure))
 		return
 	}
 	if !isManagedPackageManager(manager) {
@@ -146,29 +159,26 @@ func (app *App) handleUpdateAPI(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
-	manager, id, options, invalid := parsePackageUpdateAction(r)
-	if invalid != nil {
-		writeJSON(w, http.StatusBadRequest, commandResponse(*invalid))
+	manager, packageID, options, validationFailure := parsePackageUpdateAction(r)
+	if validationFailure != nil {
+		writeJSON(w, http.StatusBadRequest, commandResponse(*validationFailure))
 		return
 	}
-	jobAcceptedResponse(w, app.startSingleUpdateJob(manager, id, options))
+	jobAcceptedResponse(w, app.startSingleUpdateJob(manager, packageID, options))
 }
 
 func (app *App) handleUpdateAllAPI(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
-	packageKeys, options, invalid := parseUpdateAllRequest(r)
-	if invalid != nil {
-		results := []UpdateResult{*invalid}
-		writeJSON(w, http.StatusBadRequest, UpdateJobStatus{Results: results, RefreshStarted: false, Notice: updateResultsFailureNotice(results)})
+	packageKeys, options, validationFailure := parseUpdateAllRequest(r)
+	if validationFailure != nil {
+		writeUpdateAllValidationFailure(w, *validationFailure)
 		return
 	}
 	for _, key := range packageKeys {
 		if err := validatePackageKey(key); err != nil {
-			result := UpdateResult{Key: key, Result: validationCommandResult("update-all", err)}
-			results := []UpdateResult{result}
-			writeJSON(w, http.StatusBadRequest, UpdateJobStatus{Results: results, RefreshStarted: false, Notice: updateResultsFailureNotice(results)})
+			writeUpdateAllValidationFailure(w, UpdateResult{Key: key, Result: validationCommandResult("update-all", err)})
 			return
 		}
 	}

@@ -4,15 +4,15 @@ import (
 	"context"
 )
 
-func storeUpdateCommand(target string, apply bool) []string {
-	return managerCommand(managerStore, "update", target, "--apply", boolStoreCLIValue(apply))
+func storeUpdateCommand(storeUpdateTarget string, applyUpdate bool) []string {
+	return managerCommand(managerStore, "update", storeUpdateTarget, "--apply", storeCLIBoolArgument(applyUpdate))
 }
 
-func storeUpdateWithoutApplyCommand(target string) []string {
-	return managerCommand(managerStore, "update", target)
+func storeUpdateCommandWithoutApplyOption(storeUpdateTarget string) []string {
+	return managerCommand(managerStore, "update", storeUpdateTarget)
 }
 
-func boolStoreCLIValue(value bool) string {
+func storeCLIBoolArgument(value bool) string {
 	if value {
 		return "true"
 	}
@@ -23,55 +23,59 @@ func storeActionUnavailableResult(action string) CommandResult {
 	return CommandResult{Code: 1, Command: "store " + action, Stderr: storeActionUnavailableMessage}
 }
 
-func runStoreInstallWithFallback(id string) CommandResult {
-	return runStoreInstallWithFallbackContext(context.Background(), id)
+func runStoreInstallWithFallback(storeIDOrQuery string) CommandResult {
+	return runStoreInstallWithFallbackContext(context.Background(), storeIDOrQuery)
 }
 
-func runStoreInstallWithFallbackContext(ctx context.Context, id string) CommandResult {
+func runStoreInstallWithFallbackContext(ctx context.Context, storeIDOrQuery string) CommandResult {
 	if packageActionManagerAvailable(managerStore) {
-		result := runPackageActionCommand(ctx, managerStore, packageActionTimeout, managerCommand(managerStore, "install", id)...)
-		if result.OK || ctx.Err() != nil || !packageActionManagerAvailable(managerWinget) {
-			return result
+		storeInstallResult := runPackageActionCommand(ctx, managerStore, packageActionTimeout, managerCommand(managerStore, "install", storeIDOrQuery)...)
+		if storeInstallResult.OK || ctx.Err() != nil || !packageActionManagerAvailable(managerWinget) {
+			return storeInstallResult
 		}
-		appLog("Store install for %q failed; trying winget msstore fallback.", id)
-		fallback := runPackageActionCommand(ctx, managerWinget, packageActionTimeout, wingetInstallCommand(managerStore, id, false)...)
-		return mergeCommandAttemptsWithFinalResult(result, fallback, "winget msstore fallback")
+		appLog("Store install for %q failed; trying winget msstore fallback.", storeIDOrQuery)
+		wingetFallbackResult := runWingetMSStoreInstall(ctx, storeIDOrQuery)
+		return mergeCommandAttemptsWithFinalResult(storeInstallResult, wingetFallbackResult, "winget msstore fallback")
 	}
 	if packageActionManagerAvailable(managerWinget) {
-		return runPackageActionCommand(ctx, managerWinget, packageActionTimeout, wingetInstallCommand(managerStore, id, false)...)
+		return runWingetMSStoreInstall(ctx, storeIDOrQuery)
 	}
 	return storeActionUnavailableResult("install")
 }
 
-func runStoreUpdateCommandWithApplyFallback(ctx context.Context, target string) CommandResult {
-	result := runPackageActionCommand(ctx, managerStore, packageActionTimeout, storeUpdateCommand(target, true)...)
-	result = normalizeStoreUpdateCommandResult(result)
-	if result.OK || ctx.Err() != nil || !shouldRetryStoreUpdateWithoutApply(result) {
-		return result
+func runWingetMSStoreInstall(ctx context.Context, storeIDOrQuery string) CommandResult {
+	return runPackageActionCommand(ctx, managerWinget, packageActionTimeout, wingetInstallCommand(managerStore, storeIDOrQuery, false)...)
+}
+
+func runStoreUpdateCommandWithApplyFallback(ctx context.Context, exactStoreTarget string) CommandResult {
+	updateWithApplyResult := runPackageActionCommand(ctx, managerStore, packageActionTimeout, storeUpdateCommand(exactStoreTarget, true)...)
+	updateWithApplyResult = normalizeStoreUpdateCommandResult(updateWithApplyResult)
+	if updateWithApplyResult.OK || ctx.Err() != nil || !shouldRetryStoreUpdateWithoutApply(updateWithApplyResult) {
+		return updateWithApplyResult
 	}
 	appLog("Store update command rejected --apply; retrying without that option.")
-	retry := runPackageActionCommand(ctx, managerStore, packageActionTimeout, storeUpdateWithoutApplyCommand(target)...)
-	retry = normalizeStoreUpdateCommandResult(retry)
-	return mergeCommandAttemptsWithFinalResult(result, retry, "store update without apply flag")
+	updateWithoutApplyResult := runPackageActionCommand(ctx, managerStore, packageActionTimeout, storeUpdateCommandWithoutApplyOption(exactStoreTarget)...)
+	updateWithoutApplyResult = normalizeStoreUpdateCommandResult(updateWithoutApplyResult)
+	return mergeCommandAttemptsWithFinalResult(updateWithApplyResult, updateWithoutApplyResult, "store update without apply flag")
 }
 
-func normalizeStoreUpdateCommandResult(result CommandResult) CommandResult {
-	if result.Code == commandCancelledCode || result.Code == 124 {
-		return result
+func normalizeStoreUpdateCommandResult(commandResult CommandResult) CommandResult {
+	if commandResult.Code == commandCancelledCode || commandResult.Code == 124 {
+		return commandResult
 	}
-	output := normalizedCommandOutput(result)
-	if !storeUpdateOutputIndicatesFailure(output) {
-		return result
+	normalizedOutput := normalizedCommandOutput(commandResult)
+	if !storeUpdateOutputReportsFailure(normalizedOutput) {
+		return commandResult
 	}
-	result.OK = false
-	if result.Code == 0 {
-		result.Code = 1
+	commandResult.OK = false
+	if commandResult.Code == 0 {
+		commandResult.Code = 1
 	}
-	return appendCommandStderr(result, "Store CLI reported an update failure despite the process exit code.")
+	return appendCommandStderr(commandResult, "Store CLI reported an update failure despite the process exit code.")
 }
 
-func storeUpdateOutputIndicatesFailure(output string) bool {
-	return outputContainsAny(output, []string{
+func storeUpdateOutputReportsFailure(normalizedOutput string) bool {
+	return outputContainsAny(normalizedOutput, []string{
 		"error:",
 		"could not find installed product metadata",
 		"failed to read input in non-interactive mode",

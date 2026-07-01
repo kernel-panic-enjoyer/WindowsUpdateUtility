@@ -8,54 +8,61 @@ import (
 )
 
 func suppressCommandStdoutInSessionLog(args []string) bool {
-	manager, verb, _ := packageManagerCommandParts(args)
-	return manager == managerStore && (verb == "show" || ((verb == "update" || verb == "updates") && commandHasApplyFalse(args)))
+	commandManager, commandVerb, _ := packageManagerCommandParts(args)
+	return commandManager == managerStore && (commandVerb == "show" || (isStoreUpdateCheckVerb(commandVerb) && commandHasApplyFalse(args)))
 }
 
 func logStoreDetectionCommandSummary(ctx context.Context, args []string, result CommandResult, categories []string, duration time.Duration) {
-	manager, verb, tail := packageManagerCommandParts(args)
-	if manager != managerStore {
+	commandManager, commandVerb, commandTail := packageManagerCommandParts(args)
+	if commandManager != managerStore {
 		return
 	}
-	target := firstStoreCommandTarget(tail)
-	switch verb {
+	requestedTarget := firstStoreCommandPositionalTarget(commandTail)
+	commandOutput := result.Stdout + "\n" + result.Stderr
+	switch commandVerb {
 	case "show":
-		metadata, parseErr := parseStoreCLIShowMetadata(result.Stdout + "\n" + result.Stderr)
-		status := "parsed"
+		showMetadata, parseErr := parseStoreCLIShowMetadata(commandOutput)
+		parserStatus := "parsed"
 		if parseErr != nil || !result.OK {
-			status = "incomplete"
+			parserStatus = "incomplete"
 		}
-		message := fmt.Sprintf("Store scan show summary: PFN=%s product_id=%s exact_match=%t parser=%s duration=%s",
-			firstNonEmpty(target, metadata.PFN),
-			firstNonEmpty(metadata.ProductID, "unknown"),
-			target != "" && strings.EqualFold(target, metadata.PFN),
-			status,
+		summaryMessage := fmt.Sprintf("Store scan show summary: PFN=%s product_id=%s exact_match=%t parser=%s duration=%s",
+			firstNonEmpty(requestedTarget, showMetadata.PFN),
+			firstNonEmpty(showMetadata.ProductID, "unknown"),
+			requestedTarget != "" && strings.EqualFold(requestedTarget, showMetadata.PFN),
+			parserStatus,
 			duration.Round(time.Millisecond),
 		)
-		if parseErr != nil {
-			message += " error=" + sanitizeProviderDiagnostic(parseErr.Error())
-		} else if !result.OK {
-			message += " error=" + sanitizeProviderDiagnostic(firstNonEmpty(result.Stderr, result.Stdout, "Store CLI show failed"))
-		}
-		sessionLogs.AppendContext(ctx, "app", message, append(categories, logCategoryStoreScan))
+		summaryMessage = appendStoreCommandSummaryError(summaryMessage, parseErr, result, "Store CLI show failed")
+		sessionLogs.AppendContext(ctx, "app", summaryMessage, append(categories, logCategoryStoreScan))
 	case "update", "updates":
-		state, parseErr := parseStoreCLIUpdateCheckResult(ctx, result.Stdout+"\n"+result.Stderr, result)
-		status := storeObservationKindSummary(state)
-		message := fmt.Sprintf("Store scan update-check summary: PFN=%s state=%s duration=%s",
-			firstNonEmpty(target, "aggregate"),
-			status,
+		observationKind, parseErr := parseStoreCLIUpdateCheckResult(ctx, commandOutput, result)
+		observationLabel := storeObservationKindLogLabel(observationKind)
+		summaryMessage := fmt.Sprintf("Store scan update-check summary: PFN=%s state=%s duration=%s",
+			firstNonEmpty(requestedTarget, "aggregate"),
+			observationLabel,
 			duration.Round(time.Millisecond),
 		)
-		if parseErr != nil {
-			message += " error=" + sanitizeProviderDiagnostic(parseErr.Error())
-		} else if !result.OK {
-			message += " error=" + sanitizeProviderDiagnostic(firstNonEmpty(result.Stderr, result.Stdout, "Store CLI update check failed"))
-		}
-		sessionLogs.AppendContext(ctx, "app", message, append(categories, logCategoryStoreScan))
+		summaryMessage = appendStoreCommandSummaryError(summaryMessage, parseErr, result, "Store CLI update check failed")
+		sessionLogs.AppendContext(ctx, "app", summaryMessage, append(categories, logCategoryStoreScan))
 	}
 }
 
-func firstStoreCommandTarget(args []string) string {
+func isStoreUpdateCheckVerb(verb string) bool {
+	return verb == "update" || verb == "updates"
+}
+
+func appendStoreCommandSummaryError(summaryMessage string, parseErr error, result CommandResult, commandFailureFallback string) string {
+	if parseErr != nil {
+		return summaryMessage + " error=" + sanitizeProviderDiagnostic(parseErr.Error())
+	}
+	if !result.OK {
+		return summaryMessage + " error=" + sanitizeProviderDiagnostic(firstNonEmpty(result.Stderr, result.Stdout, commandFailureFallback))
+	}
+	return summaryMessage
+}
+
+func firstStoreCommandPositionalTarget(args []string) string {
 	for _, arg := range args {
 		arg = strings.TrimSpace(arg)
 		if arg == "" || strings.HasPrefix(arg, "-") || strings.EqualFold(arg, "false") || strings.EqualFold(arg, "true") {
@@ -66,7 +73,7 @@ func firstStoreCommandTarget(args []string) string {
 	return ""
 }
 
-func storeObservationKindSummary(kind StoreObservationKind) string {
+func storeObservationKindLogLabel(kind StoreObservationKind) string {
 	switch kind {
 	case StoreObservationPositiveUpdateOffer:
 		return "available"

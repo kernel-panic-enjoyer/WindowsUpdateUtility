@@ -14,21 +14,21 @@ func searchPackages(query string) (PackageLookup, error) {
 		return PackageLookup{}, err
 	}
 	appLog("Package search started for %q.", query)
-	managers := detectManagers()
+	managerStatuses := detectManagers()
 	commandResults := map[string]CommandResult{}
 
-	var foundPackages []Package
-	for _, search := range runPackageSearches(query, managers) {
-		commandResults[search.ResultKey] = search.CommandResult
-		for _, pkg := range search.Packages {
-			annotateSearchPackage(query, &pkg)
-			foundPackages = append(foundPackages, pkg)
+	var discoveredPackages []Package
+	for _, searchResult := range runPackageSearches(query, managerStatuses) {
+		commandResults[searchResult.ResultKey] = searchResult.CommandResult
+		for _, searchedPackage := range searchResult.Packages {
+			annotateSearchPackage(query, &searchedPackage)
+			discoveredPackages = append(discoveredPackages, searchedPackage)
 		}
 	}
-	packages := dedupePackagesByManagerID(foundPackages)
+	packages := dedupePackagesByManagerID(discoveredPackages)
 	sortSearchPackages(query, packages)
 	appLog("Package search completed for %q with %d result(s).", query, len(packages))
-	return PackageLookup{Packages: packages, Managers: managers, CommandResults: commandResults}, nil
+	return PackageLookup{Packages: packages, Managers: managerStatuses, CommandResults: commandResults}, nil
 }
 
 func validatePackageSearchQuery(query string) error {
@@ -59,54 +59,54 @@ var packageSearchRunners = []packageSearchRunner{
 	{managerChoco, searchChocoPackages},
 }
 
-func runPackageSearches(query string, managers map[string]ManagerStatus) []packageSearchResult {
-	searchCh := make(chan packageSearchResult, len(managedPackageManagers))
-	var wg sync.WaitGroup
+func runPackageSearches(query string, managerStatuses map[string]ManagerStatus) []packageSearchResult {
+	resultsCh := make(chan packageSearchResult, len(managedPackageManagers))
+	var waitGroup sync.WaitGroup
 
 	for _, runner := range packageSearchRunners {
-		if !managers[runner.Manager].Available {
+		if !managerStatuses[runner.Manager].Available {
 			continue
 		}
-		runner := runner
-		wg.Add(1)
+		searchRunner := runner
+		waitGroup.Add(1)
 		go func() {
-			defer wg.Done()
-			searchCh <- runner.Run(query)
+			defer waitGroup.Done()
+			resultsCh <- searchRunner.Run(query)
 		}()
 	}
 
-	wg.Wait()
-	close(searchCh)
+	waitGroup.Wait()
+	close(resultsCh)
 	var results []packageSearchResult
-	for search := range searchCh {
-		results = append(results, search)
+	for searchResult := range resultsCh {
+		results = append(results, searchResult)
 	}
 	return results
 }
 
 func searchStorePackages(query string) packageSearchResult {
-	packages, result := storeSearch(query)
+	packages, commandResult := storeSearch(query)
 	for i := range packages {
 		packages[i].Key = packageKey(managerStore, packages[i].ID)
 		packages[i].UpdateSupported = true
 		packages[i].ActionBackend = backendStoreCLI
 	}
-	return packageSearchResult{ResultKey: managerStore, Packages: packages, CommandResult: result}
+	return packageSearchResult{ResultKey: managerStore, Packages: packages, CommandResult: commandResult}
 }
 
 func searchWingetPackages(query string) packageSearchResult {
-	packages, result := wingetSearch(query)
-	return packageSearchResult{ResultKey: managerWinget, Packages: packages, CommandResult: result}
+	packages, commandResult := wingetSearch(query)
+	return packageSearchResult{ResultKey: managerWinget, Packages: packages, CommandResult: commandResult}
 }
 
 func searchChocoPackages(query string) packageSearchResult {
-	result := runCommand(90*time.Second, managerCommand(managerChoco, "search", query, "--limit-output", "--no-color")...)
-	packages := parseChocoList(result.Stdout + "\n" + result.Stderr)
+	commandResult := runCommand(90*time.Second, managerCommand(managerChoco, "search", query, "--limit-output", "--no-color")...)
+	packages := parseChocoList(commandResult.Stdout + "\n" + commandResult.Stderr)
 	for i := range packages {
 		packages[i].Key = packageKey(managerChoco, packages[i].ID)
 		packages[i].Source = managerChoco
 	}
-	return packageSearchResult{ResultKey: managerChoco, Packages: packages, CommandResult: result}
+	return packageSearchResult{ResultKey: managerChoco, Packages: packages, CommandResult: commandResult}
 }
 
 func annotateSearchPackage(query string, pkg *Package) {
@@ -141,24 +141,27 @@ func searchMatchReason(query string, pkg Package) string {
 		return "Matched " + humanSearchMatch(match) + "."
 	}
 	lowerQuery := strings.ToLower(query)
-	name := strings.TrimSpace(pkg.Name)
-	id := strings.TrimSpace(pkg.ID)
+	normalizedQuery := normalizePackageIdentity(query)
+	packageName := strings.TrimSpace(pkg.Name)
+	packageID := strings.TrimSpace(pkg.ID)
+	lowerPackageName := strings.ToLower(packageName)
+	lowerPackageID := strings.ToLower(packageID)
 	switch {
-	case strings.EqualFold(name, query):
+	case strings.EqualFold(packageName, query):
 		return "Exact package name match."
-	case strings.EqualFold(id, query):
+	case strings.EqualFold(packageID, query):
 		return "Exact package ID match."
-	case normalizePackageIdentity(name) == normalizePackageIdentity(query):
+	case normalizePackageIdentity(packageName) == normalizedQuery:
 		return "Normalized package name match."
-	case normalizePackageIdentity(id) == normalizePackageIdentity(query):
+	case normalizePackageIdentity(packageID) == normalizedQuery:
 		return "Normalized package ID match."
-	case strings.HasPrefix(strings.ToLower(name), lowerQuery):
+	case strings.HasPrefix(lowerPackageName, lowerQuery):
 		return "Package name starts with the search text."
-	case strings.HasPrefix(strings.ToLower(id), lowerQuery):
+	case strings.HasPrefix(lowerPackageID, lowerQuery):
 		return "Package ID starts with the search text."
-	case strings.Contains(strings.ToLower(name), lowerQuery):
+	case strings.Contains(lowerPackageName, lowerQuery):
 		return "Package name contains the search text."
-	case strings.Contains(strings.ToLower(id), lowerQuery):
+	case strings.Contains(lowerPackageID, lowerQuery):
 		return "Package ID contains the search text."
 	}
 	return "Returned by " + searchManagerName(pkg.Manager) + " search for this query."
@@ -166,11 +169,11 @@ func searchMatchReason(query string, pkg Package) string {
 
 func humanSearchMatch(match string) string {
 	match = strings.TrimSpace(match)
-	if before, after, ok := strings.Cut(match, ":"); ok {
-		before = strings.TrimSpace(before)
-		after = strings.TrimSpace(after)
-		if before != "" && after != "" {
-			return strings.ToLower(before) + " " + after
+	if label, value, ok := strings.Cut(match, ":"); ok {
+		label = strings.TrimSpace(label)
+		value = strings.TrimSpace(value)
+		if label != "" && value != "" {
+			return strings.ToLower(label) + " " + value
 		}
 	}
 	return match
@@ -190,66 +193,68 @@ func searchManagerName(manager string) string {
 }
 
 func dedupePackagesByManagerID(packages []Package) []Package {
-	seen := map[string]bool{}
-	deduped := []Package{}
+	seenManagerIDs := map[string]bool{}
+	uniquePackages := []Package{}
 	for _, pkg := range packages {
-		key := strings.ToLower(packageKey(pkg.Manager, pkg.ID))
-		if seen[key] {
+		managerID := strings.ToLower(packageKey(pkg.Manager, pkg.ID))
+		if seenManagerIDs[managerID] {
 			continue
 		}
-		seen[key] = true
-		deduped = append(deduped, pkg)
+		seenManagerIDs[managerID] = true
+		uniquePackages = append(uniquePackages, pkg)
 	}
-	return deduped
+	return uniquePackages
 }
 
 func sortSearchPackages(query string, packages []Package) {
 	sort.SliceStable(packages, func(i, j int) bool {
-		leftScore := packageSearchScore(query, packages[i])
-		rightScore := packageSearchScore(query, packages[j])
-		if leftScore != rightScore {
-			return leftScore > rightScore
+		leftPackage := packages[i]
+		rightPackage := packages[j]
+		leftPackageScore := packageSearchScore(query, leftPackage)
+		rightPackageScore := packageSearchScore(query, rightPackage)
+		if leftPackageScore != rightPackageScore {
+			return leftPackageScore > rightPackageScore
 		}
-		if packages[i].Manager != packages[j].Manager {
-			return managerSortRank(packages[i].Manager) < managerSortRank(packages[j].Manager)
+		if leftPackage.Manager != rightPackage.Manager {
+			return managerSortRank(leftPackage.Manager) < managerSortRank(rightPackage.Manager)
 		}
-		if len(packages[i].Name) != len(packages[j].Name) {
-			return len(packages[i].Name) < len(packages[j].Name)
+		if len(leftPackage.Name) != len(rightPackage.Name) {
+			return len(leftPackage.Name) < len(rightPackage.Name)
 		}
-		return strings.ToLower(packages[i].Name) < strings.ToLower(packages[j].Name)
+		return strings.ToLower(leftPackage.Name) < strings.ToLower(rightPackage.Name)
 	})
 }
 
 func packageSearchScore(query string, pkg Package) int {
-	query = strings.ToLower(strings.TrimSpace(query))
-	if query == "" {
+	lowerQuery := strings.ToLower(strings.TrimSpace(query))
+	if lowerQuery == "" {
 		return 0
 	}
-	queryNorm := normalizePackageIdentity(query)
-	primaryValues := []string{pkg.Name, pkg.ID}
-	matchValues := []string{pkg.Match, wingetMatchValue(pkg.Match)}
-	if valuesContainExact(primaryValues, query) {
+	normalizedQuery := normalizePackageIdentity(lowerQuery)
+	packageIdentityValues := []string{pkg.Name, pkg.ID}
+	managerMatchValues := []string{pkg.Match, wingetMatchValue(pkg.Match)}
+	if valuesContainExact(packageIdentityValues, lowerQuery) {
 		return 1200
 	}
-	if valuesContainExact(matchValues, query) {
+	if valuesContainExact(managerMatchValues, lowerQuery) {
 		return 1100
 	}
-	if normalizedValuesContainExact(primaryValues, queryNorm) {
+	if normalizedValuesContainExact(packageIdentityValues, normalizedQuery) {
 		return 1000
 	}
-	if normalizedValuesContainExact(matchValues, queryNorm) {
+	if normalizedValuesContainExact(managerMatchValues, normalizedQuery) {
 		return 950
 	}
-	if normalizedValuesHavePrefix(primaryValues, queryNorm) {
+	if normalizedValuesHavePrefix(packageIdentityValues, normalizedQuery) {
 		return 700
 	}
-	if normalizedValuesHavePrefix(matchValues, queryNorm) {
+	if normalizedValuesHavePrefix(managerMatchValues, normalizedQuery) {
 		return 650
 	}
-	if normalizedValuesContain(primaryValues, queryNorm) {
+	if normalizedValuesContain(packageIdentityValues, normalizedQuery) {
 		return 500
 	}
-	if normalizedValuesContain(matchValues, queryNorm) {
+	if normalizedValuesContain(managerMatchValues, normalizedQuery) {
 		return 450
 	}
 	return 0
@@ -300,29 +305,31 @@ func normalizedValuesContain(values []string, query string) bool {
 }
 
 func wingetSearch(query string) ([]Package, CommandResult) {
-	variants := searchQueryVariants(query)
-	var cleanEmptyResult *CommandResult
-	var results []CommandResult
+	queryVariants := searchQueryVariants(query)
+	var firstSuccessfulResult CommandResult
+	var hasSuccessfulResult bool
+	var commandResults []CommandResult
 	var packages []Package
-	for index, candidate := range variants {
-		result := runCommand(90*time.Second, managerCommand(managerWinget, "search", candidate, "--accept-source-agreements", "--disable-interactivity")...)
-		results = append(results, result)
-		found := parseWingetSearchPackages(result)
-		if len(found) > 0 {
-			packages = append(packages, found...)
+	for _, queryVariant := range queryVariants {
+		commandResult := runCommand(90*time.Second, managerCommand(managerWinget, "search", queryVariant, "--accept-source-agreements", "--disable-interactivity")...)
+		commandResults = append(commandResults, commandResult)
+		foundPackages := parseWingetSearchPackages(commandResult)
+		if len(foundPackages) > 0 {
+			packages = append(packages, foundPackages...)
 		}
-		if result.OK && cleanEmptyResult == nil {
-			cleanEmptyResult = &result
+		if commandResult.OK && !hasSuccessfulResult {
+			firstSuccessfulResult = commandResult
+			hasSuccessfulResult = true
 		}
-		if index == len(variants)-1 {
-			if len(packages) > 0 {
-				return packages, combineWingetSearchResults(results)
-			}
-			if cleanEmptyResult != nil {
-				return nil, *cleanEmptyResult
-			}
-			return nil, result
-		}
+	}
+	if len(packages) > 0 {
+		return packages, combineWingetSearchResults(commandResults)
+	}
+	if hasSuccessfulResult {
+		return nil, firstSuccessfulResult
+	}
+	if len(commandResults) > 0 {
+		return nil, commandResults[len(commandResults)-1]
 	}
 	return nil, CommandResult{Code: 1, Command: "winget search", Stderr: "no winget search variants were available"}
 }
@@ -334,38 +341,38 @@ func combineWingetSearchResults(results []CommandResult) CommandResult {
 	if len(results) == 1 {
 		return results[0]
 	}
-	var commands, stdout, stderr []string
+	var commandTexts, stdoutParts, stderrParts []string
 	for _, result := range results {
 		if strings.TrimSpace(result.Command) != "" {
-			commands = append(commands, result.Command)
+			commandTexts = append(commandTexts, result.Command)
 		}
 		if strings.TrimSpace(result.Stdout) != "" {
-			stdout = append(stdout, result.Stdout)
+			stdoutParts = append(stdoutParts, result.Stdout)
 		}
 		if strings.TrimSpace(result.Stderr) != "" {
-			stderr = append(stderr, result.Stderr)
+			stderrParts = append(stderrParts, result.Stderr)
 		}
 	}
 	return CommandResult{
 		OK:      true,
 		Code:    0,
-		Command: strings.Join(commands, " | "),
-		Stdout:  strings.Join(stdout, "\n"),
-		Stderr:  strings.Join(stderr, "\n"),
+		Command: strings.Join(commandTexts, " | "),
+		Stdout:  strings.Join(stdoutParts, "\n"),
+		Stderr:  strings.Join(stderrParts, "\n"),
 	}
 }
 
 func parseWingetSearchPackages(result CommandResult) []Package {
 	packages := []Package{}
-	for _, pkg := range parseWingetTable(result.Stdout + "\n" + result.Stderr) {
-		if !isTruncatedID(pkg.ID) {
-			pkg.Manager = wingetSourceManager(pkg.Source)
-			pkg.Key = packageKey(pkg.Manager, pkg.ID)
-			pkg.UpdateSupported = true
-			if pkg.Manager == managerStore {
-				pkg.ActionBackend = backendWingetMSStoreFallback
+	for _, parsedPackage := range parseWingetTable(result.Stdout + "\n" + result.Stderr) {
+		if !isTruncatedID(parsedPackage.ID) {
+			parsedPackage.Manager = wingetSourceManager(parsedPackage.Source)
+			parsedPackage.Key = packageKey(parsedPackage.Manager, parsedPackage.ID)
+			parsedPackage.UpdateSupported = true
+			if parsedPackage.Manager == managerStore {
+				parsedPackage.ActionBackend = backendWingetMSStoreFallback
 			}
-			packages = append(packages, pkg)
+			packages = append(packages, parsedPackage)
 		}
 	}
 	return packages
@@ -374,40 +381,40 @@ func parseWingetSearchPackages(result CommandResult) []Package {
 func searchQueryVariants(query string) []string {
 	query = strings.TrimSpace(query)
 	variants := []string{query}
-	normalized := normalizeSearchQuerySeparators(query)
-	normalized = strings.Join(strings.Fields(normalized), " ")
-	if normalized != "" && !strings.EqualFold(normalized, query) {
-		variants = append(variants, normalized)
+	spacedVariant := normalizeSearchQuerySeparators(query)
+	spacedVariant = strings.Join(strings.Fields(spacedVariant), " ")
+	if spacedVariant != "" && !strings.EqualFold(spacedVariant, query) {
+		variants = append(variants, spacedVariant)
 	}
-	compact := strings.Join(strings.Fields(normalized), "")
-	if compact != "" {
-		seen := false
+	compactVariant := strings.Join(strings.Fields(spacedVariant), "")
+	if compactVariant != "" {
+		alreadyIncluded := false
 		for _, variant := range variants {
-			if strings.EqualFold(variant, compact) {
-				seen = true
+			if strings.EqualFold(variant, compactVariant) {
+				alreadyIncluded = true
 				break
 			}
 		}
-		if !seen {
-			variants = append(variants, compact)
+		if !alreadyIncluded {
+			variants = append(variants, compactVariant)
 		}
 	}
 	return variants
 }
 
 func normalizeSearchQuerySeparators(query string) string {
-	var normalized strings.Builder
-	lastWasSeparator := false
-	for _, r := range query {
-		if r == '-' || r == '_' || r == '.' {
-			if !lastWasSeparator {
-				normalized.WriteRune(' ')
-				lastWasSeparator = true
+	var normalizedQuery strings.Builder
+	previousWasSeparator := false
+	for _, char := range query {
+		if char == '-' || char == '_' || char == '.' {
+			if !previousWasSeparator {
+				normalizedQuery.WriteRune(' ')
+				previousWasSeparator = true
 			}
 			continue
 		}
-		normalized.WriteRune(r)
-		lastWasSeparator = false
+		normalizedQuery.WriteRune(char)
+		previousWasSeparator = false
 	}
-	return normalized.String()
+	return normalizedQuery.String()
 }

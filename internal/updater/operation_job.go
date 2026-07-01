@@ -56,16 +56,16 @@ type OperationJobStatus struct {
 }
 
 type OperationJob struct {
-	status OperationJobStatus
-	run    func(context.Context, *OperationJob)
-	cancel context.CancelFunc
+	status  OperationJobStatus
+	execute func(context.Context, *OperationJob)
+	cancel  context.CancelFunc
 }
 
-func (app *App) startOperationJob(jobType, mode string, total int, packageKeys []string, run func(context.Context, *OperationJob)) OperationJobStatus {
-	return app.startOperationJobWithPackageSnapshot(jobType, mode, total, packageKeys, nil, run)
+func (app *App) startOperationJob(jobType, mode string, total int, packageKeys []string, execute func(context.Context, *OperationJob)) OperationJobStatus {
+	return app.startOperationJobWithPackageSnapshot(jobType, mode, total, packageKeys, nil, execute)
 }
 
-func (app *App) startOperationJobWithPackageSnapshot(jobType, mode string, total int, packageKeys []string, packages []Package, run func(context.Context, *OperationJob)) OperationJobStatus {
+func (app *App) startOperationJobWithPackageSnapshot(jobType, mode string, total int, packageKeys []string, packages []Package, execute func(context.Context, *OperationJob)) OperationJobStatus {
 	if app.isShuttingDown() {
 		return OperationJobStatus{
 			Type:        jobType,
@@ -83,10 +83,10 @@ func (app *App) startOperationJobWithPackageSnapshot(jobType, mode string, total
 	if app.jobs == nil {
 		app.jobs = map[string]*OperationJob{}
 	}
-	allowUnknown, allowPinned := updateOptionsFromPackageSnapshot(packages)
+	allowsUnknownVersion, allowsPinnedVersion := packageSnapshotUpdateAllowances(packages)
 	app.jobSeq++
-	job := &OperationJob{
-		run: run,
+	operationJob := &OperationJob{
+		execute: execute,
 		status: OperationJobStatus{
 			JobID:               fmt.Sprintf("job-%d", app.jobSeq),
 			Revision:            1,
@@ -96,97 +96,86 @@ func (app *App) startOperationJobWithPackageSnapshot(jobType, mode string, total
 			Total:               total,
 			PackageKeys:         append([]string(nil), packageKeys...),
 			Packages:            append([]Package(nil), packages...),
-			AllowUnknownVersion: allowUnknown,
-			AllowPinned:         allowPinned,
+			AllowUnknownVersion: allowsUnknownVersion,
+			AllowPinned:         allowsPinnedVersion,
 		},
 	}
-	app.jobs[job.status.JobID] = job
-	app.jobQueue = append(app.jobQueue, job.status.JobID)
-	status := cloneOperationJobStatus(job.status)
-	appLog("Job %s queued for %s.", job.status.JobID, jobType)
-	shouldPump := !app.jobActive
-	if shouldPump {
+	app.jobs[operationJob.status.JobID] = operationJob
+	app.jobQueue = append(app.jobQueue, operationJob.status.JobID)
+	queuedStatus := cloneOperationJobStatus(operationJob.status)
+	appLog("Job %s queued for %s.", operationJob.status.JobID, jobType)
+	shouldStartQueueRunner := !app.jobActive
+	if shouldStartQueueRunner {
 		app.jobActive = true
 	}
 	app.jobsMu.Unlock()
-	if shouldPump {
+	if shouldStartQueueRunner {
 		if !app.startBackgroundWork("operation job queue", app.runOperationJobQueue) {
 			app.jobsMu.Lock()
 			app.jobActive = false
-			job.status.CancelRequested = true
-			job.status.State = jobStateCancelled
-			job.status.FinishedAt = utcNow()
-			job.status.Notice = "Job cancelled by shutdown."
-			compactTerminalOperationJobStatus(&job.status)
-			job.status.Revision++
+			operationJob.status.CancelRequested = true
+			finishQueuedOperationJobCancellation(&operationJob.status, "Job cancelled by shutdown.")
+			operationJob.status.Revision++
 			app.jobsMu.Unlock()
 		}
 	}
-	return status
+	return queuedStatus
 }
 
-func updateOptionsFromPackageSnapshot(packages []Package) (bool, bool) {
-	var allowUnknown, allowPinned bool
+func packageSnapshotUpdateAllowances(packages []Package) (allowsUnknownVersion, allowsPinnedVersion bool) {
 	for _, pkg := range packages {
-		allowUnknown = allowUnknown || pkg.AllowUnknownVersionUpdate
-		allowPinned = allowPinned || pkg.AllowPinnedUpdate
+		allowsUnknownVersion = allowsUnknownVersion || pkg.AllowUnknownVersionUpdate
+		allowsPinnedVersion = allowsPinnedVersion || pkg.AllowPinnedUpdate
 	}
-	return allowUnknown, allowPinned
+	return allowsUnknownVersion, allowsPinnedVersion
 }
 
 func (app *App) runOperationJobQueue(queueCtx context.Context) {
 	for {
 		app.jobsMu.Lock()
-		var job *OperationJob
+		var nextJob *OperationJob
 		for len(app.jobQueue) > 0 {
-			id := app.jobQueue[0]
+			queuedJobID := app.jobQueue[0]
 			app.jobQueue = app.jobQueue[1:]
-			candidate := app.jobs[id]
-			if candidate == nil {
+			queuedJob := app.jobs[queuedJobID]
+			if queuedJob == nil {
 				continue
 			}
-			if candidate.status.CancelRequested {
-				candidate.status.State = jobStateCancelled
-				candidate.status.Running = false
-				candidate.status.FinishedAt = utcNow()
-				compactTerminalOperationJobStatus(&candidate.status)
-				candidate.status.Revision++
+			if queuedJob.status.CancelRequested {
+				finishQueuedOperationJobCancellation(&queuedJob.status, "")
+				queuedJob.status.Revision++
 				continue
 			}
 			if queueCtx.Err() != nil {
-				candidate.status.CancelRequested = true
-				candidate.status.State = jobStateCancelled
-				candidate.status.Running = false
-				candidate.status.Notice = "Job cancelled by shutdown."
-				candidate.status.FinishedAt = utcNow()
-				compactTerminalOperationJobStatus(&candidate.status)
-				candidate.status.Revision++
+				queuedJob.status.CancelRequested = true
+				finishQueuedOperationJobCancellation(&queuedJob.status, "Job cancelled by shutdown.")
+				queuedJob.status.Revision++
 				continue
 			}
-			job = candidate
+			nextJob = queuedJob
 			break
 		}
-		if job == nil {
+		if nextJob == nil {
 			app.jobActive = false
 			app.jobsMu.Unlock()
 			return
 		}
-		ctx, cancel := context.WithCancel(queueCtx)
-		job.cancel = cancel
-		job.status.State = jobStateRunning
-		job.status.Running = true
-		job.status.StartedAt = utcNow()
-		job.status.Revision++
-		status := cloneOperationJobStatus(job.status)
+		jobCtx, cancelJob := context.WithCancel(queueCtx)
+		nextJob.cancel = cancelJob
+		nextJob.status.State = jobStateRunning
+		nextJob.status.Running = true
+		nextJob.status.StartedAt = utcNow()
+		nextJob.status.Revision++
+		startedStatus := cloneOperationJobStatus(nextJob.status)
 		app.jobsMu.Unlock()
 
-		ctx = withLogMetadata(ctx, logMetadata{JobID: status.JobID, JobType: status.Type})
-		appLogContext(ctx, "Job %s started for %s.", status.JobID, status.Type)
-		recovered := runOperationJobSafely(ctx, job)
-		cancel()
-		if recovered != nil {
-			diagnostic := sanitizedPanicDiagnostic(recovered)
-			app.mutateOperationJob(job, func(status *OperationJobStatus) {
+		jobCtx = withLogMetadata(jobCtx, logMetadata{JobID: startedStatus.JobID, JobType: startedStatus.Type})
+		appLogContext(jobCtx, "Job %s started for %s.", startedStatus.JobID, startedStatus.Type)
+		panicValue := runOperationJobSafely(jobCtx, nextJob)
+		cancelJob()
+		if panicValue != nil {
+			diagnostic := sanitizedPanicDiagnostic(panicValue)
+			app.mutateOperationJob(nextJob, func(status *OperationJobStatus) {
 				status.State = jobStateFailed
 				status.Error = diagnostic
 				status.Notice = "Job failed because an internal error occurred."
@@ -195,41 +184,51 @@ func (app *App) runOperationJobQueue(queueCtx context.Context) {
 		}
 
 		app.jobsMu.Lock()
-		if job.status.State == jobStateRunning || job.status.State == jobStateRefreshing {
-			if job.status.CancelRequested {
-				job.status.State = jobStateCancelled
-				job.status.Notice = "Job cancelled."
-			} else if job.status.Error != "" || operationJobHasFailures(job.status) {
-				job.status.State = jobStateFailed
+		if nextJob.status.State == jobStateRunning || nextJob.status.State == jobStateRefreshing {
+			if nextJob.status.CancelRequested {
+				nextJob.status.State = jobStateCancelled
+				nextJob.status.Notice = "Job cancelled."
+			} else if nextJob.status.Error != "" || operationJobStatusHasFailures(nextJob.status) {
+				nextJob.status.State = jobStateFailed
 			} else {
-				job.status.State = jobStateSucceeded
+				nextJob.status.State = jobStateSucceeded
 			}
 		}
-		job.status.Running = false
-		if job.status.FinishedAt == "" {
-			job.status.FinishedAt = utcNow()
+		nextJob.status.Running = false
+		if nextJob.status.FinishedAt == "" {
+			nextJob.status.FinishedAt = utcNow()
 		}
-		if operationJobComplete(job.status) {
-			compactTerminalOperationJobStatus(&job.status)
+		if operationJobComplete(nextJob.status) {
+			compactTerminalOperationJobStatus(&nextJob.status)
 		}
-		job.status.Revision++
-		finished := cloneOperationJobStatus(job.status)
+		nextJob.status.Revision++
+		finishedStatus := cloneOperationJobStatus(nextJob.status)
 		app.pruneOperationJobsLocked()
 		app.jobsMu.Unlock()
-		appLogContext(ctx, "Job %s finished with state %s.", finished.JobID, finished.State)
+		appLogContext(jobCtx, "Job %s finished with state %s.", finishedStatus.JobID, finishedStatus.State)
 	}
 }
 
-func runOperationJobSafely(ctx context.Context, job *OperationJob) (recovered any) {
+func finishQueuedOperationJobCancellation(status *OperationJobStatus, notice string) {
+	status.State = jobStateCancelled
+	status.Running = false
+	if notice != "" {
+		status.Notice = notice
+	}
+	status.FinishedAt = utcNow()
+	compactTerminalOperationJobStatus(status)
+}
+
+func runOperationJobSafely(ctx context.Context, job *OperationJob) (panicValue any) {
 	defer func() {
-		recovered = recover()
+		panicValue = recover()
 	}()
-	job.run(ctx, job)
+	job.execute(ctx, job)
 	return nil
 }
 
-func sanitizedPanicDiagnostic(recovered any) string {
-	message := strings.TrimSpace(fmt.Sprint(recovered))
+func sanitizedPanicDiagnostic(panicValue any) string {
+	message := strings.TrimSpace(fmt.Sprint(panicValue))
 	message = strings.ReplaceAll(message, "\r", " ")
 	message = strings.ReplaceAll(message, "\n", " ")
 	if message == "" {
@@ -241,7 +240,7 @@ func sanitizedPanicDiagnostic(recovered any) string {
 	return "internal job panic: " + message
 }
 
-func operationJobHasFailures(status OperationJobStatus) bool {
+func operationJobStatusHasFailures(status OperationJobStatus) bool {
 	if status.Result != nil && !status.Result.OK {
 		return true
 	}
@@ -311,17 +310,17 @@ func (app *App) operationJobStatus(id string) (OperationJobStatus, bool) {
 func (app *App) latestOperationJobStatus(jobTypes ...string) OperationJobStatus {
 	app.jobsMu.Lock()
 	defer app.jobsMu.Unlock()
-	wanted := map[string]bool{}
+	requestedTypes := map[string]bool{}
 	for _, jobType := range jobTypes {
-		wanted[jobType] = true
+		requestedTypes[jobType] = true
 	}
 	for i := app.jobSeq; i >= 1; i-- {
-		id := fmt.Sprintf("job-%d", i)
-		job := app.jobs[id]
+		jobID := fmt.Sprintf("job-%d", i)
+		job := app.jobs[jobID]
 		if job == nil {
 			continue
 		}
-		if len(wanted) == 0 || wanted[job.status.Type] {
+		if len(requestedTypes) == 0 || requestedTypes[job.status.Type] {
 			return cloneOperationJobStatus(job.status)
 		}
 	}
@@ -334,7 +333,8 @@ func (app *App) operationJobsSnapshot() []OperationJobStatus {
 	app.pruneOperationJobsLocked()
 	statuses := make([]OperationJobStatus, 0, len(app.jobs))
 	for i := int64(1); i <= app.jobSeq; i++ {
-		job := app.jobs[fmt.Sprintf("job-%d", i)]
+		jobID := fmt.Sprintf("job-%d", i)
+		job := app.jobs[jobID]
 		if job == nil {
 			continue
 		}
@@ -344,15 +344,15 @@ func (app *App) operationJobsSnapshot() []OperationJobStatus {
 }
 
 func (app *App) activeOperationJobsSnapshot() []OperationJobStatus {
-	all := app.operationJobsSnapshot()
-	active := make([]OperationJobStatus, 0, len(all))
-	for _, status := range all {
+	allStatuses := app.operationJobsSnapshot()
+	activeStatuses := make([]OperationJobStatus, 0, len(allStatuses))
+	for _, status := range allStatuses {
 		if operationJobComplete(status) {
 			continue
 		}
-		active = append(active, status)
+		activeStatuses = append(activeStatuses, status)
 	}
-	return active
+	return activeStatuses
 }
 
 func operationJobComplete(status OperationJobStatus) bool {
@@ -374,12 +374,8 @@ func (app *App) cancelOperationJob(id string) (OperationJobStatus, bool) {
 			job.cancel()
 		}
 		if job.status.State == jobStateQueued {
-			job.status.State = jobStateCancelled
-			job.status.Running = false
-			job.status.FinishedAt = utcNow()
-			compactTerminalOperationJobStatus(&job.status)
+			finishQueuedOperationJobCancellation(&job.status, "Job cancelled.")
 			job.status.Revision++
-			job.status.Notice = "Job cancelled."
 		}
 		appLog("Job %s cancellation requested.", job.status.JobID)
 	}
@@ -400,10 +396,7 @@ func (app *App) cancelOperationJobsForShutdown() {
 			job.cancel()
 		}
 		if job.status.State == jobStateQueued {
-			job.status.State = jobStateCancelled
-			job.status.Running = false
-			job.status.FinishedAt = utcNow()
-			compactTerminalOperationJobStatus(&job.status)
+			finishQueuedOperationJobCancellation(&job.status, "Job cancelled by shutdown.")
 			job.status.Revision++
 		}
 	}
@@ -414,50 +407,50 @@ func (app *App) pruneOperationJobsLocked() {
 	if len(app.jobs) <= operationJobRecentHistoryLimit {
 		return
 	}
-	retain := map[string]bool{}
-	latestByType := map[string]bool{}
+	retainedJobIDs := map[string]bool{}
+	latestCompletedTypeRetained := map[string]bool{}
 	for i := app.jobSeq; i >= 1; i-- {
-		id := fmt.Sprintf("job-%d", i)
-		job := app.jobs[id]
+		jobID := fmt.Sprintf("job-%d", i)
+		job := app.jobs[jobID]
 		if job == nil {
 			continue
 		}
 		if !operationJobComplete(job.status) {
-			retain[id] = true
+			retainedJobIDs[jobID] = true
 			continue
 		}
-		if !latestByType[job.status.Type] {
-			latestByType[job.status.Type] = true
-			retain[id] = true
+		if !latestCompletedTypeRetained[job.status.Type] {
+			latestCompletedTypeRetained[job.status.Type] = true
+			retainedJobIDs[jobID] = true
 		}
 	}
-	recent := 0
-	for i := app.jobSeq; i >= 1 && recent < operationJobRecentHistoryLimit; i-- {
-		id := fmt.Sprintf("job-%d", i)
-		job := app.jobs[id]
+	recentCompletedRetained := 0
+	for i := app.jobSeq; i >= 1 && recentCompletedRetained < operationJobRecentHistoryLimit; i-- {
+		jobID := fmt.Sprintf("job-%d", i)
+		job := app.jobs[jobID]
 		if job == nil || !operationJobComplete(job.status) {
 			continue
 		}
-		retain[id] = true
-		recent++
+		retainedJobIDs[jobID] = true
+		recentCompletedRetained++
 	}
-	for id, job := range app.jobs {
-		if retain[id] {
+	for jobID, job := range app.jobs {
+		if retainedJobIDs[jobID] {
 			continue
 		}
 		if job != nil && operationJobComplete(job.status) {
-			delete(app.jobs, id)
+			delete(app.jobs, jobID)
 		}
 	}
-	app.jobQueue = filterRetainedJobQueue(app.jobQueue, app.jobs)
+	app.jobQueue = filterExistingOperationJobQueueIDs(app.jobQueue, app.jobs)
 }
 
-func filterRetainedJobQueue(queue []string, jobs map[string]*OperationJob) []string {
-	filtered := queue[:0]
-	for _, id := range queue {
-		if jobs[id] != nil {
-			filtered = append(filtered, id)
+func filterExistingOperationJobQueueIDs(queuedJobIDs []string, jobsByID map[string]*OperationJob) []string {
+	filteredJobIDs := queuedJobIDs[:0]
+	for _, jobID := range queuedJobIDs {
+		if jobsByID[jobID] != nil {
+			filteredJobIDs = append(filteredJobIDs, jobID)
 		}
 	}
-	return filtered
+	return filteredJobIDs
 }

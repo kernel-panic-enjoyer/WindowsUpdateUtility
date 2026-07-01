@@ -6,14 +6,14 @@ import "os/exec"
 
 type commandProcessOwner struct{}
 
-func newCommandProcessOwner(bool) (*commandProcessOwner, error) {
+func newCommandProcessOwner(enabled bool) (*commandProcessOwner, error) {
 	return nil, nil
 }
 
-func (owner *commandProcessOwner) Assign(*exec.Cmd) error {
+func (*commandProcessOwner) Assign(cmd *exec.Cmd) error {
 	return nil
 }
 
-func (owner *commandProcessOwner) Terminate() {}
+func (*commandProcessOwner) Terminate() {}
 
-func (owner *commandProcessOwner) Close() {}
+func (*commandProcessOwner) Close() {}

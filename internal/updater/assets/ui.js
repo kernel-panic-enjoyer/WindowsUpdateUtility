@@ -12,6 +12,7 @@
   var installedManagerFilter = "all";
   var latestStoreLoading = false;
   var searchResults = [];
+  var installedSearchPackageKeys = new Set();
   var searchMetadata = {};
   var searchPage = 1;
   var searchPageSize = 10;
@@ -1637,11 +1638,40 @@
     var raw = pkg.match ? '<br><span class="muted">Raw match: ' + html(pkg.match) + '</span>' : '';
     return html(reason) + raw;
   }
-  function searchManagerBackendCell(pkg){
-    return '<span class="badge manager-badge">' + html(managerLabel(pkg.manager)) + '</span><br><span class="muted">Backend: ' + html(executionBackendLabel(pkg)) + '</span>';
+  function installSearchPackageKeyFromValues(manager, packageID){
+    var normalizedManager = String(manager == null ? "" : manager).trim().toLowerCase();
+    var normalizedPackageID = String(packageID == null ? "" : packageID).trim().toLowerCase();
+    if(!normalizedManager || !normalizedPackageID){ return ""; }
+    return normalizedManager + ":" + normalizedPackageID;
+  }
+  function installSearchPackageKey(pkg){
+    return installSearchPackageKeyFromValues(pkg && pkg.manager, pkg && pkg.id);
+  }
+  function installedInventoryHasSearchPackage(pkg){
+    var key = installSearchPackageKey(pkg);
+    if(!key){ return false; }
+    return packages.some(function(installedPackage){
+      return !!installedPackage.installed && installSearchPackageKey(installedPackage) === key;
+    });
+  }
+  function searchPackageAlreadyInstalled(pkg){
+    var key = installSearchPackageKey(pkg);
+    return !!(key && installedSearchPackageKeys.has(key)) || installedInventoryHasSearchPackage(pkg);
+  }
+  function markSearchPackageInstalledFromForm(form){
+    var formData = new FormData(form);
+    var key = installSearchPackageKeyFromValues(formData.get("manager"), formData.get("package_id"));
+    if(!key){ return; }
+    installedSearchPackageKeys.add(key);
+    renderSearchTable();
   }
   function searchActionCell(pkg){
-    return '<form class="install-form" method="post" action="/api/install" data-backend-label="' + attr(executionBackendLabel(pkg)) + '"><input type="hidden" name="manager" value="' + attr(pkg.manager) + '"><input type="hidden" name="package_id" value="' + attr(pkg.id) + '"><button type="submit" aria-label="Install ' + attr(pkg.name || pkg.id) + '">' + icon("install") + '<span>Install</span></button><span class="muted install-route">' + html(installRouteText(pkg)) + '</span></form>';
+    var managerInput = '<input type="hidden" name="manager" value="' + attr(pkg.manager) + '">';
+    var packageInput = '<input type="hidden" name="package_id" value="' + attr(pkg.id) + '">';
+    if(searchPackageAlreadyInstalled(pkg)){
+      return '<form class="install-form install-form-installed" method="post" action="/api/install" data-backend-label="' + attr(executionBackendLabel(pkg)) + '">' + managerInput + packageInput + '<button type="button" disabled aria-label="' + attr((pkg.name || pkg.id) + ' is already installed') + '">' + icon("check") + '<span>Installed</span></button><span class="muted install-route">Installed from this search session.</span></form>';
+    }
+    return '<form class="install-form" method="post" action="/api/install" data-backend-label="' + attr(executionBackendLabel(pkg)) + '">' + managerInput + packageInput + '<button type="submit" aria-label="Install ' + attr(pkg.name || pkg.id) + '">' + icon("install") + '<span>Install</span></button><span class="muted install-route">' + html(installRouteText(pkg)) + '</span></form>';
   }
   function renderSearchTable(){
     var body = $("search-results-body");
@@ -1650,14 +1680,14 @@
     var next = $("search-next");
     if(!body){ return; }
     if(searchResults.length === 0){
-      body.innerHTML = '<tr><td colspan="7">No installable results.</td></tr>';
+      body.innerHTML = '<tr><td colspan="6">No installable results.</td></tr>';
       renderEmptyPager(status, html("No results"), prev, next);
       return;
     }
     var page = pagedItems(searchResults, searchPage, searchPageSize);
     searchPage = page.page;
     body.innerHTML = page.items.map(function(pkg){
-      return '<tr><td><strong>' + html(pkg.name) + '</strong></td><td>' + html(sourceLabel(pkg.source || pkg.manager)) + '</td><td>' + searchManagerBackendCell(pkg) + '</td><td><code class="package-id">' + html(pkg.id) + '</code></td><td>' + searchMatchCell(pkg) + '</td><td>' + html(pkg.version || "") + '</td><td>' + searchActionCell(pkg) + '</td></tr>';
+      return '<tr><td><strong>' + html(pkg.name) + '</strong></td><td>' + html(sourceLabel(pkg.source || pkg.manager)) + '</td><td><code class="package-id">' + html(pkg.id) + '</code></td><td>' + searchMatchCell(pkg) + '</td><td>' + html(pkg.version || "") + '</td><td>' + searchActionCell(pkg) + '</td></tr>';
     }).join("");
     renderPager(page, status, prev, next);
   }
@@ -2178,7 +2208,7 @@
   }
   function preflightPackageRow(pkg, options){
     var notes = packageRiskNotes(pkg, options);
-    return '<tr><td><strong>' + html(pkg.name || pkg.id || pkg.key) + '</strong><br><span class="muted">' + html(pkg.id || pkg.key) + '</span></td><td>' + html(packageUpdateSource(pkg)) + '</td><td>' + html(pkg.version || "Unknown") + '</td><td>' + html(packageUpdateTarget(pkg)) + '</td><td>' + html(managerLabel(pkg.manager)) + ' / ' + html(packageUpdateBackend(pkg)) + (notes ? '<br><span class="muted">' + html(notes) + '</span>' : '') + '</td></tr>';
+    return '<tr><td><strong>' + html(pkg.name || pkg.id || pkg.key) + '</strong><br><span class="muted">' + html(pkg.id || pkg.key) + '</span></td><td>' + html(packageUpdateSource(pkg)) + '</td><td>' + html(pkg.version || "Unknown") + '</td><td>' + html(packageUpdateTarget(pkg)) + '</td><td><span class="badge manager-badge">' + html(packageUpdateBackend(pkg)) + '</span>' + (notes ? '<br><span class="muted">' + html(notes) + '</span>' : '') + '</td></tr>';
   }
   function renderUpdatePreflight(preflight){
     var panel = $("update-preflight-panel");
@@ -2447,18 +2477,19 @@
     var next = $("search-next");
     if(prev){ prev.disabled = true; }
     if(next){ next.disabled = true; }
-    body.innerHTML = loadingTableRow(7, "Searching...");
+    body.innerHTML = loadingTableRow(6, "Searching...");
     try{
       var response = await fetch(api("/api/search", {q:query}));
       var data = await response.json();
       if(!response.ok){ throw new Error(data.error || "Search failed"); }
       renderSearch(data);
     }catch(e){
-      body.innerHTML = '<tr><td colspan="5">' + html(e.message) + '</td></tr>';
+      body.innerHTML = '<tr><td colspan="6">' + html(e.message) + '</td></tr>';
     }
   }
   async function installFromForm(form){
     var button = form.querySelector("button");
+    var installSucceeded = false;
     if(button){ button.disabled = true; }
     var backend = form.dataset.backendLabel || "";
     var baseMessage = backend ? "Installing package through " + backend + "..." : "Installing package...";
@@ -2473,15 +2504,18 @@
       var result = finalStatus && finalStatus.result;
       var notice = finalStatus.notice || resultNotice("Install command completed. Refreshing package status...", "Install finished with errors", result);
       setInstallProgress(true, notice);
+      installSucceeded = jobSucceeded(finalStatus);
+      if(installSucceeded){ markSearchPackageInstalledFromForm(form); }
       await loadPackages(false);
       showNotice(notice);
-      showToast(jobSucceeded(finalStatus) ? "Install completed successfully." : "Install finished with errors. See Session Log for full output.", jobSucceeded(finalStatus) ? "success" : "error");
+      showToast(installSucceeded ? "Install completed successfully." : "Install finished with errors. See Session Log for full output.", installSucceeded ? "success" : "error");
     }catch(e){
-      showNotice("Install failed: " + e.message);
-      showToast("Install failed: " + e.message, "error");
+      var message = installSucceeded ? "Install completed, but package status refresh failed: " + e.message : "Install failed: " + e.message;
+      showNotice(message);
+      showToast(message, "error");
     }finally{
       setInstallProgress(false);
-      if(button){ button.disabled = false; }
+      if(button && !installSucceeded){ button.disabled = false; }
     }
   }
   async function installManagerFromForm(form){

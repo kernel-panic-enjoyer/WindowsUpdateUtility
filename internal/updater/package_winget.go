@@ -7,17 +7,22 @@ import (
 	"unicode/utf8"
 )
 
-func isSourceToken(value string) bool {
+var (
+	wingetMatchColumnPrefixes = [...]string{"tag:", "moniker:", "command:", "packagefamilyname:", "productcode:"}
+	wingetPinnedColumnMarkers = [...]string{"pinned", "pinning", "angeheftet", "gepinnt", "fixiert"}
+)
+
+func isWingetSourceColumnValue(value string) bool {
 	value = strings.ToLower(strings.TrimSpace(value))
 	return value == sourceWinget || value == sourceMSStore
 }
 
-func isWingetMatchColumn(value string) bool {
+func isWingetMatchColumnValue(value string) bool {
 	value = strings.ToLower(strings.TrimSpace(value))
 	if value == "" {
 		return false
 	}
-	for _, prefix := range []string{"tag:", "moniker:", "command:", "packagefamilyname:", "productcode:"} {
+	for _, prefix := range wingetMatchColumnPrefixes {
 		if strings.HasPrefix(value, prefix) {
 			return true
 		}
@@ -25,17 +30,21 @@ func isWingetMatchColumn(value string) bool {
 	return false
 }
 
-func isWingetPinnedColumn(value string) bool {
+func isWingetPinnedColumnValue(value string) bool {
 	value = strings.ToLower(strings.TrimSpace(value))
 	if value == "" || strings.Contains(value, "not pinned") || strings.Contains(value, "nicht") {
 		return false
 	}
-	for _, token := range []string{"pinned", "pinning", "angeheftet", "gepinnt", "fixiert"} {
-		if strings.Contains(value, token) {
+	for _, marker := range wingetPinnedColumnMarkers {
+		if strings.Contains(value, marker) {
 			return true
 		}
 	}
 	return false
+}
+
+func isWingetMetadataColumnValue(value string) bool {
+	return isWingetSourceColumnValue(value) || isWingetMatchColumnValue(value) || isWingetPinnedColumnValue(value)
 }
 
 func wingetMatchValue(value string) string {
@@ -51,30 +60,30 @@ func parseWingetTable(output string) []Package {
 	headerSeen := false
 	var columnStarts []int
 	var packages []Package
-	for _, raw := range lines {
-		line := strings.TrimSpace(raw)
-		if line == "" {
+	for _, rawLine := range lines {
+		trimmedLine := strings.TrimSpace(rawLine)
+		if trimmedLine == "" {
 			continue
 		}
-		lower := strings.ToLower(line)
+		lowerLine := strings.ToLower(trimmedLine)
 		if !headerSeen {
-			if strings.Contains(lower, "name") && strings.Contains(lower, "id") && strings.Contains(lower, "version") {
+			if strings.Contains(lowerLine, "name") && strings.Contains(lowerLine, "id") && strings.Contains(lowerLine, "version") {
 				headerSeen = true
-				columnStarts = packageTableColumnStarts(raw)
+				columnStarts = packageTableColumnStarts(rawLine)
 			}
 			continue
 		}
-		if strings.Trim(line, "-") == "" || strings.HasPrefix(line, "-") {
+		if strings.Trim(trimmedLine, "-") == "" || strings.HasPrefix(trimmedLine, "-") {
 			continue
 		}
-		simpleColumns := splitPackageTableColumns(line)
-		headerColumns := splitPackageTableColumnsAtStarts(raw, columnStarts)
+		simpleColumns := splitPackageTableColumns(trimmedLine)
+		headerColumns := splitPackageTableColumnsAtStarts(rawLine, columnStarts)
 		candidates := [][]string{simpleColumns, headerColumns}
-		if len(simpleColumns) < 3 || wingetTableColumnsNeedHeaderFallback(simpleColumns) {
+		if len(simpleColumns) < 3 || wingetSimpleColumnsNeedHeaderFallback(simpleColumns) {
 			candidates = [][]string{headerColumns, simpleColumns}
 		}
-		for _, cols := range candidates {
-			if pkg, ok := wingetPackageFromTableColumns(cols); ok {
+		for _, candidateColumns := range candidates {
+			if pkg, ok := parseWingetPackageColumns(candidateColumns); ok {
 				packages = append(packages, pkg)
 				break
 			}
@@ -83,41 +92,41 @@ func parseWingetTable(output string) []Package {
 	return packages
 }
 
-func wingetPackageFromTableColumns(cols []string) (Package, bool) {
-	if len(cols) < 3 {
+func parseWingetPackageColumns(columns []string) (Package, bool) {
+	if len(columns) < 3 {
 		return Package{}, false
 	}
-	pkg := Package{Name: cols[0], ID: cols[1], Version: cols[2], Manager: managerWinget}
+	pkg := Package{Name: columns[0], ID: columns[1], Version: columns[2], Manager: managerWinget}
 	pkg.UnknownVersion = isUnknownPackageVersion(pkg.Version)
-	rest := cols[3:]
-	for i := len(rest) - 1; i >= 0; i-- {
-		if isSourceToken(rest[i]) {
-			pkg.Source = strings.ToLower(rest[i])
+	remainingFields := columns[3:]
+	for i := len(remainingFields) - 1; i >= 0; i-- {
+		if isWingetSourceColumnValue(remainingFields[i]) {
+			pkg.Source = strings.ToLower(remainingFields[i])
 			pkg.Manager = wingetSourceManager(pkg.Source)
-			rest = append(rest[:i], rest[i+1:]...)
+			remainingFields = append(remainingFields[:i], remainingFields[i+1:]...)
 			break
 		}
 	}
-	for i := 0; i < len(rest); {
-		if isWingetPinnedColumn(rest[i]) {
+	for i := 0; i < len(remainingFields); {
+		if isWingetPinnedColumnValue(remainingFields[i]) {
 			pkg.Pinned = true
-			rest = append(rest[:i], rest[i+1:]...)
+			remainingFields = append(remainingFields[:i], remainingFields[i+1:]...)
 			continue
 		}
 		i++
 	}
-	if len(rest) > 0 {
-		if isWingetMatchColumn(rest[0]) {
-			pkg.Match = rest[0]
+	if len(remainingFields) > 0 {
+		if isWingetMatchColumnValue(remainingFields[0]) {
+			pkg.Match = remainingFields[0]
 		} else {
-			pkg.AvailableVersion = rest[0]
+			pkg.AvailableVersion = remainingFields[0]
 		}
 	}
-	if len(rest) > 1 {
-		pkg.Match = rest[1]
+	if len(remainingFields) > 1 {
+		pkg.Match = remainingFields[1]
 	}
-	if !wingetTableRowLooksUsable(pkg) {
-		if recovered, ok := recoverWingetOverflowRow(cols); ok {
+	if !parsedWingetTablePackageLooksUsable(pkg) {
+		if recovered, ok := recoverWingetTableOverflowRow(columns); ok {
 			return recovered, true
 		}
 		return Package{}, false
@@ -125,51 +134,51 @@ func wingetPackageFromTableColumns(cols []string) (Package, bool) {
 	return pkg, true
 }
 
-func recoverWingetOverflowRow(cols []string) (Package, bool) {
-	if len(cols) < 3 {
+func recoverWingetTableOverflowRow(columns []string) (Package, bool) {
+	if len(columns) < 3 {
 		return Package{}, false
 	}
-	if len(cols) == 3 && isSourceToken(cols[2]) {
-		id, version, ok := splitLastTableField(cols[1])
+	if len(columns) == 3 && isWingetSourceColumnValue(columns[2]) {
+		id, version, ok := splitTrailingTableField(columns[1])
 		if !ok {
 			return Package{}, false
 		}
-		pkg := Package{Name: cols[0], ID: id, Version: version, Source: strings.ToLower(cols[2]), Manager: wingetSourceManager(cols[2])}
+		pkg := Package{Name: columns[0], ID: id, Version: version, Source: strings.ToLower(columns[2]), Manager: wingetSourceManager(columns[2])}
 		pkg.UnknownVersion = isUnknownPackageVersion(pkg.Version)
-		if wingetTableRowLooksUsable(pkg) {
+		if parsedWingetTablePackageLooksUsable(pkg) {
 			return pkg, true
 		}
 		return Package{}, false
 	}
-	if len(cols) >= 4 && isSourceToken(cols[len(cols)-1]) {
-		name, id, ok := splitLastTableField(cols[0])
+	if len(columns) >= 4 && isWingetSourceColumnValue(columns[len(columns)-1]) {
+		name, id, ok := splitTrailingTableField(columns[0])
 		if !ok {
 			return Package{}, false
 		}
 		pkg := Package{
 			Name:             name,
 			ID:               id,
-			Version:          cols[1],
-			AvailableVersion: cols[2],
-			Source:           strings.ToLower(cols[len(cols)-1]),
-			Manager:          wingetSourceManager(cols[len(cols)-1]),
+			Version:          columns[1],
+			AvailableVersion: columns[2],
+			Source:           strings.ToLower(columns[len(columns)-1]),
+			Manager:          wingetSourceManager(columns[len(columns)-1]),
 		}
 		pkg.UnknownVersion = isUnknownPackageVersion(pkg.Version)
-		for _, value := range cols[3 : len(cols)-1] {
-			if isWingetPinnedColumn(value) {
+		for _, value := range columns[3 : len(columns)-1] {
+			if isWingetPinnedColumnValue(value) {
 				pkg.Pinned = true
-			} else if isWingetMatchColumn(value) {
+			} else if isWingetMatchColumnValue(value) {
 				pkg.Match = value
 			}
 		}
-		if wingetTableRowLooksUsable(pkg) {
+		if parsedWingetTablePackageLooksUsable(pkg) {
 			return pkg, true
 		}
 	}
 	return Package{}, false
 }
 
-func splitLastTableField(value string) (string, string, bool) {
+func splitTrailingTableField(value string) (string, string, bool) {
 	value = strings.TrimSpace(value)
 	for end := len(value); end > 0; {
 		r, size := utf8.DecodeLastRuneInString(value[:end])
@@ -185,16 +194,16 @@ func splitLastTableField(value string) (string, string, bool) {
 	return "", "", false
 }
 
-func wingetTableRowLooksUsable(pkg Package) bool {
-	return wingetTableIDLooksUsable(pkg.ID) &&
-		wingetTableVersionLooksUsable(pkg.Version) &&
-		(pkg.AvailableVersion == "" || wingetTableVersionLooksUsable(pkg.AvailableVersion))
+func parsedWingetTablePackageLooksUsable(pkg Package) bool {
+	return wingetTablePackageIDLooksUsable(pkg.ID) &&
+		wingetTablePackageVersionLooksUsable(pkg.Version) &&
+		(pkg.AvailableVersion == "" || wingetTablePackageVersionLooksUsable(pkg.AvailableVersion))
 }
 
-func wingetTableIDLooksUsable(id string) bool {
+func wingetTablePackageIDLooksUsable(id string) bool {
 	id = strings.TrimSpace(id)
 	lower := strings.ToLower(id)
-	if id == "" || isSourceToken(id) || isWingetMatchColumn(id) || isLikelyVersionToken(id) {
+	if id == "" || isWingetSourceColumnValue(id) || isWingetMatchColumnValue(id) || isLikelyWingetVersionToken(id) {
 		return false
 	}
 	if strings.ContainsFunc(id, unicode.IsControl) {
@@ -215,10 +224,10 @@ func wingetTableIDLooksUsable(id string) bool {
 	if strings.Contains(id, ".") {
 		return true
 	}
-	return isStoreProductIDLike(id)
+	return looksLikeWingetTableStoreProductID(id)
 }
 
-func isStoreProductIDLike(value string) bool {
+func looksLikeWingetTableStoreProductID(value string) bool {
 	value = strings.TrimSpace(value)
 	if len(value) < 10 || len(value) > 20 {
 		return false
@@ -238,12 +247,12 @@ func isStoreProductIDLike(value string) bool {
 	return hasLetter && hasDigit
 }
 
-func wingetTableVersionLooksUsable(version string) bool {
+func wingetTablePackageVersionLooksUsable(version string) bool {
 	version = strings.TrimSpace(version)
 	if isUnknownPackageVersion(version) {
 		return true
 	}
-	if version == "" || isSourceToken(version) || isWingetMatchColumn(version) || isWingetPinnedColumn(version) {
+	if version == "" || isWingetMetadataColumnValue(version) {
 		return false
 	}
 	if strings.ContainsFunc(version, unicode.IsControl) {
@@ -273,35 +282,35 @@ func wingetTableVersionLooksUsable(version string) bool {
 	return hasDigit
 }
 
-func wingetTableColumnsNeedHeaderFallback(cols []string) bool {
-	if len(cols) < 3 {
+func wingetSimpleColumnsNeedHeaderFallback(columns []string) bool {
+	if len(columns) < 3 {
 		return true
 	}
-	if isSourceToken(cols[2]) || isWingetMatchColumn(cols[2]) || isWingetPinnedColumn(cols[2]) {
+	if isWingetMetadataColumnValue(columns[2]) {
 		return true
 	}
-	if isLikelyVersionToken(cols[1]) {
+	if isLikelyWingetVersionToken(columns[1]) {
 		return true
 	}
-	if wingetTableColumnsLookShiftedByDisplayName(cols) {
+	if wingetSimpleColumnsShiftedByDisplayName(columns) {
 		return true
 	}
 	return false
 }
 
-func wingetTableColumnsLookShiftedByDisplayName(cols []string) bool {
-	if len(cols) < 4 {
+func wingetSimpleColumnsShiftedByDisplayName(columns []string) bool {
+	if len(columns) < 4 {
 		return false
 	}
-	if !wingetTableValueLooksLikeID(cols[2]) || isUnknownPackageVersion(cols[2]) || isLikelyVersionToken(cols[2]) {
+	if !wingetTableValueLooksLikePackageID(columns[2]) || isUnknownPackageVersion(columns[2]) || isLikelyWingetVersionToken(columns[2]) {
 		return false
 	}
-	return isLikelyVersionToken(cols[3]) || isUnknownPackageVersion(cols[3]) || isSourceToken(cols[3]) || isWingetMatchColumn(cols[3])
+	return isLikelyWingetVersionToken(columns[3]) || isUnknownPackageVersion(columns[3]) || isWingetSourceColumnValue(columns[3]) || isWingetMatchColumnValue(columns[3])
 }
 
-func wingetTableValueLooksLikeID(value string) bool {
+func wingetTableValueLooksLikePackageID(value string) bool {
 	value = strings.TrimSpace(value)
-	if value == "" || isSourceToken(value) || isWingetMatchColumn(value) || isWingetPinnedColumn(value) {
+	if value == "" || isWingetMetadataColumnValue(value) {
 		return false
 	}
 	for _, r := range value {
@@ -312,7 +321,7 @@ func wingetTableValueLooksLikeID(value string) bool {
 	return true
 }
 
-func isLikelyVersionToken(value string) bool {
+func isLikelyWingetVersionToken(value string) bool {
 	value = strings.TrimSpace(value)
 	if value == "" || isUnknownPackageVersion(value) {
 		return false

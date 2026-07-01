@@ -8,18 +8,18 @@ import (
 
 const statusCacheTTL = 30 * time.Second
 
-func (app *App) refreshStatus(force bool) {
+func (app *App) refreshStatus(forceRefresh bool) {
 	app.mu.Lock()
-	stale := app.statusFetchedAt.IsZero() || time.Since(app.statusFetchedAt) > statusCacheTTL
+	cacheExpired := app.statusFetchedAt.IsZero() || time.Since(app.statusFetchedAt) > statusCacheTTL
 	if app.statusLoading {
-		if force {
+		if forceRefresh {
 			app.statusQueued = true
 			appLog("Status refresh queued.")
 		}
 		app.mu.Unlock()
 		return
 	}
-	if !force && !stale {
+	if !forceRefresh && !cacheExpired {
 		app.mu.Unlock()
 		return
 	}
@@ -29,7 +29,7 @@ func (app *App) refreshStatus(force bool) {
 	appLog("Status refresh started.")
 
 	if !app.startBackgroundWork("status refresh", func(ctx context.Context) {
-		app.runStatusRefresh(ctx, force)
+		app.runStatusRefresh(ctx, forceRefresh)
 	}) {
 		app.mu.Lock()
 		app.statusLoading = false
@@ -38,8 +38,8 @@ func (app *App) refreshStatus(force bool) {
 	}
 }
 
-func (app *App) runStatusRefresh(ctx context.Context, force bool) {
-	status := app.buildStatusResponseContext(ctx, force)
+func (app *App) runStatusRefresh(ctx context.Context, forceRefresh bool) {
+	refreshedStatus := app.buildStatusResponseContext(ctx, forceRefresh)
 	if ctx.Err() != nil {
 		app.mu.Lock()
 		app.statusLoading = false
@@ -50,22 +50,14 @@ func (app *App) runStatusRefresh(ctx context.Context, force bool) {
 		return
 	}
 	app.mu.Lock()
-	app.status = status
+	app.status = refreshedStatus
 	app.statusFetchedAt = time.Now()
 	app.statusErr = ""
 	if app.statusQueued {
 		app.statusQueued = false
 		app.statusLoading = true
 		app.mu.Unlock()
-		appLog("Status refresh completed; running queued refresh.")
-		if !app.startBackgroundWork("queued status refresh", func(ctx context.Context) {
-			app.runStatusRefresh(ctx, true)
-		}) {
-			app.mu.Lock()
-			app.statusLoading = false
-			app.statusErr = "shutdown in progress"
-			app.mu.Unlock()
-		}
+		app.startQueuedStatusRefresh()
 		return
 	}
 	app.statusLoading = false
@@ -73,45 +65,57 @@ func (app *App) runStatusRefresh(ctx context.Context, force bool) {
 	appLog("Status refresh completed.")
 }
 
-func buildStatusResponseContext(ctx context.Context, force bool) StatusResponse {
-	return buildStatusResponseContextWithUpdate(ctx, force, AppUpdateStatus{CurrentVersion: currentAppVersion()})
+func (app *App) startQueuedStatusRefresh() {
+	appLog("Status refresh completed; running queued refresh.")
+	if !app.startBackgroundWork("queued status refresh", func(ctx context.Context) {
+		app.runStatusRefresh(ctx, true)
+	}) {
+		app.mu.Lock()
+		app.statusLoading = false
+		app.statusErr = "shutdown in progress"
+		app.mu.Unlock()
+	}
 }
 
-func (app *App) buildStatusResponseContext(ctx context.Context, force bool) StatusResponse {
-	return buildStatusResponseContextWithUpdate(ctx, force, app.appUpdateStatusContext(ctx, force))
+func buildStatusResponseContext(ctx context.Context, forceRefresh bool) StatusResponse {
+	return buildStatusResponseContextWithUpdate(ctx, forceRefresh, AppUpdateStatus{CurrentVersion: currentAppVersion()})
 }
 
-func buildStatusResponseContextWithUpdate(ctx context.Context, force bool, appUpdate AppUpdateStatus) StatusResponse {
-	state := loadStateContext(ctx)
-	dir, _ := stateDir()
-	var startupEnabled bool
+func (app *App) buildStatusResponseContext(ctx context.Context, forceRefresh bool) StatusResponse {
+	return buildStatusResponseContextWithUpdate(ctx, forceRefresh, app.appUpdateStatusContext(ctx, forceRefresh))
+}
+
+func buildStatusResponseContextWithUpdate(ctx context.Context, forceRefresh bool, appUpdateStatus AppUpdateStatus) StatusResponse {
+	persistedState := loadStateContext(ctx)
+	stateDirectory, _ := stateDir()
+	var startupTaskEnabled bool
 	var autoTaskEnabled bool
-	var wg sync.WaitGroup
-	wg.Add(2)
+	var taskChecks sync.WaitGroup
+	taskChecks.Add(2)
 	go func() {
-		defer wg.Done()
-		startupEnabled = taskExistsContext(ctx, taskStartup)
+		defer taskChecks.Done()
+		startupTaskEnabled = taskExistsContext(ctx, taskStartup)
 	}()
 	go func() {
-		defer wg.Done()
+		defer taskChecks.Done()
 		autoTaskEnabled = taskExistsContext(ctx, taskAutoUpdate)
 	}()
-	var managers map[string]ManagerStatus
-	if force {
-		managers = detectManagersFreshContext(ctx)
+	var managerStatuses map[string]ManagerStatus
+	if forceRefresh {
+		managerStatuses = detectManagersFreshContext(ctx)
 	} else {
-		managers = detectManagersContext(ctx)
+		managerStatuses = detectManagersContext(ctx)
 	}
-	wg.Wait()
+	taskChecks.Wait()
 
 	return StatusResponse{
 		Admin:           isAdmin(),
-		StateDir:        dir,
-		Managers:        managers,
-		StartupEnabled:  startupEnabled,
+		StateDir:        stateDirectory,
+		Managers:        managerStatuses,
+		StartupEnabled:  startupTaskEnabled,
 		AutoTaskEnabled: autoTaskEnabled,
-		Settings:        statusSettingsFromState(state),
-		AppUpdate:       appUpdate,
+		Settings:        statusSettingsFromState(persistedState),
+		AppUpdate:       appUpdateStatus,
 		Application:     currentApplicationInfo(),
 	}
 }
@@ -124,41 +128,33 @@ func (app *App) refreshStatusSyncContext(ctx context.Context, reason string) Sta
 	app.statusErr = ""
 	app.mu.Unlock()
 
-	status := app.buildStatusResponseContext(ctx, true)
+	refreshedStatus := app.buildStatusResponseContext(ctx, true)
 	if ctx.Err() != nil {
 		app.mu.Lock()
-		cached := app.status
+		cachedStatus := app.status
 		app.statusLoading = false
 		app.statusQueued = false
 		app.statusErr = "status refresh cancelled: " + ctx.Err().Error()
 		app.mu.Unlock()
 		appLog("Status refresh cancelled for %s.", reason)
-		return cached
+		return cachedStatus
 	}
 
 	app.mu.Lock()
-	app.status = status
+	app.status = refreshedStatus
 	app.statusFetchedAt = time.Now()
 	app.statusErr = ""
 	if app.statusQueued {
 		app.statusQueued = false
 		app.statusLoading = true
 		app.mu.Unlock()
-		appLog("Status refresh completed; running queued refresh.")
-		if !app.startBackgroundWork("queued status refresh", func(ctx context.Context) {
-			app.runStatusRefresh(ctx, true)
-		}) {
-			app.mu.Lock()
-			app.statusLoading = false
-			app.statusErr = "shutdown in progress"
-			app.mu.Unlock()
-		}
-		return status
+		app.startQueuedStatusRefresh()
+		return refreshedStatus
 	}
 	app.statusLoading = false
 	app.mu.Unlock()
 	appLog("Status refresh completed for %s.", reason)
-	return status
+	return refreshedStatus
 }
 
 func (app *App) statusSnapshot() StatusResponse {
@@ -167,88 +163,89 @@ func (app *App) statusSnapshot() StatusResponse {
 
 func (app *App) statusSnapshotContext(ctx context.Context) StatusResponse {
 	app.mu.RLock()
-	status := app.status
-	loading := app.statusLoading
+	snapshot := app.status
+	statusLoading := app.statusLoading
 	fetchedAt := app.statusFetchedAt
-	errText := app.statusErr
-	inventoryManagers := cloneManagerStatuses(app.inventory.Managers)
+	refreshErr := app.statusErr
+	inventoryManagerStatuses := cloneManagerStatuses(app.inventory.Managers)
 	app.mu.RUnlock()
 
-	status.Settings = statusSettingsFromState(loadStateContext(ctx))
-	if status.StateDir == "" {
-		status.StateDir, _ = stateDir()
-		status.Admin = isAdmin()
+	snapshot.Settings = statusSettingsFromState(loadStateContext(ctx))
+	if snapshot.StateDir == "" {
+		snapshot.StateDir, _ = stateDir()
+		snapshot.Admin = isAdmin()
 	}
-	if status.Managers == nil {
-		status.Managers = map[string]ManagerStatus{}
+	if snapshot.Managers == nil {
+		snapshot.Managers = map[string]ManagerStatus{}
 	} else {
-		status.Managers = cloneManagerStatuses(status.Managers)
+		snapshot.Managers = cloneManagerStatuses(snapshot.Managers)
 	}
-	if status.AppUpdate.CurrentVersion == "" {
-		status.AppUpdate = app.appUpdateStatusContext(ctx, false)
+	if snapshot.AppUpdate.CurrentVersion == "" {
+		snapshot.AppUpdate = app.appUpdateStatusContext(ctx, false)
 	}
-	if status.Application.License == "" || status.Application.Repository == "" {
-		status.Application = currentApplicationInfo()
+	if snapshot.Application.License == "" || snapshot.Application.Repository == "" {
+		snapshot.Application = currentApplicationInfo()
 	}
-	mergeStatusInventoryManagerDetails(&status, inventoryManagers)
-	status.AsyncSnapshot = asyncSnapshot(loading, fetchedAt, errText)
-	return status
+	mergeStatusInventoryManagerDetails(&snapshot, inventoryManagerStatuses)
+	snapshot.AsyncSnapshot = asyncSnapshot(statusLoading, fetchedAt, refreshErr)
+	return snapshot
 }
 
-func (app *App) appUpdateStatusContext(ctx context.Context, force bool) AppUpdateStatus {
-	current := currentAppVersion()
+func (app *App) appUpdateStatusContext(ctx context.Context, forceRefresh bool) AppUpdateStatus {
+	currentVersion := currentAppVersion()
 	if app == nil || app.appUpdateChecker == nil {
-		return AppUpdateStatus{CurrentVersion: current}
+		return AppUpdateStatus{CurrentVersion: currentVersion}
 	}
 	app.mu.RLock()
-	cached := app.appUpdateStatus
-	fetchedAt := app.appUpdateFetchedAt
+	cachedStatus := app.appUpdateStatus
+	cachedAt := app.appUpdateFetchedAt
 	app.mu.RUnlock()
-	if !force && !fetchedAt.IsZero() && time.Since(fetchedAt) < appUpdateCacheTTL && cached.CurrentVersion != "" {
-		return cached
+	if !forceRefresh && !cachedAt.IsZero() && time.Since(cachedAt) < appUpdateCacheTTL && cachedStatus.CurrentVersion != "" {
+		return cachedStatus
 	}
 	checkCtx, cancel := context.WithTimeout(ctx, appUpdateCheckTimeout)
 	defer cancel()
-	status, err := app.appUpdateChecker.Check(checkCtx, current)
-	status.CurrentVersion = current
-	status.CheckedAt = time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)
+	updateStatus, err := app.appUpdateChecker.Check(checkCtx, currentVersion)
+	checkedAt := time.Now()
+	updateStatus.CurrentVersion = currentVersion
+	updateStatus.CheckedAt = checkedAt.UTC().Truncate(time.Second).Format(time.RFC3339)
 	if err != nil {
-		status.Error = sanitizeProviderDiagnostic(err.Error())
+		updateStatus.Error = sanitizeProviderDiagnostic(err.Error())
 	}
 	app.mu.Lock()
-	app.appUpdateStatus = status
+	app.appUpdateStatus = updateStatus
 	app.appUpdateFetchedAt = time.Now()
 	app.mu.Unlock()
-	return status
+	return updateStatus
 }
 
-func statusSettingsFromState(state State) StatusSettings {
+func statusSettingsFromState(persistedState State) StatusSettings {
 	return StatusSettings{
-		AutoUpdateGlobal:                state.AutoUpdateGlobal,
-		AutoUpdatePackages:              trimBoolMap(state.AutoUpdatePackages, maxStateAutoUpdatePackages),
-		Theme:                           state.Theme,
-		LastScanAt:                      state.LastScanAt,
-		LastAutoUpdateAt:                state.LastAutoUpdateAt,
-		LastAutoUpdateResults:           trimUpdateResultSummaries(state.LastAutoUpdateResults),
-		LastAutoUpdateSummary:           state.LastAutoUpdateSummary,
-		AppUpdatePromptDismissedVersion: state.AppUpdatePromptDismissedVersion,
+		AutoUpdateGlobal:                persistedState.AutoUpdateGlobal,
+		AutoUpdatePackages:              trimBoolMap(persistedState.AutoUpdatePackages, maxStateAutoUpdatePackages),
+		Theme:                           persistedState.Theme,
+		LastScanAt:                      persistedState.LastScanAt,
+		LastAutoUpdateAt:                persistedState.LastAutoUpdateAt,
+		LastAutoUpdateResults:           trimUpdateResultSummaries(persistedState.LastAutoUpdateResults),
+		LastAutoUpdateSummary:           persistedState.LastAutoUpdateSummary,
+		AppUpdatePromptDismissedVersion: persistedState.AppUpdatePromptDismissedVersion,
 	}
 }
 
-func mergeStatusInventoryManagerDetails(status *StatusResponse, inventoryManagers map[string]ManagerStatus) {
-	inventoryStore, ok := inventoryManagers[managerStore]
-	if !ok || !inventoryStore.InventoryAvailable {
+func mergeStatusInventoryManagerDetails(statusResponse *StatusResponse, inventoryManagerStatuses map[string]ManagerStatus) {
+	inventoryStoreStatus, ok := inventoryManagerStatuses[managerStore]
+	if !ok || !inventoryStoreStatus.InventoryAvailable {
 		return
 	}
-	store := status.Managers[managerStore]
-	if store == (ManagerStatus{}) {
-		store = inventoryStore
+	storeStatus := statusResponse.Managers[managerStore]
+	if storeStatus == (ManagerStatus{}) {
+		storeStatus = inventoryStoreStatus
 	} else {
-		store.InventoryAvailable = true
-		store.InventoryBackend = inventoryStore.InventoryBackend
-		if store.ActionBackend == "" {
-			store.ActionBackend = inventoryStore.ActionBackend
+		storeStatus.InventoryAvailable = true
+		storeStatus.InventoryBackend = inventoryStoreStatus.InventoryBackend
+		if storeStatus.ActionBackend == "" {
+			storeStatus.ActionBackend = inventoryStoreStatus.ActionBackend
 		}
 	}
-	status.Managers[managerStore] = store
+	statusResponse.Managers[managerStore] = storeStatus
 }
