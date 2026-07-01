@@ -234,7 +234,8 @@ func TestStoreAssessmentBrowserSmokeStrings(t *testing.T) {
 		"Exact target unavailable",
 		"Not authoritative",
 		"authoritative",
-		"Store update status is unknown. Review scan health.",
+		"updatesEmptyState",
+		"No actionable updates available. Review Store scan health for diagnostics.",
 		"state-badge",
 		"store-rescan-button",
 	} {

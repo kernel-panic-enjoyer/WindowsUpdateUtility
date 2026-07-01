@@ -1402,6 +1402,24 @@
       return packageMatchesManagerFilter(pkg, updatesManagerFilter);
     });
   }
+  function updatesEmptyState(){
+    if(updatesManagerFilter !== "all"){
+      return {
+        body: 'No updates for the selected manager.',
+        pager: 'No matches'
+      };
+    }
+    if(storeCoverageHealthy()){
+      return {
+        body: 'No updates available.',
+        pager: 'No updates'
+      };
+    }
+    return {
+      body: 'No actionable updates available. Review Store scan health for diagnostics.',
+      pager: 'No actionable updates'
+    };
+  }
   function packageMatchesInstalledSearch(pkg){
     var query = installedSearchQuery.trim().toLowerCase();
     if(!query){ return true; }
@@ -1416,14 +1434,9 @@
     var next = $("updates-next");
     if(!target){ return; }
     if(updates.length === 0){
-      var emptyText;
-      if(updatesManagerFilter !== "all"){
-        emptyText = 'No updates for the selected manager.';
-      } else {
-        emptyText = storeCoverageHealthy() ? 'No updates available.' : 'Store update status is unknown. Review scan health.';
-      }
-      target.innerHTML = loading ? loadingTableRow(7, "Checking for updates...") : '<tr><td colspan="7">' + html(emptyText) + '</td></tr>';
-      var emptyLabel = loading ? loadingText('Checking...') : html(updatesManagerFilter !== "all" ? 'No matches' : (storeCoverageHealthy() ? 'No updates' : 'Store status unknown'));
+      var emptyState = updatesEmptyState();
+      target.innerHTML = loading ? loadingTableRow(7, "Checking for updates...") : '<tr><td colspan="7">' + html(emptyState.body) + '</td></tr>';
+      var emptyLabel = loading ? loadingText('Checking...') : html(emptyState.pager);
       renderEmptyPager(status, emptyLabel, prev, next);
       return;
     }

@@ -788,6 +788,66 @@ func TestBrowserHidesStaleStoreEvidenceFromUpdatesQueue(t *testing.T) {
 	}
 }
 
+func TestBrowserUnhealthyStoreEmptyQueueUsesActionableCopy(t *testing.T) {
+	app := updater.NewBrowserTestApp()
+	server := startBrowserTestServerWithRoutes(t, app, map[string]http.HandlerFunc{
+		"/api/packages": func(w http.ResponseWriter, r *http.Request) {
+			writeAuthenticatedBrowserTestJSON(app, w, r, http.StatusOK, updater.InventoryResponse{Inventory: updater.Inventory{PackageLookup: updater.PackageLookup{
+				Managers: map[string]updater.ManagerStatus{
+					updater.ManagerStore: {Available: true, InventoryAvailable: true, InventoryBackend: updater.InventoryBackendAppX, ActionBackend: updater.ActionBackendStoreCLI},
+				},
+				Packages: []updater.Package{{
+					Key:                "store:Diagnostic.Store_abc123",
+					Manager:            updater.ManagerStore,
+					ID:                 "Diagnostic.Store_abc123",
+					Name:               "Store Diagnostic App",
+					Version:            "1.0.0",
+					Installed:          true,
+					UpdateSupported:    false,
+					UpdateState:        "unknown",
+					UpdateReason:       "Store provider returned incomplete metadata.",
+					CannotUpdateReason: "Store update requires a fresh assessment; rescan required.",
+					ProviderSummaries: []updater.StorePackageProviderSummary{{
+						Name:   "store-cli-exact",
+						Health: "incomplete",
+						Kind:   "provider_run",
+						Error:  "Store CLI show output did not include PFN",
+					}},
+				}},
+			}, StoreScanHealth: updater.StoreScanHealthSummary{
+				Active:        true,
+				Healthy:       false,
+				Authoritative: false,
+				Status:        "incomplete",
+				Reason:        "Store provider returned incomplete metadata.",
+				Counts:        map[string]int{"unknown": 1},
+			}}})
+		},
+	})
+
+	ctx, cancel := newBrowserContext(t)
+	defer cancel()
+
+	navigateAuthenticated(t, ctx, server.URL)
+	waitForText(t, ctx, `#updates-body`, "No actionable updates available")
+	waitForText(t, ctx, `#updates-page-status`, "No actionable updates")
+	waitForText(t, ctx, `#store-scan-health-body`, "Store Diagnostic App")
+	var updatesBody string
+	var pagerText string
+	if err := chromedp.Run(ctx,
+		chromedp.Text(`#updates-body`, &updatesBody, chromedp.ByQuery),
+		chromedp.Text(`#updates-page-status`, &pagerText, chromedp.ByQuery),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(updatesBody, "Store update status is unknown") || strings.Contains(pagerText, "Store status unknown") {
+		t.Fatalf("empty update queue should not imply unknown update status; body=%q pager=%q", updatesBody, pagerText)
+	}
+	if strings.Contains(updatesBody, "Store Diagnostic App") {
+		t.Fatalf("diagnostic-only Store package should stay out of Updates Available:\n%s", updatesBody)
+	}
+}
+
 func TestBrowserAppUpdatePromptDismissesPerVersion(t *testing.T) {
 	app := updater.NewBrowserTestApp()
 	var dismissedVersion atomic.Value
