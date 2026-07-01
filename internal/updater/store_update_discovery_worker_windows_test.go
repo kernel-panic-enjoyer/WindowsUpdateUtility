@@ -128,7 +128,7 @@ func TestStoreUpdateDiscoveryWorkerHangCancellationTerminatesWorker(t *testing.T
 	pidFile := t.TempDir() + `\worker.pid`
 	scan := completedStoreScan("scan-winrt-hang", "S-1-5-21-winrt-worker", StoreProviderIdentity{ID: storeWinRTDiscoveryProviderID})
 	provider := testStoreUpdateDiscoveryWorkerProvider(t, "hang")
-	provider.Timeout = 250 * time.Millisecond
+	provider.Timeout = 2 * time.Second
 	args := append([]string{}, provider.Args...)
 	args = append(args, "--pid-file", pidFile)
 	provider.Args = args

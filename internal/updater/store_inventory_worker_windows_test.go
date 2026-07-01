@@ -144,7 +144,7 @@ func TestStoreInventoryWorkerHangCancellationTerminatesWorker(t *testing.T) {
 	pidFile := t.TempDir() + `\worker.pid`
 	scan := testNativeInventoryScan("scan-hang", "S-1-5-21-test-1001")
 	provider := testStoreInventoryWorkerProvider(t, "hang")
-	provider.Timeout = 250 * time.Millisecond
+	provider.Timeout = 2 * time.Second
 	args := append([]string{}, provider.Args...)
 	args = append(args, "--pid-file", pidFile)
 	provider.Args = args

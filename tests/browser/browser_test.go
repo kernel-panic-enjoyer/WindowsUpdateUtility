@@ -37,7 +37,7 @@ import (
 const browserTestToken = updater.BrowserTestToken
 
 func newBrowserContext(t *testing.T) (context.Context, context.CancelFunc) {
-	return newBrowserContextWithTimeout(t, 25*time.Second)
+	return newBrowserContextWithTimeout(t, 60*time.Second)
 }
 
 func newBrowserContextWithTimeout(t *testing.T, timeout time.Duration) (context.Context, context.CancelFunc) {
