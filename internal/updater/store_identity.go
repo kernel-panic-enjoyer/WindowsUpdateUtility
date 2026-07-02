@@ -2,6 +2,9 @@ package updater
 
 import "strings"
 
+// stableStoreActionID strips a package full name down to a stable package-name
+// key only for scan/app preference bookkeeping. It must not be used as Store
+// update identity; update evidence is bound by StoreInstalledIdentity instead.
 func stableStoreActionID(actionID string) string {
 	actionID = strings.TrimSpace(actionID)
 	if packageName, _, ok := strings.Cut(actionID, "_"); ok && strings.Contains(packageName, ".") {

@@ -35,6 +35,9 @@ var (
 	errStoreUpdateDiscoveryUnsupportedContext = errors.New("WinRT Store update discovery requires the non-elevated interactive user context")
 )
 
+// storeUpdateDiscoveryWorkerProvider isolates AppInstallManager discovery in a
+// same-binary worker for the same reason as Store inventory: the parent must be
+// able to kill WinRT work that ignores cancellation or blocks an OS thread.
 type storeUpdateDiscoveryWorkerProvider struct {
 	Executable         string
 	Args               []string
@@ -230,6 +233,9 @@ func runStoreUpdateDiscoveryWorkerFromArgs() int {
 	return runStoreUpdateDiscoveryWorker(os.Stdin, os.Stdout, os.Stderr, winrtStoreUpdateDiscoveryProvider{})
 }
 
+// runStoreUpdateDiscoveryWorker exposes exactly one internal operation:
+// current-user Store update discovery. It rejects interactive use and receives
+// only bounded PFN/ProductID candidates plus scan metadata over stdin.
 func runStoreUpdateDiscoveryWorker(input io.Reader, output io.Writer, diagnostics io.Writer, provider winrtStoreUpdateDiscoveryProvider) int {
 	request, err := decodeStoreUpdateDiscoveryWorkerRequest(input)
 	if err != nil {
@@ -420,6 +426,9 @@ func enumerateWinRTStoreUpdates(ctx context.Context, userSID string, candidates 
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
+	// Why: InstallControl must be called from the interactive user's WinRT
+	// context. Running it here avoids depending on the Microsoft Store app UI
+	// while preserving the same SID/PFN identity model as inventory.
 	if err := winrtInitialize(); err != nil {
 		return nil, err
 	}

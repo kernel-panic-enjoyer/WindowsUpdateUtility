@@ -18,6 +18,10 @@ type storePublishedAssessmentFreshness struct {
 	Reason string
 }
 
+// evaluatePublishedStoreAssessmentFreshness is the read-time authorization
+// gate for persisted Store evidence. A published positive is still stale if it
+// came from fallback recovery, outlived the freshness window, or no longer
+// matches the currently installed PFN version.
 func evaluatePublishedStoreAssessmentFreshness(snapshot StoreScanSnapshot, assessment StorePublishedAssessment, currentInstalledVersion string, now time.Time) storePublishedAssessmentFreshness {
 	now = now.UTC()
 	if now.IsZero() {
@@ -76,6 +80,8 @@ func stalePublishedStoreAssessmentFreshness(reason string) storePublishedAssessm
 }
 
 func staleStoreAssessmentProjection(assessment StorePublishedAssessment, reason string) StorePublishedAssessment {
+	// Why: stale Store evidence remains useful diagnostics, but clearing the
+	// exact target keeps it out of update selection and execution paths.
 	assessment.Stale = true
 	assessment.ExactActionTargetAvailable = false
 	if reason != "" {

@@ -10,6 +10,9 @@ import (
 	"time"
 )
 
+// StoreScanSnapshot is immutable Store evidence for one current-user scan
+// generation. It is persisted separately from state.json and package-manager
+// inventory so old Store facts can be audited without mutating the base cache.
 type StoreScanSnapshot struct {
 	SchemaVersion int  `json:"schema_version"`
 	Published     bool `json:"published"`
@@ -23,6 +26,9 @@ type StoreScanSnapshot struct {
 	Assessments           []StorePublishedAssessment `json:"assessments"`
 }
 
+// StorePublishedAssessment is the only Store scan result projected into the
+// package inventory. ExactActionTargetAvailable is intentionally separate from
+// State because a visible positive without a verified target is not executable.
 type StorePublishedAssessment struct {
 	StoreUpdateAssessment
 	ObservedAt                 time.Time
@@ -33,6 +39,9 @@ type StorePublishedAssessment struct {
 	Applicability              string
 }
 
+// StoreScanRepository persists immutable Store scan generations and tracks
+// which one is authoritative. Older generations may remain for diagnostics, but
+// only the repository's published snapshot is eligible for inventory overlay.
 type StoreScanRepository interface {
 	PersistCompletedScanSnapshot(context.Context, StoreScanSnapshot) (bool, error)
 	LoadLatestPublishedSnapshot(context.Context, string) (StoreScanSnapshot, bool, error)
@@ -170,6 +179,9 @@ func validateStoreScanSnapshot(snapshot StoreScanSnapshot) error {
 			return errors.New("Store scan snapshot contains cross-user or cross-generation assessment")
 		}
 		if assessment.ExactActionTargetAvailable && !storeAssessmentExactTargetValid(assessment) {
+			// Why: an assessment may be stored for diagnostics without an action
+			// target, but an executable target must round-trip as the same exact
+			// SID/PFN/ProductID or update ID.
 			return errors.New("Store scan snapshot contains unverifiable exact action target")
 		}
 	}

@@ -15,6 +15,9 @@ const (
 	storeUpdateAcceptedNotVerifiedCode = 202
 )
 
+// StoreExactUpdateRequest is the execution contract for a Store package. It is
+// built from a published Store assessment, not from UI text, so execution can
+// re-check the same SID/PFN, scan generation, and exact target before running.
 type StoreExactUpdateRequest struct {
 	Identity                StoreInstalledIdentity
 	ProductID               string
@@ -72,6 +75,10 @@ type StorePackageEventSource interface {
 	Subscribe(context.Context, StoreInstalledIdentity) (<-chan StorePackageChangeEvent, func(), error)
 }
 
+// StoreExactUpdateExecutor runs a Store update only after fresh exact evidence
+// exists, then verifies the result with current-user inventory and a targeted
+// catalog check. A successful command alone is accepted-but-unverified, not
+// success.
 type StoreExactUpdateExecutor struct {
 	Runner    StoreExactUpdateActionRunner
 	Inventory StoreExactInventoryProvider
@@ -138,6 +145,12 @@ func (executor StoreExactUpdateExecutor) ExecuteWithCallbacks(ctx context.Contex
 	}
 
 	preActionSnapshot, preActionResult := executor.Inventory.Snapshot(ctx, request.Identity)
+	// Why: Store can update packages outside this app. If the exact PFN is
+	// already newer before we execute, another Store command would be redundant
+	// and may fail with a misleading "no longer matches" error.
+	if alreadyUpdatedResult, alreadyUpdated := storeAlreadyUpdatedBeforeActionResult(request, preActionSnapshot, preActionResult); alreadyUpdated {
+		return alreadyUpdatedResult
+	}
 	if err := validateStorePreActionSnapshot(request, preActionSnapshot, preActionResult); err != nil {
 		result := validationCommandResult("store exact update", err)
 		return appendStoreExecutionDiagnostic(result, "pre-action", preActionSnapshot, preActionResult)
@@ -261,6 +274,9 @@ func (executor StoreExactUpdateExecutor) verifyAcceptedActionWithEvents(ctx cont
 				continue
 			}
 			seenEventKeys[eventKey] = true
+			// Why: PackageCatalog events are only a wake-up signal. They never
+			// prove success by themselves; the loop immediately re-enumerates the
+			// exact package and targeted catalog state before returning success.
 			verificationResult.Stdout = appendDiagnosticLine(verificationResult.Stdout, "PackageCatalog event received for exact Store package; refreshing inventory and catalog.")
 		case <-ticker.C:
 		}
@@ -352,6 +368,9 @@ func verifyPublishedStoreUpdateAssessment(ctx context.Context, request StoreExac
 		if assessment.State != StoreUpdateAvailable || assessment.Stale || !assessment.ExactActionTargetAvailable {
 			return errors.New("published Store assessment is not a fresh exact available update")
 		}
+		// Why: API/UI flags can be stale or forged by a client. Execution uses
+		// the repository snapshot and current installed version as the final
+		// authorization boundary.
 		freshness := evaluatePublishedStoreAssessmentFreshness(snapshot, assessment, request.CurrentInstalledVersion, storeScanNow())
 		if !freshness.Fresh {
 			return fmt.Errorf("published Store assessment is not fresh: %s", freshness.Reason)
@@ -387,6 +406,9 @@ func storeSnapshotVerifiesUpdate(request StoreExactUpdateRequest, preActionSnaps
 	if !ok || versionComparison <= 0 {
 		return false, ""
 	}
+	// Why: Store package full names can change for servicing reasons. Version
+	// increase, and offered-version reach when known, is the direct success
+	// proof for an accepted Store update.
 	if storeAssessmentVersionKnown(request.OfferedVersion) {
 		offeredComparison, ok := compareStorePackageVersions(postActionSnapshot.Version, request.OfferedVersion)
 		if !ok || offeredComparison < 0 {
@@ -472,6 +494,31 @@ func validateStorePreActionSnapshot(request StoreExactUpdateRequest, preActionSn
 	return nil
 }
 
+func storeAlreadyUpdatedBeforeActionResult(request StoreExactUpdateRequest, preActionSnapshot StoreExactPackageSnapshot, preActionResult CommandResult) (CommandResult, bool) {
+	if !preActionResult.OK || !preActionSnapshot.Identity.Equal(request.Identity) || !preActionSnapshot.Exists || !preActionSnapshot.Healthy {
+		return CommandResult{}, false
+	}
+	if !storeAssessmentVersionKnown(preActionSnapshot.Version) || !storeAssessmentVersionKnown(request.InstalledVersion) {
+		return CommandResult{}, false
+	}
+	installedComparison, ok := compareStorePackageVersions(preActionSnapshot.Version, request.InstalledVersion)
+	if !ok || installedComparison <= 0 {
+		return CommandResult{}, false
+	}
+	if storeAssessmentVersionKnown(request.OfferedVersion) {
+		offeredComparison, ok := compareStorePackageVersions(preActionSnapshot.Version, request.OfferedVersion)
+		if !ok || offeredComparison < 0 {
+			return CommandResult{}, false
+		}
+	}
+	result := CommandResult{
+		OK:      true,
+		Command: "store exact update",
+		Stdout:  "Store package was already updated before execution; no Store update command was run.",
+	}
+	return appendStoreExecutionDiagnostic(result, "pre-action", preActionSnapshot, preActionResult), true
+}
+
 func compareStorePackageVersions(left, right string) (int, bool) {
 	leftParts, ok := parseStorePackageVersion(left)
 	if !ok {
@@ -533,6 +580,9 @@ func storeCatalogVerifiesUpdate(request StoreExactUpdateRequest, preActionSnapsh
 	if !catalogEvidence.Authoritative || catalogEvidence.OfferAvailable || !catalogEvidence.InstalledHealthy || !postActionSnapshot.Exists || !postActionSnapshot.Healthy {
 		return false
 	}
+	// Why: the alternate success path is strict offer disappearance. It requires
+	// an authoritative targeted catalog query plus a still-installed healthy
+	// package, never just a command exit code or full-name-only change.
 	baselineVersion := storeUpdateVerificationBaselineVersion(request, preActionSnapshot)
 	if storeAssessmentVersionKnown(baselineVersion) {
 		comparison, ok := compareStorePackageVersions(postActionSnapshot.Version, baselineVersion)

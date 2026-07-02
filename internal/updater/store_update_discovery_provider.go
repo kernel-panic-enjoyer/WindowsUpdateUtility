@@ -41,6 +41,10 @@ const (
 	storeInstallTypeRepair  = "repair"
 )
 
+// storeWinRTDiscoveryCatalogProvider asks Windows Store InstallControl for
+// current-user update offers. It is an acceleration/evidence provider only:
+// output must still match exact installed PFNs and later pass normal Store
+// freshness and execution authorization.
 type storeWinRTDiscoveryCatalogProvider struct {
 	Discover               func(context.Context, StoreScanGeneration, []StorePackagedAppFamily, []storeUpdateDiscoveryCandidate) (storeUpdateDiscoveryWorkerResponse, CommandResult)
 	Now                    func() time.Time
@@ -158,6 +162,9 @@ func (provider storeWinRTDiscoveryCatalogProvider) Observe(ctx context.Context, 
 			Diagnostics:      storeWinRTDiscoveryDiagnostics(item),
 		}
 		if item.OfferAvailable && !item.QueueStatusOnly {
+			// Why: queue status such as paused/downloading is diagnostic. Only an
+			// InstallControl item that represents an update offer for the exact
+			// current-user PFN can produce an actionable target.
 			observation.Kind = StoreObservationPositiveUpdateOffer
 			observation.Target = &ExactStoreUpdateTarget{
 				Identity:   family.Identity,
@@ -262,6 +269,9 @@ func validateStoreUpdateDiscoveryWorkerResponse(scan StoreScanGeneration, respon
 	seen := map[string]bool{}
 	validated := make([]storeUpdateDiscoveryItem, 0, len(response.Items))
 	for _, item := range response.Items {
+		// Why: InstallControl data is still external input at the parent/worker
+		// boundary. Reject the whole response on protocol or shape errors, and
+		// ignore otherwise-valid PFNs that are not installed for this user.
 		normalized, err := normalizeStoreUpdateDiscoveryItem(item)
 		if err != nil {
 			return nil, err

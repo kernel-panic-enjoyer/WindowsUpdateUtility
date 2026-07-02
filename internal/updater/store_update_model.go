@@ -7,6 +7,9 @@ import (
 	"time"
 )
 
+// StoreInstalledIdentity is the only identity allowed to bind installed Store
+// inventory to update evidence. Display names, search results, and localized
+// labels are deliberately excluded because they can collide or change.
 type StoreInstalledIdentity struct {
 	UserSID           string `json:"user_sid"`
 	PackageFamilyName string `json:"package_family_name"`
@@ -163,6 +166,10 @@ func (target ExactStoreUpdateTarget) ExactFor(identity StoreInstalledIdentity) b
 		!target.VerifiedAt.IsZero()
 }
 
+// StoreProviderObservation is one provider's evidence for one exact installed
+// Store identity in one scan generation. Reconciliation only consumes
+// observations that match both SID/PFN and scan ID so cross-user or old evidence
+// cannot become actionable.
 type StoreProviderObservation struct {
 	Provider         StoreProviderIdentity         `json:"provider"`
 	Health           StoreProviderHealth           `json:"health"`
@@ -219,6 +226,10 @@ type StoreReconciliationInput struct {
 	Observations      []StoreProviderObservation
 }
 
+// ReconcileStoreUpdate reduces provider evidence to the single Store state the
+// rest of the app may display or act on. The conservative default is Unknown:
+// failures, incomplete coverage, stale evidence, missing exact targets, or
+// provider disagreement must never be converted into Current or Available.
 func ReconcileStoreUpdate(input StoreReconciliationInput) StoreUpdateAssessment {
 	assessment := StoreUpdateAssessment{
 		State:          StoreUpdateUnknown,
@@ -351,6 +362,9 @@ func negativeEvidenceCanYieldToExactPositive(exactUpdateOffers, authoritativeNeg
 	if len(authoritativeNegatives) == 0 {
 		return true
 	}
+	// Why: Store CLI and WinGet msstore can report aggregate/exact negatives
+	// while WinRT or another exact catalog path has fresher PFN evidence. Only
+	// known false-negative providers may yield, and only to an exact target.
 	if !hasExactCatalogPositiveOffer(exactUpdateOffers) {
 		return false
 	}
@@ -425,6 +439,9 @@ func reconcileExactStoreUpdateOffers(identity StoreInstalledIdentity, exactUpdat
 	if len(offers) == 0 {
 		return exactStoreUpdateOfferConsensus{}, fmt.Errorf("positive update evidence has no exact verified target")
 	}
+	// Why: multiple healthy providers may describe the same exact offer. We
+	// accept that only when Product ID, update target, and offered version do not
+	// contradict each other; otherwise the Store state remains a conflict.
 	sort.SliceStable(offers, func(i, j int) bool {
 		return exactStoreUpdateOfferSortKey(offers[i]) < exactStoreUpdateOfferSortKey(offers[j])
 	})

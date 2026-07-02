@@ -29,6 +29,10 @@ var (
 	storeScanCurrentUserSID    = currentUserSID
 )
 
+// StoreCatalogProvider supplies Store update evidence for already-installed
+// current-user package families. Providers are evidence sources only; the
+// reconciler decides whether their output is authoritative enough to display or
+// execute an update.
 type StoreCatalogProvider interface {
 	Identity() StoreProviderIdentity
 	Observe(context.Context, StoreScanGeneration, []StorePackagedAppFamily) StoreCatalogProviderRun
@@ -50,6 +54,9 @@ type StoreCatalogProviderRun struct {
 	PositiveUpdateHint bool `json:"-"`
 }
 
+// StoreScanPipeline owns one complete Store assessment generation. It joins
+// current-user AppX inventory with Store catalog/discovery providers, persists
+// immutable evidence, and never mutates the base package-manager inventory.
 type StoreScanPipeline struct {
 	Repository        StoreScanRepository
 	InventoryProvider StorePackagedAppInventoryProvider
@@ -159,6 +166,9 @@ func (pipeline *StoreScanPipeline) Run(ctx context.Context) (StoreScanResult, er
 	inventory, inventoryRun := pipeline.collectInventory(ctx, scan)
 	previousSnapshot, previousFound, err := pipeline.previousSnapshot(ctx, userSID)
 	if err != nil {
+		// Why: hysteresis relies on the prior published snapshot. If it cannot
+		// be loaded, returning diagnostics without publishing prevents a new
+		// generation from accidentally clearing or replacing authoritative state.
 		scan.CompletedAt = pipeline.now()
 		scan.ProviderHealth = providerHealthMap([]StoreCatalogProviderRun{inventoryRun})
 		scan.ProviderVersions = providerVersionMap([]StoreCatalogProviderRun{inventoryRun})
@@ -340,6 +350,10 @@ func synthesizeMissingProviderObservations(scan StoreScanGeneration, run StoreCa
 	if run.Provider.Key() == storeWinRTDiscoveryProviderID {
 		return run
 	}
+	// Why: a failed required provider is package-level evidence for every
+	// product-like family it should have covered. Recording explicit incomplete
+	// observations keeps Unknown visible without pretending the packages are
+	// Current.
 	kind := observationKindForProviderHealth(run.Health)
 	seen := map[string]bool{}
 	for _, observation := range run.Observations {
@@ -465,6 +479,9 @@ func (pipeline *StoreScanPipeline) planExactWork(ctx context.Context, scan Store
 			continue
 		}
 		if mapping, ok := reusableMappings[family.Identity]; ok {
+			// Why: aggregate Store output can say "an update exists" without an
+			// executable target. A reused mapping is accepted only when it was
+			// verified for the same SID/PFN fingerprint and provider version.
 			plan.mappingsReused++
 			plan.mappingReuseRun = appendMappingReuseObservation(scan, plan.mappingReuseRun, family, mapping, observation)
 			continue
@@ -476,6 +493,9 @@ func (pipeline *StoreScanPipeline) planExactWork(ctx context.Context, scan Store
 		plan.stateCheckPFNs[key] = true
 	}
 	if displayOnlyPositiveHint || aggregateNegativeGuard {
+		// Why: display-only positives and known false-negative aggregate output
+		// are planner signals, not evidence. They expand exact PFN checks but do
+		// not directly create actionable update rows.
 		for _, family := range byPFN {
 			key := strings.ToLower(family.Identity.PackageFamilyName)
 			planned[key] = true
@@ -745,6 +765,9 @@ func sanitizeCatalogProviderRun(scan StoreScanGeneration, run StoreCatalogProvid
 			observation.Provider = run.Provider
 		}
 		if observation.ScanID != scan.ScanID || observation.Identity.UserSID != scan.UserSID || !observation.Identity.Resolved() {
+			// Why: Store state is scoped to a user and scan generation. Partial
+			// trust after a provider returns cross-user or cross-scan evidence
+			// would let old or unrelated Store state authorize updates.
 			run.Health = StoreProviderFailed
 			run.Error = firstNonEmpty(run.Error, "provider returned cross-user, cross-scan, or unresolved evidence")
 			continue
@@ -928,6 +951,9 @@ func reconcileStoreScanAssessments(scan StoreScanGeneration, families []StorePac
 			Observations:      observations,
 		})
 		if previousAssessment, ok := previous[identity]; ok && shouldRetainPreviousPositive(scan, assessment) && !hasCurrentHealthyRetraction(scan, identity, providerRuns) {
+			// Why: incomplete scans should not erase a previously seen positive,
+			// but retained evidence is marked stale so it stays diagnostic and
+			// cannot authorize Store execution.
 			assessment.State = StoreUpdateAvailable
 			assessment.Reason = "retained previous positive update because the latest scan was incomplete"
 			assessment.AvailableVersion = previousAssessment.AvailableVersion

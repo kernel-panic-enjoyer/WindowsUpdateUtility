@@ -34,6 +34,10 @@ var (
 	iidPackageCatalogUpdatingHandler      = mustWindowsGUID("{C23E15F6-C618-522A-82AB-4FAB36665CE5}")
 )
 
+// packageCatalogEventSource subscribes to current-user PackageCatalog changes
+// only to shorten Store post-action verification latency. Events are never
+// update proof; they must match the exact PFN and only trigger a fresh
+// inventory/catalog check.
 type packageCatalogEventSource struct{}
 
 func (packageCatalogEventSource) Subscribe(ctx context.Context, identity StoreInstalledIdentity) (<-chan StorePackageChangeEvent, func(), error) {
@@ -41,6 +45,9 @@ func (packageCatalogEventSource) Subscribe(ctx context.Context, identity StoreIn
 		return nil, nil, errors.New("PackageCatalog subscription requires exact Store identity")
 	}
 	if isAdmin() {
+		// Why: Store inventory and PackageCatalog are user-scoped. An elevated
+		// alternate administrator token would observe the wrong Store account and
+		// could leak cross-user evidence into verification.
 		return nil, nil, errors.New("PackageCatalog subscription requires the non-elevated interactive user context")
 	}
 	userSID, err := currentUserSID()
@@ -314,6 +321,8 @@ func packageCatalogEventHandlerInvoke(this unsafe.Pointer, sender unsafe.Pointer
 	if err != nil {
 		return 0
 	}
+	// Why: events are a best-effort acceleration signal. Dropping a full channel
+	// is safe because verification keeps polling exact inventory and catalog.
 	select {
 	case handler.events <- event:
 	default:

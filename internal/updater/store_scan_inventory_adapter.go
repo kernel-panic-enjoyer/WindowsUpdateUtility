@@ -78,6 +78,10 @@ func applyPublishedStoreScanAssessments(ctx context.Context, state State, invent
 	return loadLatestPublishedStoreProjection(ctx, state, inventory, time.Time{}).Inventory
 }
 
+// loadLatestPublishedStoreProjection overlays the latest published Store scan
+// onto a deep-copied manager inventory. The cached base inventory remains
+// manager/native truth; Store assessments are a read-time projection with their
+// own freshness and authorization rules.
 func loadLatestPublishedStoreProjection(ctx context.Context, state State, inventory Inventory, freshAfter time.Time) StoreInventoryProjectionResult {
 	inventory = applyStateAndCapabilitiesToInventory(state, inventory.DeepCopy())
 	result := StoreInventoryProjectionResult{Inventory: inventory}
@@ -211,6 +215,9 @@ func applyPublishedStoreAssessmentsToInventory(state State, inventory Inventory,
 		key := strings.ToLower(pfn)
 		index, ok := byPFN[key]
 		if !ok {
+			// Why: Store-native AppX inventory can contain current-user packages
+			// absent from winget/choco inventory. Projection may add them to the
+			// UI, but only fresh exact assessments can make them actionable.
 			assessment = assessmentForInventoryProjection(snapshot, assessment, "", now)
 			pkg := packageFromPublishedStoreAssessment(state, assessment, families[key], scanProviders)
 			inventory.Packages = append(inventory.Packages, pkg)
@@ -280,6 +287,9 @@ func applyPublishedStoreAssessmentToPackage(pkg Package, assessment StorePublish
 	pkg.OfferedVersion = assessment.AvailableVersion
 	pkg.Applicability = assessment.Applicability
 	pkg.ProviderSummaries = providerSummariesFromEvidence(assessment.Evidence, assessment.ObservedAt, scanProviders)
+	// Why: UI flags mirror backend authorization, but they are not the security
+	// boundary. Store execution revalidates the published assessment and exact
+	// target before running any update command.
 	pkg.UpdateAvailable = assessment.State == StoreUpdateAvailable && !assessment.Stale && assessment.ExactActionTargetAvailable
 	pkg.AvailableVersion = assessment.AvailableVersion
 	if !pkg.UpdateAvailable && assessment.State != StoreUpdatePending {

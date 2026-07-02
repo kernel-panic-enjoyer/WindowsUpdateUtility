@@ -28,6 +28,10 @@ const (
 	storeInventoryWorkerMaxStringBytes  = 4096
 )
 
+// storeInventoryWorkerProvider isolates current-user WinRT packaged-app
+// enumeration in a same-binary child process. Some WinRT/COM calls can block an
+// OS thread; the parent owns the child with a kill-on-close Job Object so
+// cancellation does not strand the long-running WebUI process.
 type storeInventoryWorkerProvider struct {
 	Executable         string
 	Args               []string
@@ -231,6 +235,9 @@ func runStoreInventoryWorkerFromArgs() int {
 	return runStoreInventoryWorker(os.Stdin, os.Stdout, os.Stderr, winrtStorePackagedAppInventoryProvider{})
 }
 
+// runStoreInventoryWorker accepts only the versioned inventory protocol over
+// stdin/stdout. It intentionally has no arguments for commands, package
+// operations, paths, or generic COM activation.
 func runStoreInventoryWorker(input io.Reader, output io.Writer, diagnostics io.Writer, provider winrtStorePackagedAppInventoryProvider) int {
 	request, err := decodeStoreInventoryWorkerRequest(input)
 	if err != nil {
@@ -390,6 +397,9 @@ func inventoryFromStoreInventoryWorkerResponse(scan StoreScanGeneration, respons
 	seenFamilies := map[StoreInstalledIdentity]bool{}
 	records := []StorePackagedAppRecord{}
 	for _, family := range response.PackageFamilies {
+		// Why: worker output is not trusted just because it came from our
+		// executable. The parent revalidates SID, PFN, full name, architecture,
+		// duplicates, and bounded strings before using any inventory evidence.
 		if !strings.EqualFold(family.Identity.UserSID, scan.UserSID) {
 			return StorePackagedAppInventory{}, fmt.Errorf("Store inventory worker family user SID mismatch for %q", family.Identity.PackageFamilyName)
 		}

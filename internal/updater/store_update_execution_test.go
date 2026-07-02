@@ -27,6 +27,28 @@ func TestStoreExactUpdateVerifiesVersionChange(t *testing.T) {
 	}
 }
 
+func TestStoreExactUpdateAlreadyUpdatedBeforeActionSucceedsWithoutRunning(t *testing.T) {
+	targets := []string{}
+	executor := testStoreExactExecutor(
+		fakeStoreExactRunner{targets: &targets, result: CommandResult{OK: true, Command: "store update 9NCODEX", Stdout: "accepted"}},
+		&fakeStoreExactInventory{snapshots: []StoreExactPackageSnapshot{
+			testStoreExactSnapshot("1.1.0", "OpenAI.Codex_1.1.0_x64__abc123", true),
+		}},
+		fakeStoreExactCatalog{},
+		fakeStoreEvents{},
+	)
+	result := executeStoreExactUpdateForTest(t, executor, testExactStorePackage())
+	if !result.OK {
+		t.Fatalf("expected already-updated Store package to succeed, got %#v", result)
+	}
+	if len(targets) != 0 {
+		t.Fatalf("already-updated Store package must not run another update command, targets=%#v", targets)
+	}
+	if !strings.Contains(result.Stdout, "already updated") {
+		t.Fatalf("expected already-updated diagnostic, got %#v", result)
+	}
+}
+
 func TestStoreExactUpdatePrefersProductIDWhenProviderUpdateIDPresent(t *testing.T) {
 	targets := []string{}
 	executor := testStoreExactExecutor(
