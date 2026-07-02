@@ -612,3 +612,17 @@ func TestSearchResultsSourceUsesInstalledPackageBadge(t *testing.T) {
 		t.Fatal("search results source column should reuse manager badges instead of free-text source labels")
 	}
 }
+
+func TestStaleConnectionWatchdogFallsBackWithoutReload(t *testing.T) {
+	for _, expected := range []string{
+		`function closeEventStream()`,
+		`function backendContactIsFresh()`,
+		`function scheduleLogPolling(delayOverride)`,
+		`closeEventStream();`,
+		`scheduleLogPolling(0);`,
+	} {
+		if !strings.Contains(uiJS, expected) {
+			t.Fatalf("expected stale connection recovery support to contain %q", expected)
+		}
+	}
+}

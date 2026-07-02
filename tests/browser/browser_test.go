@@ -262,6 +262,58 @@ func TestBrowserConnectionBadgeExpiresWhenBackendStops(t *testing.T) {
 	}
 }
 
+func TestBrowserConnectionBadgeRecoversFromSilentEventStream(t *testing.T) {
+	app := updater.NewBrowserTestApp()
+	var logPolls atomic.Int32
+	var countLogPolls atomic.Bool
+	server := startBrowserTestServerWithRoutes(t, app, map[string]http.HandlerFunc{
+		"/api/events": func(w http.ResponseWriter, r *http.Request) {
+			if !authenticateBrowserTestRequest(app, w, r) {
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprint(w, "event: heartbeat\ndata: {\"latest_id\":0}\n\n")
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			<-r.Context().Done()
+		},
+		"/api/logs": func(w http.ResponseWriter, r *http.Request) {
+			if countLogPolls.Load() {
+				logPolls.Add(1)
+			}
+			writeAuthenticatedBrowserTestJSON(app, w, r, http.StatusOK, map[string]any{
+				"entries":   []any{},
+				"latest_id": 0,
+			})
+		},
+	})
+	ctx, cancel := newBrowserContextWithTimeout(t, 45*time.Second)
+	defer cancel()
+
+	navigateAuthenticated(t, ctx, server.URL)
+	waitForText(t, ctx, `#log-connection-status`, "Connected")
+	countLogPolls.Store(true)
+	logPolls.Store(0)
+
+	var text string
+	err := chromedp.Run(ctx,
+		chromedp.Sleep(16*time.Second),
+		chromedp.Poll(`(() => document.querySelector("#log-connection-status")?.innerText.includes("Connected"))()`, nil, chromedp.WithPollingInterval(100*time.Millisecond), chromedp.WithPollingTimeout(8*time.Second)),
+		chromedp.Text(`#log-connection-status`, &text, chromedp.ByQuery),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if polls := logPolls.Load(); polls == 0 {
+		t.Fatalf("silent EventSource did not fall back to log polling; badge=%q", text)
+	}
+	if !strings.Contains(text, "Connected") {
+		t.Fatalf("connection badge did not recover after log polling fallback: %q", text)
+	}
+}
+
 func TestBrowserWingetLogTabSurvivesStoreFlood(t *testing.T) {
 	app := updater.NewBrowserTestApp()
 	logPayload := browserLogFloodPayload(t)

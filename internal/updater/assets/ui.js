@@ -393,6 +393,9 @@
     target.classList.toggle("warn", state === "reconnecting");
     target.classList.toggle("error", state === "disconnected");
   }
+  function backendContactIsFresh(){
+    return !!lastBackendContactAt && Date.now() - lastBackendContactAt < connectionStaleAfterMs;
+  }
   function markBackendContact(message){
     lastBackendContactAt = Date.now();
     setLogConnectionState("connected", message || "Connected");
@@ -415,7 +418,9 @@
     connectionWatchdogTimer = null;
     if(!lastBackendContactAt){ return; }
     if(Date.now() - lastBackendContactAt >= connectionStaleAfterMs){
-      setLogConnectionState("reconnecting", "Reconnecting to backend");
+      markBackendReconnecting("Reconnecting to backend");
+      closeEventStream();
+      scheduleLogPolling(0);
       return;
     }
     scheduleConnectionWatchdog();
@@ -432,7 +437,9 @@
   }
   async function loadLogs(){
     try{
-      setLogConnectionState("reconnecting", "Reconnecting to backend");
+      if(!backendContactIsFresh()){
+        setLogConnectionState("reconnecting", "Reconnecting to backend");
+      }
       var response = await fetch(api("/api/logs", {since:String(lastLogID)}));
       var data = await response.json();
       if(!response.ok){ throw new Error(data.error || "Log polling failed"); }
@@ -451,8 +458,9 @@
       logPollDelay = Math.min(15000, Math.round(logPollDelay * 1.6));
     }
   }
-  function scheduleLogPolling(){
+  function scheduleLogPolling(delayOverride){
     if(logPollTimer || eventStream){ return; }
+    var delay = typeof delayOverride === "number" ? Math.max(0, delayOverride) : logPollDelay;
     logPollTimer = setTimeout(async function(){
       logPollTimer = null;
       if(document.hidden){
@@ -461,12 +469,18 @@
       }
       await loadLogs();
       scheduleLogPolling();
-    }, logPollDelay);
+    }, delay);
   }
   function stopLogPolling(){
     if(logPollTimer){
       clearTimeout(logPollTimer);
       logPollTimer = null;
+    }
+  }
+  function closeEventStream(){
+    if(eventStream){
+      eventStream.close();
+      eventStream = null;
     }
   }
   function startEventStream(){
@@ -475,7 +489,7 @@
       return;
     }
     stopLogPolling();
-    if(eventStream){ eventStream.close(); }
+    closeEventStream();
     setLogConnectionState("reconnecting", "Connecting");
     eventStream = new EventSource(api("/api/events", {since:String(lastLogID)}));
     eventStream.onopen = function(){
@@ -509,10 +523,7 @@
     });
     eventStream.onerror = function(){
       markBackendReconnecting("Reconnecting to backend");
-      if(eventStream){
-        eventStream.close();
-        eventStream = null;
-      }
+      closeEventStream();
       scheduleLogPolling();
     };
   }
