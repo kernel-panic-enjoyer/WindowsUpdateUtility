@@ -580,3 +580,35 @@ func TestUIConsistencyLabelsAndHealthFallbacks(t *testing.T) {
 		t.Fatalf("expected exactly one packageByKey implementation")
 	}
 }
+
+func TestDirectInstallCompletionToastIsCallerOwned(t *testing.T) {
+	for _, expected := range []string{
+		`var callerHandledCompletionJobIDs = {};`,
+		`function markJobCompletionHandledByCaller(jobID)`,
+		`function jobCompletionHandledByCaller(jobID)`,
+		`if(jobCompletionHandledByCaller(job.job_id)){`,
+		`completedJobIDs[job.job_id] = true;`,
+	} {
+		if !strings.Contains(uiJS, expected) {
+			t.Fatalf("expected direct install toast ownership support to contain %q", expected)
+		}
+	}
+	if count := strings.Count(uiJS, `markJobCompletionHandledByCaller(payload.job_id);`); count != 2 {
+		t.Fatalf("expected package and manager install flows to claim their job toast, count=%d", count)
+	}
+}
+
+func TestSearchResultsSourceUsesInstalledPackageBadge(t *testing.T) {
+	for _, expected := range []string{
+		`function searchSourceCell(pkg)`,
+		`return managerCell(pkg || {}, {compact:true});`,
+		`<td>' + searchSourceCell(pkg) + '</td>`,
+	} {
+		if !strings.Contains(uiJS, expected) {
+			t.Fatalf("expected search results source badge support to contain %q", expected)
+		}
+	}
+	if strings.Contains(uiJS, `<td>' + html(sourceLabel(pkg.source || pkg.manager)) + '</td>`) {
+		t.Fatal("search results source column should reuse manager badges instead of free-text source labels")
+	}
+}

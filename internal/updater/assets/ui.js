@@ -41,6 +41,7 @@
   var jobsInitialized = false;
   var serverJobs = [];
   var completedJobIDs = {};
+  var callerHandledCompletionJobIDs = {};
   var completedUpdateKeys = {};
   var activeUpdateKeys = [];
   var activeUpdateJobID = "";
@@ -1328,11 +1329,14 @@
     var name = pkg.name || "Store app";
     return '<div class="package-name-cell"><strong title="' + attr(name) + '">' + html(name) + '</strong><span class="muted" title="' + attr(secondary) + '">' + html(secondary) + '</span></div>';
   }
-	function managerCell(pkg, options){
+  function managerCell(pkg, options){
     options = options || {};
 		var backend = (!options.compact && pkg.action_backend) ? '<br><span class="muted">' + html(backendLabel(pkg.action_backend)) + '</span>' : '';
 		return '<span class="badge manager-badge">' + html(managerLabel(pkg.manager)) + '</span>' + backend;
 	}
+  function searchSourceCell(pkg){
+    return managerCell(pkg || {}, {compact:true});
+  }
   function autoButton(pkg){
     if(!pkg.preference_eligible){
       return '<span class="muted">N/A</span>';
@@ -1734,7 +1738,7 @@
     var page = pagedItems(searchResults, searchPage, searchPageSize);
     searchPage = page.page;
     body.innerHTML = page.items.map(function(pkg){
-      return '<tr><td><strong>' + html(pkg.name) + '</strong></td><td>' + html(sourceLabel(pkg.source || pkg.manager)) + '</td><td><code class="package-id">' + html(pkg.id) + '</code></td><td>' + searchMatchCell(pkg) + '</td><td>' + html(pkg.version || "") + '</td><td>' + searchActionCell(pkg) + '</td></tr>';
+      return '<tr><td><strong>' + html(pkg.name) + '</strong></td><td>' + searchSourceCell(pkg) + '</td><td><code class="package-id">' + html(pkg.id) + '</code></td><td>' + searchMatchCell(pkg) + '</td><td>' + html(pkg.version || "") + '</td><td>' + searchActionCell(pkg) + '</td></tr>';
     }).join("");
     renderPager(page, status, prev, next);
   }
@@ -1896,6 +1900,13 @@
   function jobComplete(status){
     return status && !status.running && ["queued","starting","running","accepted","verifying","refreshing"].indexOf(status.state) === -1;
   }
+  function markJobCompletionHandledByCaller(jobID){
+    jobID = String(jobID || "");
+    if(jobID){ callerHandledCompletionJobIDs[jobID] = true; }
+  }
+  function jobCompletionHandledByCaller(jobID){
+    return !!callerHandledCompletionJobIDs[String(jobID || "")];
+  }
   function waitUntilVisible(){
     if(!document.hidden){ return Promise.resolve(); }
     return new Promise(function(resolve){
@@ -2034,6 +2045,10 @@
         return;
       }
       if(completedJobIDs[job.job_id]){ return; }
+      if(jobCompletionHandledByCaller(job.job_id)){
+        completedJobIDs[job.job_id] = true;
+        return;
+      }
       completedJobIDs[job.job_id] = true;
       if(job.type === "update" || job.type === "update-all"){
         showUpdateJobToast(job);
@@ -2542,6 +2557,7 @@
       var response = await postForm("/api/install", new URLSearchParams(new FormData(form)));
       var payload = await response.json();
       if(!response.ok){ throw new Error(payload.error || "Install failed"); }
+      markJobCompletionHandledByCaller(payload.job_id);
       var finalStatus = await waitForJob(payload.job_id, function(status){
         setInstallProgress(true, status.notice || baseMessage);
       });
@@ -2570,6 +2586,7 @@
       var response = await postForm("/api/managers/install", new URLSearchParams(new FormData(form)));
       var payload = await response.json();
       if(!response.ok){ throw new Error(payload.error || "Package manager install failed"); }
+      markJobCompletionHandledByCaller(payload.job_id);
       var finalStatus = await waitForJob(payload.job_id, function(status){
         showNotice(status.notice || "Installing package manager...", true);
       });
